@@ -95,6 +95,28 @@ base eval/demo.sh
 base eval/eval.sh
 ```
 
+## Generate VideoMathQA Traces
+
+VideoMathQA benchmark:
+- Project page: https://mbzuai-oryx.github.io/VideoMathQA/
+- Dataset: https://huggingface.co/datasets/MBZUAI/VideoMathQA
+
+Generate traces:
+```bash
+cd eval
+bash gen.sh
+```
+
+Or run directly:
+```bash
+python generate_traces.py \
+  --benchmark_dir /path/to/VideoMathQA \
+  --output ./videomathqa_traces.json
+```
+
+Trace output location:
+- By default, traces are saved to `VideoDeepResearch/eval/videomathqa_traces.json`.
+
 ## Training
 
 Our training dataset is available at https://huggingface.co/datasets/avery00/VideoExplorer-Dataset/tree/main. To set up:
