@@ -64,9 +64,17 @@ def main():
     print("Loading sentence-transformer model...")
     model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
 
+    max_samples = None
+    if os.environ.get("MAX_SAMPLES"):
+        try:
+            max_samples = int(os.environ["MAX_SAMPLES"])
+        except ValueError:
+            pass
     results = []
     with open(input_file) as f:
         for i, line in enumerate(f):
+            if max_samples is not None and len(results) >= max_samples:
+                break
             sample = json.loads(line)
             sample = apply_experiment(sample, experiment)
             result = compute_metric(sample, model)

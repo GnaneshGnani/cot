@@ -1,6 +1,7 @@
 import os
 os.environ["HF_HUB_OFFLINE"] = "1" 
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
+from pathlib import Path
 from languagebind import LanguageBind, to_device, transform_dict, LanguageBindImageTokenizer, LanguageBindVideoTokenizer
 import torch
 import numpy as np
@@ -38,7 +39,20 @@ class Retrieval_Manager():
 
         self.model = LanguageBind(clip_type=clip_type, cache_dir='./model_cache')
 
-        self.text_retriever = BGEM3FlagModel('/share/data/drive_1/huggingface_cache/hub/models--BAAI--bge-m3/snapshots/5617a9f61b028005a4858fdac845db406aefb181/', use_fp16=True)
+        # Prefer an explicit local model path, then local HF cache snapshots, then repo id.
+        bge_model_path = os.getenv("BGE_M3_MODEL_PATH", "").strip()
+        if not bge_model_path:
+            hf_home = os.getenv("HF_HOME", "/fs/nexus-scratch/gnanesh/.cache/huggingface")
+            snapshots_dir = Path(hf_home) / "hub" / "models--BAAI--bge-m3" / "snapshots"
+            if snapshots_dir.exists():
+                snapshot_dirs = sorted([p for p in snapshots_dir.iterdir() if p.is_dir()])
+                if snapshot_dirs:
+                    bge_model_path = str(snapshot_dirs[-1])
+
+        if bge_model_path and Path(bge_model_path).exists():
+            self.text_retriever = BGEM3FlagModel(bge_model_path, use_fp16=True)
+        else:
+            self.text_retriever = BGEM3FlagModel("BAAI/bge-m3", use_fp16=True)
 
         self.model.eval()
 

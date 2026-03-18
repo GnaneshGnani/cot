@@ -1,6 +1,7 @@
 import cv2
 import decord
 import numpy as np
+import sys
 import torch
 from PIL import Image
 from decord import VideoReader, cpu
@@ -10,6 +11,13 @@ from transformers.image_processing_utils import BatchFeature
 from pytorchvideo.data.encoded_video import EncodedVideo
 from torchvision.transforms import Compose, Lambda, ToTensor
 from torchvision.transforms._transforms_video import NormalizeVideo, RandomCropVideo, RandomHorizontalFlipVideo, CenterCropVideo
+
+try:
+    import torchvision.transforms.functional_tensor  # type: ignore # noqa: F401
+except ModuleNotFoundError:
+    import torchvision.transforms._functional_tensor as _functional_tensor
+    sys.modules["torchvision.transforms.functional_tensor"] = _functional_tensor
+
 from pytorchvideo.transforms import ApplyTransformToKey, ShortSideScale, UniformTemporalSubsample
 
 decord.bridge.set_bridge('torch')

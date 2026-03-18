@@ -5,6 +5,11 @@ import sys
 
 import torch
 from experiment_utils import apply_experiment, get_experiment
+from prompts import (
+    M1_ANSWER_FAITHFULNESS_SYSTEM,
+    M1_ANSWER_FAITHFULNESS_USER_MCQ,
+    M1_ANSWER_FAITHFULNESS_USER_OPEN,
+)
 from transformers import Qwen2_5OmniThinkerForConditionalGeneration, Qwen2_5OmniProcessor
 
 def load_data(path, max_samples = None):
@@ -73,26 +78,15 @@ def build_prompt(sample):
     question = sample.get("question", "")
     options = sample.get("options") or []
     reasoning_steps = sample.get("reasoning_steps") or []
-
     trace_text = format_reasoning_trace(reasoning_steps)
     if options:
         option_text = "\n".join(options)
-        prompt = (
-            f"Given the following reasoning trace, predict the answer to the question. "
-            f"Do not include the answer in your reasoning.\n\n"
-            f"Reasoning trace:\n{trace_text}\n\n"
-            f"Question: {question}\n"
-            f"Options:\n{option_text}\n\n"
-            f"Answer with only the option letter (A, B, C, or D)."
+        return M1_ANSWER_FAITHFULNESS_USER_MCQ.format(
+            reasoning_trace=trace_text, question=question, options=option_text
         )
-    else:
-        prompt = (
-            f"Given the following reasoning trace, predict the answer to the question.\n\n"
-            f"Reasoning trace:\n{trace_text}\n\n"
-            f"Question: {question}\n\n"
-            f"Answer concisely."
-        )
-    return prompt
+    return M1_ANSWER_FAITHFULNESS_USER_OPEN.format(
+        reasoning_trace=trace_text, question=question
+    )
 
 
 def compute_af_score(predicted, ground_truth, correct_option, options):
@@ -117,16 +111,7 @@ def compute_af_score(predicted, ground_truth, correct_option, options):
 def compute_metric(sample, model, processor, device):
     prompt = build_prompt(sample)
     conversations = [
-        {
-            "role": "system",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "You are a helpful assistant. Given a reasoning trace and question, predict the answer based only on the trace.",
-                }
-            ],
-        },
-
+        {"role": "system", "content": [{"type": "text", "text": M1_ANSWER_FAITHFULNESS_SYSTEM}]},
         {"role": "user", "content": [{"type": "text", "text": prompt}]},
     ]
 
@@ -205,7 +190,13 @@ def main():
     )
 
     from pathlib import Path
-    samples = load_data(Path(input_file))
+    max_samples = None
+    if os.environ.get("MAX_SAMPLES"):
+        try:
+            max_samples = int(os.environ["MAX_SAMPLES"])
+        except ValueError:
+            pass
+    samples = load_data(Path(input_file), max_samples=max_samples)
 
     results = []
     for i, sample in enumerate(samples):

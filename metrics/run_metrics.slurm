@@ -29,11 +29,10 @@ mkdir -p results
 
 for exp in skip_last_step truncate_50 truncate_25 truncate_75 first_step_only evidence_only inferences_only vision_steps_only audio_steps_only; do
     echo "=== Experiment: $exp ==="
-    # python m8_modality_coverage.py $exp
-    # python m7_planning_presence.py $exp
-    # python m9_temporal_grounding.py $exp
-    # python m6_efficiency.py $exp
+    python m6_efficiency.py $exp
     python m1_answer_faithfulness.py $exp
-    # python m2_stepwise_relevance.py $exp
-    # python m3_causal_coherence.py $exp
+    python m2_stepwise_relevance.py $exp
+    python m3_causal_coherence.py $exp
+    python m4_completeness.py $exp
+    python m5_factual_accuracy.py $exp
 done

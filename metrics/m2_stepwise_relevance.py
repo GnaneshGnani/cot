@@ -6,6 +6,7 @@ import sys
 
 import torch
 from experiment_utils import apply_experiment, get_experiment
+from prompts import M2_STEPWISE_RELEVANCE_SYSTEM, M2_STEPWISE_RELEVANCE_USER
 from transformers import Qwen2_5OmniThinkerForConditionalGeneration, Qwen2_5OmniProcessor
 
 def load_data(path, max_samples = None):
@@ -80,12 +81,8 @@ def build_prompt(sample):
     reasoning_steps = sample.get("reasoning_steps") or []
     steps_text = format_steps(reasoning_steps)
     n = len(reasoning_steps)
-    return (
-        f"Question: {question}\n\n"
-        f"Reasoning steps:\n{steps_text}\n\n"
-        f"For each of the {n} steps, is it relevant to answering the question? "
-        f"Reply with exactly {n} comma-separated values: Yes or No for each step in order. "
-        f"Example: Yes,No,Yes,Yes"
+    return M2_STEPWISE_RELEVANCE_USER.format(
+        question=question, steps_text=steps_text, n=n
     )
 
 
@@ -96,15 +93,7 @@ def compute_metric(sample, model, processor, device):
 
     prompt = build_prompt(sample)
     conversations = [
-        {
-            "role": "system",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "You are a judge. Answer with only the requested format: comma-separated Yes/No.",
-                }
-            ],
-        },
+        {"role": "system", "content": [{"type": "text", "text": M2_STEPWISE_RELEVANCE_SYSTEM}]},
         {"role": "user", "content": [{"type": "text", "text": prompt}]},
     ]
 
@@ -168,7 +157,13 @@ def main():
     )
 
     from pathlib import Path
-    samples = load_data(Path(input_file))
+    max_samples = None
+    if os.environ.get("MAX_SAMPLES"):
+        try:
+            max_samples = int(os.environ["MAX_SAMPLES"])
+        except ValueError:
+            pass
+    samples = load_data(Path(input_file), max_samples=max_samples)
 
     results = []
     for i, sample in enumerate(samples):

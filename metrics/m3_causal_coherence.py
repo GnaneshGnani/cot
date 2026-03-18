@@ -6,6 +6,7 @@ import sys
 
 import torch
 from experiment_utils import apply_experiment, get_experiment
+from prompts import M3_CAUSAL_COHERENCE_SYSTEM, M3_CAUSAL_COHERENCE_USER
 from transformers import Qwen2_5OmniThinkerForConditionalGeneration, Qwen2_5OmniProcessor
 
 def load_data(path, max_samples = None):
@@ -84,13 +85,10 @@ def build_prompt(sample):
     n = len(reasoning_steps)
     if n < 2:
         return None, 0
-    return (
-        f"Question: {question}\n\n"
-        f"Reasoning steps:\n{steps_text}\n\n"
-        f"For each step from step 2 to step {n}, does it follow logically from the previous steps? "
-        f"Reply with exactly {n-1} comma-separated values: Yes, Partial, or No for each step in order. "
-        f"Example: Yes,Partial,No"
-    ), n - 1
+    prompt = M3_CAUSAL_COHERENCE_USER.format(
+        question=question, steps_text=steps_text, n=n, n_minus_1=n - 1
+    )
+    return prompt, n - 1
 
 
 def compute_metric(sample, model, processor, device):
@@ -103,15 +101,7 @@ def compute_metric(sample, model, processor, device):
         return {"step_coherence_scores": [], "ccc_score": 1.0, "total_steps": len(reasoning_steps)}
 
     conversations = [
-        {
-            "role": "system",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "You are a judge. Answer with only the requested format: comma-separated Yes/Partial/No.",
-                }
-            ],
-        },
+        {"role": "system", "content": [{"type": "text", "text": M3_CAUSAL_COHERENCE_SYSTEM}]},
         {"role": "user", "content": [{"type": "text", "text": prompt}]},
     ]
 
@@ -175,7 +165,13 @@ def main():
     )
 
     from pathlib import Path
-    samples = load_data(Path(input_file))
+    max_samples = None
+    if os.environ.get("MAX_SAMPLES"):
+        try:
+            max_samples = int(os.environ["MAX_SAMPLES"])
+        except ValueError:
+            pass
+    samples = load_data(Path(input_file), max_samples=max_samples)
 
     results = []
     for i, sample in enumerate(samples):

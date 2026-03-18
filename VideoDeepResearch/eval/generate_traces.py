@@ -1,5 +1,9 @@
 import os
 import sys
+
+# Must be set before any huggingface/vllm imports that resolve model paths
+os.environ.setdefault("HF_HOME", "/fs/nexus-scratch/gnanesh/.cache/huggingface")
+
 import json
 import re
 import time
@@ -163,6 +167,10 @@ class VideoQADemo:
         """设置环境变量"""
         os.environ["TOKENIZERS_PARALLELISM"] = "true"
         os.environ.setdefault("VLLM_USE_MODELSCOPE", "false")
+        # Avoid CUDA re-init issues when vLLM starts worker processes on Linux.
+        os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+        # flash_attn binary is ABI-incompatible with this torch build; use SDPA instead.
+        os.environ.setdefault("VLLM_ATTENTION_BACKEND", "XFORMERS")
         torch.backends.cuda.matmul.allow_tf32 = True
     
     def _setup_api_config(self):
@@ -177,11 +185,17 @@ class VideoQADemo:
     
     def _initialize_models(self):
         print("Initializing VLM model...")
+
+        # Default to single-GPU VLM unless the user explicitly requests TP>1.
+        print("Device Count:", torch.cuda.device_count())
+        tp_size = int(os.getenv("VLM_TENSOR_PARALLEL_SIZE", "1"))
+
         
+        gpu_mem_util = float(os.getenv("VLM_GPU_MEMORY_UTILIZATION", "0.4"))
         self.vlm_server = LLM(
             model=self.vlm_model_name,
-            gpu_memory_utilization=0.8,
-            tensor_parallel_size=torch.cuda.device_count(),
+            gpu_memory_utilization=gpu_mem_util,
+            tensor_parallel_size=tp_size,
             max_model_len=32768,
             enable_chunked_prefill=True,
             enforce_eager=True,
@@ -865,6 +879,8 @@ def main():
     ann_json = os.path.join(args.benchmark_dir, args.annotation_file)
     ann_jsonl = os.path.join(args.benchmark_dir, "annotations.jsonl")
     ann_path = ann_json if os.path.exists(ann_json) else ann_jsonl
+
+    print(ann_path)
 
     if not os.path.exists(ann_path):
         print(f"Error: annotation file not found under {args.benchmark_dir}")
