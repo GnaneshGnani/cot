@@ -324,7 +324,6 @@ class VideoQADemo:
     
     
     def _batch_video2text(self, tasks: list):
-        """批量处理视频片段（按batch送入vLLM）"""
         if not tasks:
             return []
         all_results = []
