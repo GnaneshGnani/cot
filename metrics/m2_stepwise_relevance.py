@@ -146,7 +146,7 @@ def compute_metric(sample, model, processor, device):
 def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = "/fs/nexus-scratch/gnanesh/cot"
-    input_file = os.path.join(project_root, "OmniVideoBench", "data_short_under1min.jsonl")
+    input_file = os.environ.get("DATA_PATH") or os.path.join(project_root, "OmniVideoBench", "data_short_under1min.jsonl")
     experiment = get_experiment()
     output_file = os.path.join(script_dir, "results", experiment, "m2_stepwise_relevance.jsonl")
     model_name = "Qwen/Qwen2.5-Omni-7B"
