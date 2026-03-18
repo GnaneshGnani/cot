@@ -174,7 +174,7 @@ class VideoQADemo:
         
         self.vlm_server = LLM(
             model=self.vlm_model_name,
-            gpu_memory_utilization=0.85,
+            gpu_memory_utilization=0.8,
             tensor_parallel_size=torch.cuda.device_count(),
             max_model_len=32768,
             enable_chunked_prefill=True,

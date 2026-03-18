@@ -43,6 +43,7 @@ import os
 import time
 import pickle
 import fcntl
+import shutil
 from pathlib import Path
 
 def safe_write_with_lock(data, file_path):
@@ -179,7 +180,7 @@ class VideoQADemo:
         
         self.vlm_server = LLM(
             model=self.vlm_model_name,
-            gpu_memory_utilization=0.85,
+            gpu_memory_utilization=0.8,
             tensor_parallel_size=torch.cuda.device_count(),
             max_model_len=32768,
             enable_chunked_prefill=True,
@@ -855,9 +856,14 @@ def main():
         default="videomathqa_traces.json",
         help="Output JSON path",
     )
+    parser.add_argument(
+        "--annotation_file",
+        type=str,
+        default="mcq.json",
+    )
     args = parser.parse_args()
 
-    ann_json = os.path.join(args.benchmark_dir, "annotations.json")
+    ann_json = os.path.join(args.benchmark_dir, args.annotation_file)
     ann_jsonl = os.path.join(args.benchmark_dir, "annotations.jsonl")
     ann_path = ann_json if os.path.exists(ann_json) else ann_jsonl
 
@@ -873,11 +879,28 @@ def main():
         data = [json.loads(line) for line in raw.splitlines() if line.strip()]
 
     records = []
+    checkpoint_every = 10
     shared_demo = VideoQADemo(
         dataset_folder=args.benchmark_dir,
         clip_duration=10,
         use_subtitle=False,
     )
+
+    def _save_records():
+        with open(args.output, "w", encoding="utf-8") as f:
+            json.dump(records, f, ensure_ascii=False, indent=2)
+
+    def _cleanup_dense_frames_for_video(video_path: str, dataset_folder: str):
+        """Delete cached dense frames for one video after the sample is processed."""
+        try:
+            video_id = Path(video_path).stem
+            dense_root = os.path.realpath(os.path.join(dataset_folder, "dense_frames"))
+            sample_dense_dir = os.path.realpath(os.path.join(dense_root, video_id))
+            if os.path.isdir(sample_dense_dir) and sample_dense_dir.startswith(dense_root + os.sep):
+                shutil.rmtree(sample_dense_dir)
+                print(f"[Cleanup] Removed dense frames: {sample_dense_dir}")
+        except Exception as e:
+            print(f"[Cleanup] Failed to remove dense frames for {video_path}: {e}")
 
     def _format_item_for_save(item):
         item_out = dict(item)
@@ -896,7 +919,7 @@ def main():
                 pass
         return item_out
 
-    for i, item in enumerate(data[:50]):
+    for i, item in enumerate(data):
         question = item.get("question", "")
         options = item.get("options", []) or []
         item_out = _format_item_for_save(item)
@@ -916,6 +939,8 @@ def main():
                 "video": video_path,
                 "others": item_out,
             })
+            if len(records) % checkpoint_every == 0:
+                _save_records()
             continue
 
         try:
@@ -937,6 +962,8 @@ def main():
                 "is_correct": result.get("is_correct", False),
                 "others": item_out,
             })
+            if len(records) % checkpoint_every == 0:
+                _save_records()
         except Exception as e:
             print(f"Error processing sample {i+1}/{len(data)} (video={video_file}): {e}")
             records.append({
@@ -948,9 +975,12 @@ def main():
                 "is_correct": False,
                 "others": item_out,
             })
+            if len(records) % checkpoint_every == 0:
+                _save_records()
+        finally:
+            _cleanup_dense_frames_for_video(video_path, args.benchmark_dir)
 
-    with open(args.output, "w", encoding="utf-8") as f:
-        json.dump(records, f, ensure_ascii=False, indent=2)
+    _save_records()
     print(f"\n✓ Saved {len(records)} traces to: {args.output}")
 
 if __name__ == "__main__":

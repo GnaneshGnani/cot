@@ -224,9 +224,6 @@ class VLM_Listener:
                 print(e)
             
             
-
-
 if __name__=='__main__':
     server = VLM_Listener()
     server.run()
-
