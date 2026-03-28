@@ -14,6 +14,7 @@ from openai import OpenAI
 import random
 from tqdm import tqdm
 
+# 添加父目录到路径
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(parent_dir)
 
@@ -78,7 +79,7 @@ def list_to_sha256(lst):
     return hashlib.sha256(json_str.encode()).hexdigest()
 
 
-MAX_DS_ROUND = 20  
+MAX_DS_ROUND = 20  # 最大对话轮数
 
 class VideoQADemo:    
     def __init__(self, 
@@ -117,12 +118,15 @@ class VideoQADemo:
         self.use_subtitle = use_subtitle
         self.vlm_batch_size = vlm_batch_size
         
+        # 设置环境变量
         self._setup_environment()
         
+        # 初始化模型名称
         self.vlm_model_name = vlm_model_name or os.getenv('API_MODEL_NAME_VLM', 'Qwen/Qwen2-VL-7B-Instruct')
-        self.planner_model_name = planner_model_name or os.getenv('API_MODEL_NAME', 'gpt-5')
-        self.temporal_model_name = temporal_model_name or os.getenv('API_MODEL_NAME_TEMPORAL_GROUNDING', 'gpt-5')
+        self.planner_model_name = planner_model_name or os.getenv('API_MODEL_NAME', 'deepseek-ai/DeepSeek-V3')
+        self.temporal_model_name = temporal_model_name or os.getenv('API_MODEL_NAME_TEMPORAL_GROUNDING', 'deepseek-ai/DeepSeek-V3')
         
+        # 初始化API配置
         self._setup_api_config()
         
         # 初始化模型
@@ -138,11 +142,35 @@ class VideoQADemo:
         if video_path and question is not None:
             self.load_sample(video_path, question, answer=answer, options=options)
 
+    def _normalize_options(self, options) -> list:
+        if options is None:
+            return []
+        if isinstance(options, str):
+            option = options.strip()
+            return [option] if option else []
+        if isinstance(options, dict):
+            def _option_key(key):
+                key_str = str(key)
+                return (0, int(key_str)) if key_str.isdigit() else (1, key_str)
+
+            normalized = []
+            for key in sorted(options.keys(), key=_option_key):
+                option = str(options[key]).strip()
+                if option:
+                    normalized.append(option)
+            return normalized
+        if isinstance(options, (list, tuple)):
+            return [str(option).strip() for option in options if str(option).strip()]
+
+        option = str(options).strip()
+        return [option] if option else []
+    
+
     def load_sample(self, video_path: str, question: str, answer: str = None, options: list = None):
         self.video_path = video_path
         self.question = question
         self.answer = answer
-        self.options = options or []
+        self.options = options
         self.duration = self._get_video_duration()
         self._ensure_video_clip_embeddings()
         self.subtitles = self._extract_subtitles()
@@ -162,11 +190,14 @@ class VideoQADemo:
         torch.backends.cuda.matmul.allow_tf32 = True
     
     def _setup_api_config(self):
-        self.planner_api_base = os.getenv('API_BASE_URL', 'https://api.openai.com/v1').split(',')
-        self.planner_api_keys = os.getenv('API_KEY', os.getenv('OPENAI_API_KEY', '')).split(',')
+        """设置API配置"""
+        # 规划模型API配置
+        self.planner_api_base = os.getenv('API_BASE_URL', 'http://localhost:8000/v1').split(',')
+        self.planner_api_keys = os.getenv('API_KEY', 'EMPTY').split(',')
         
-        self.temporal_api_base = os.getenv('API_BASE_URL_TEMPORAL_GROUNDING', 'https://api.openai.com/v1').split(',')
-        self.temporal_api_keys = os.getenv('API_KEY_TEMPORAL_GROUNDING', os.getenv('OPENAI_API_KEY', '')).split(',')
+        # 时序定位模型API配置
+        self.temporal_api_base = os.getenv('API_BASE_URL_TEMPORAL_GROUNDING', 'http://localhost:8001/v1').split(',')
+        self.temporal_api_keys = os.getenv('API_KEY_TEMPORAL_GROUNDING', 'EMPTY').split(',')
     
     def _initialize_models(self):
         print("Initializing VLM model...")
@@ -191,6 +222,7 @@ class VideoQADemo:
     def _initialize_retriever(self):
         print("Initializing retriever...")
         
+        # 创建临时args对象
         class Args:
             dataset_folder = self.dataset_folder
             dataset = "demo"
@@ -262,9 +294,10 @@ class VideoQADemo:
         
         return subtitles
     
+
     def _build_initial_prompt(self):
-        """构建初始提示"""
-        question_text = self.question.strip()
+        options_text = "\n".join(self.options) if self.options else ""
+        question_text = self.question + "\n" + options_text
         
         if self.use_subtitle:
             prompt = initial_input_template_subtitle.format(
@@ -284,37 +317,35 @@ class VideoQADemo:
         return prompt.replace('thinking>', 'think>')
     
     def _text2text(self, message: list, model_name: str, api_base: list, api_keys: list, queue_type: str = 'planner') -> str:
-        normalized_messages = []
-        for m in message:
-            content = m.get("content", "")
-            if isinstance(content, list):
-                content = "\n".join(
-                    part.get("text", "")
-                    for part in content
-                    if isinstance(part, dict) and part.get("type") == "text"
-                )
-            if not isinstance(content, str):
-                content = str(content)
-            normalized_messages.append({"role": m["role"], "content": content})
+        
+        folder_path = '_temporal' if queue_type == 'temporal' else '_planner'
+        start_time = time.time()
 
-        pairs = list(zip(api_base, api_keys))
-        if not pairs:
-            print(f"[TEXT2TEXT] ERROR: no api base/key for model {model_name}")
-            return ""
+        index = message + [model_name] + [len(message)]
+        file_name = f'{list_to_sha256(index)}.pkl'
+        read_file = f'./vllm_io_files/vllm_input{folder_path}/{file_name}'
+        safe_write_with_lock({'model': model_name, 'input': message},read_file)
+        start_time = time.time()
+        while True:
+            output_file = f'./vllm_io_files/vllm_output{folder_path}/{file_name}'
+            if os.path.exists(output_file):
+                end_time = time.time()
+                try:
+                    ans = safe_read_with_lock(output_file)
+                    return ans
+                except Exception as e:
+                    print('[TEXT2TEXT] ERROR:', e)
+                    safe_write_with_lock({'model': model_name, 'input': message},read_file)
+                    os.system(f'rm {output_file}')
 
-        for base, key in pairs:
-            try:
-                client = OpenAI(base_url=base.strip(), api_key=key.strip())
-                completion = client.chat.completions.create(
-                    model=model_name,
-                    messages=normalized_messages,
-                )
-                content = completion.choices[0].message.content
-                return content if isinstance(content, str) else (content or "")
-            except Exception as e:
-                print(f"[TEXT2TEXT] ERROR base={base} model={model_name}: {e}")
+            if time.time()-start_time>120:
+                break
+            if not os.path.exists(read_file):
+                safe_write_with_lock({'model': model_name, 'input': message},read_file)
+            time.sleep(0.2)
 
-        return ""
+        print('[TEXT2TEXT] ERROR: Timeout, model:', model_name)
+        return ''
     
     
     def _batch_video2text(self, tasks: list):
@@ -400,8 +431,6 @@ class VideoQADemo:
         except:
             return '-'
 
-    def _normalize_answer(self, answer: str) -> str:
-        return re.sub(r'\s+', ' ', str(answer)).strip().lower()
     
     # ==================== 工具处理函数 ====================
     
@@ -414,6 +443,7 @@ class VideoQADemo:
         except:
             print("Warning: No valid temporal_grounding_agent found")
             return ""
+
         
         # 构建代理初始提示
         if self.use_subtitle:
@@ -774,7 +804,7 @@ class VideoQADemo:
                 # 评估准确性
                 is_correct = False
                 if self.answer:
-                    is_correct = (self._normalize_answer(answer) == self._normalize_answer(self.answer))
+                    is_correct = (answer == self.answer)
                     print(f"Ground Truth: {self.answer}")
                     print(f"Correctness: {'✓ Correct' if is_correct else '✗ Incorrect'}\n")
                 trace_blocks.append("\n\n".join(cur_trace))
@@ -852,12 +882,13 @@ def main():
     parser.add_argument(
         "--annotation_file",
         type=str,
-        default="annotations.json",
-        help="Annotation file name (json or jsonl) under benchmark_dir",
+        default="mcq.json",
     )
     args = parser.parse_args()
 
-    ann_path = os.path.join(args.benchmark_dir, args.annotation_file)
+    ann_json = os.path.join(args.benchmark_dir, args.annotation_file)
+    ann_jsonl = os.path.join(args.benchmark_dir, "annotations.jsonl")
+    ann_path = ann_json if os.path.exists(ann_json) else ann_jsonl
 
     if not os.path.exists(ann_path):
         print(f"Error: annotation file not found under {args.benchmark_dir}")
@@ -913,7 +944,9 @@ def main():
 
     for i, item in enumerate(data):
         question = item.get("question", "")
-        options = item.get("options", []) or []
+        options = item.get("options")
+        if options is None:
+            options = item.get("option", [])
         item_out = _format_item_for_save(item)
 
         gt = item.get("answer", "")
@@ -949,6 +982,7 @@ def main():
                 "question": question,
                 "gt": gt,
                 "trace": trace_lines,
+                "messages": result.get("messages", []),
                 "video": video_path,
                 "pred": result.get("pred_answer", "-"),
                 "is_correct": result.get("is_correct", False),
@@ -962,6 +996,7 @@ def main():
                 "question": question,
                 "gt": gt,
                 "trace": [f"[System]\nError processing sample: {e}", traceback.format_exc()],
+                "messages": [],
                 "video": video_path,
                 "pred": "-",
                 "is_correct": False,
