@@ -27,9 +27,10 @@ from prompt import (
     initial_input_template_temporal_grounding_agent,
     initial_input_template_temporal_grounding_agent_wo_subtitle
 )
-from refine_prompt import verifier_propmt, planner_prompt
+from refiner_utils import RefinerUtilsMixin
+from refiner_tools import RefinerToolsMixin
+from refiner_agents import RefinerAgentsMixin
 
-import os
 from PIL import Image
 import io
 from multiprocessing import Pool, cpu_count
@@ -78,14 +79,15 @@ def list_to_sha256(lst):
 
 MAX_DS_ROUND = 20  # Maximum conversation rounds
 
-class VideoQADemo:    
-    def __init__(self, 
+
+class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
+    def __init__(self,
                  video_path: str,
                  question: str,
                  answer: str = None,
                  options: list = None,
                  dataset_folder: str = "./data",
-                 clip_duration: int = 10,
+                 clip_duration: int = 5,
                  use_subtitle: bool = True,
                  vlm_model_name: str = None,
                  planner_model_name: str = None,
@@ -99,7 +101,7 @@ class VideoQADemo:
             answer: Ground-truth answer for evaluation
             options: Optional answer choices
             dataset_folder: Dataset folder
-            clip_duration: Video clip duration in seconds
+            clip_duration: Video clip duration in seconds (default 5 for finer LanguageBind clips)
             use_subtitle: Whether to use subtitles
             vlm_model_name: VLM model name
             planner_model_name: Planner model name
@@ -120,6 +122,10 @@ class VideoQADemo:
         self.vlm_model_name = vlm_model_name or os.getenv('API_MODEL_NAME_VLM', 'Qwen/Qwen2-VL-7B-Instruct')
         self.planner_model_name = planner_model_name or os.getenv('API_MODEL_NAME', 'deepseek-ai/DeepSeek-V3')
         self.temporal_model_name = temporal_model_name or os.getenv('API_MODEL_NAME_TEMPORAL_GROUNDING', 'deepseek-ai/DeepSeek-V3')
+
+        # self.vlm_model_name = vlm_model_name or os.getenv('API_MODEL_NAME_VLM', 'Qwen/Qwen2.5-VL-7B-Instruct')
+        # self.planner_model_name = planner_model_name or os.getenv('API_MODEL_NAME', 'Qwen/Qwen2.5-VL-7B-Instruct')
+        # self.temporal_model_name = temporal_model_name or os.getenv('API_MODEL_NAME_TEMPORAL_GROUNDING', 'Qwen/Qwen2.5-VL-7B-Instruct')
         
         # Initialize API configuration
         self._setup_api_config()
@@ -148,6 +154,13 @@ class VideoQADemo:
         print(f"  Question: {question}")
         if self.subtitles:
             print(f"  Subtitles: {len(self.subtitles)} characters")
+
+    def set_task(self, question: str, answer: str = None, options: list = None):
+        """Update QA fields for a new sample on the same video (reuse loaded VLM/retriever)."""
+        self.question = (question or "").strip()
+        self.answer = answer
+        self.options = list(options or [])
+        self.messages = []
     
     def _setup_environment(self):
         """Set environment variables."""
@@ -168,6 +181,10 @@ class VideoQADemo:
     def _initialize_models(self):
         print("Initializing VLM model...")
         
+        _mm_kw = {
+            "min_pixels": 4 * 28 * 28,
+            "max_pixels": 768 * 28 * 28,
+        }
         self.vlm_server = LLM(
             model=self.vlm_model_name,
             gpu_memory_utilization=0.85,
@@ -175,6 +192,7 @@ class VideoQADemo:
             max_model_len=32768,
             enable_chunked_prefill=True,
             enforce_eager=True,
+            mm_processor_kwargs=_mm_kw,
         )
         
         self.processor = AutoProcessor.from_pretrained(
@@ -280,9 +298,63 @@ class VideoQADemo:
             )
         
         return prompt.replace('thinking>', 'think>')
-    
+
+    @staticmethod
+    def _use_openai_http(api_base: list) -> bool:
+        """OpenAI-compatible HTTP when base URL is not localhost (or REFINER_FORCE_HTTP_LLM=1)."""
+        if os.environ.get("REFINER_FORCE_HTTP_LLM", "").strip() == "1":
+            return True
+        if os.environ.get("REFINER_USE_VLLM_PICKLE", "").strip() == "1":
+            return False
+        if not api_base:
+            return False
+        b = (api_base[0] or "").strip().lower()
+        if not b:
+            return False
+        return "localhost" not in b and "127.0.0.1" not in b
+
     def _text2text(self, message: list, model_name: str, api_base: list, api_keys: list, queue_type: str = 'planner') -> str:
-        
+        print("\n" + "=" * 70)
+        print("message: ", message)
+        print("model_name: ", model_name)
+        print("api_base: ", api_base)
+        print("api_keys: ", api_keys)
+        print("queue_type: ", queue_type)
+        print("=" * 70 + "\n")
+
+        if self._use_openai_http(api_base):
+            normalized_messages = []
+            for m in message:
+                content = m.get("content", "")
+                if isinstance(content, list):
+                    content = "\n".join(
+                        part.get("text", "")
+                        for part in content
+                        if isinstance(part, dict) and part.get("type") == "text"
+                    )
+                if not isinstance(content, str):
+                    content = str(content)
+                normalized_messages.append({"role": m["role"], "content": content})
+
+            pairs = list(zip(api_base, api_keys))
+            if not pairs:
+                print(f"[TEXT2TEXT] ERROR: no api base/key for model {model_name}")
+                return ""
+
+            for base, key in pairs:
+                try:
+                    client = OpenAI(base_url=base.strip(), api_key=key.strip())
+                    completion = client.chat.completions.create(
+                        model=model_name,
+                        messages=normalized_messages,
+                    )
+                    out = completion.choices[0].message.content
+                    return out if isinstance(out, str) else (out or "")
+                except Exception as e:
+                    print(f"[TEXT2TEXT] ERROR base={base} model={model_name}: {e}")
+
+            return ""
+
         folder_path = '_temporal' if queue_type == 'temporal' else '_planner'
         start_time = time.time()
 
@@ -379,643 +451,6 @@ class VideoQADemo:
             results.append(result)
         
         return results
-    
-    def _extract_final_answer(self, text: str) -> str:
-        try:
-            answer_content = re.findall(r'<answer>(.*?)</answer>', text, re.DOTALL)[-1].strip()
-            answer_content = re.sub(r'\s+', ' ', answer_content)
-            return answer_content if answer_content else '-'
-        except:
-            return '-'
-
-    def _normalize_answer(self, answer: str) -> str:
-        return re.sub(r'\s+', ' ', str(answer)).strip().lower()
-
-    def _format_question_with_options(self) -> str:
-        if not self.options:
-            return self.question.strip()
-        return self.question.strip() + "\nOptions:\n" + "\n".join(self.options)
-
-    def _format_trace_steps(self, trace_steps: list) -> str:
-        return "\n".join(f"{idx + 1}. {step}" for idx, step in enumerate(trace_steps))
-
-    def _extract_trace_answer(self, trace_steps: list) -> str:
-        for step in reversed(trace_steps):
-            match = re.search(r"final answer\s*:\s*(.*)", str(step), flags=re.IGNORECASE)
-            if match:
-                return match.group(1).strip()
-        return ""
-    
-    # ==================== Refiner tool helpers ====================
-
-    def _safe_float(self, value, default=None):
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return default
-
-    def _extract_json_payload(self, text):
-        if isinstance(text, (dict, list)):
-            return text
-        if not isinstance(text, str):
-            return None
-
-        text = text.strip()
-        if not text:
-            return None
-
-        candidates = re.findall(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.DOTALL)
-        candidates.append(text)
-
-        for left, right in (("{", "}"), ("[", "]")):
-            start = text.find(left)
-            end = text.rfind(right)
-            if start != -1 and end != -1 and end > start:
-                candidates.append(text[start:end + 1])
-
-        for candidate in candidates:
-            candidate = candidate.strip()
-            if not candidate:
-                continue
-            try:
-                return json.loads(candidate)
-            except Exception:
-                parsed = robust_eval(candidate)
-                if isinstance(parsed, (dict, list)):
-                    return parsed
-        return None
-
-    def _get_refine_tool_calls(self, output_text: str, tool_name: str) -> list:
-        payload = self._extract_json_payload(output_text)
-        if not isinstance(payload, dict):
-            return []
-
-        tool_calls = payload.get("tool_calls", [])
-        if not isinstance(tool_calls, list):
-            return []
-
-        matches = []
-        for call in tool_calls:
-            if not isinstance(call, dict) or call.get("tool") != tool_name:
-                continue
-            arguments = call.get("arguments", {})
-            matches.append(arguments if isinstance(arguments, dict) else {})
-        return matches
-
-    def _format_refine_tool_result(self, tool_name: str, arguments: dict, result) -> str:
-        return (
-            f"The tool results for {tool_name}({json.dumps(arguments, ensure_ascii=False)}) are:\n"
-            f"{json.dumps(result, ensure_ascii=False)}\n"
-        )
-
-    def _get_time_range(self, start_time=None, end_time=None):
-        start = self._safe_float(start_time, 0.0)
-        end = self._safe_float(end_time, float(self.duration))
-        start = max(0.0, min(start, float(self.duration)))
-        end = max(0.0, min(end, float(self.duration)))
-        if end <= start:
-            end = min(float(self.duration), start + max(1.0, float(self.clip_duration)))
-        return start, end
-
-    def _get_frames_for_range(self, start_time=None, end_time=None, fps: float = 2.0):
-        start, end = self._get_time_range(start_time, end_time)
-        frame_paths, timestamps = timestamp_to_clip_path(
-            self.dataset_folder, start, end, self.video_path, fps=fps
-        )
-        return frame_paths, timestamps, start, end
-
-    def _get_frame_at_timestamp(self, timestamp: float):
-        timestamp = self._safe_float(timestamp, 0.0)
-        frame_paths, timestamps, _, _ = self._get_frames_for_range(timestamp, timestamp, fps=1.0)
-        if not frame_paths:
-            return None, None
-        best_idx = min(range(len(timestamps)), key=lambda i: abs(timestamps[i] - timestamp))
-        return frame_paths[best_idx], float(timestamps[best_idx])
-
-    def _run_vlm_json(self, prompt: str, frame_paths: list, timestamps: list, default_result):
-        if not frame_paths:
-            return default_result
-
-        output_text = self._batch_video2text([(prompt, frame_paths, timestamps)])[0]
-        parsed = self._extract_json_payload(output_text)
-        if parsed is not None:
-            return parsed
-
-        if isinstance(default_result, dict):
-            result = dict(default_result)
-            result["raw_output"] = output_text
-            return result
-        return default_result
-
-    def _get_asr_result_from_subtitles(self, start_time=None, end_time=None):
-        try:
-            subtitle_segments = extract_subtitles(self.video_path)
-        except Exception:
-            subtitle_segments = []
-
-        if start_time is None and end_time is None:
-            filtered = subtitle_segments
-        else:
-            start, end = self._get_time_range(start_time, end_time)
-            filtered = [x for x in subtitle_segments if x[1] >= start and x[0] <= end]
-
-        segments = [
-            {
-                "start": float(seg[0]),
-                "end": float(seg[1]),
-                "text": seg[2],
-                "speaker": None,
-                "confidence": 1.0,
-            }
-            for seg in filtered
-        ]
-        transcript = " ".join(seg["text"] for seg in segments).strip()
-        return {
-            "language_detected": "unknown",
-            "transcript": transcript,
-            "full_transcript": transcript,
-            "segments": segments,
-            "words": [],
-        }
-
-    def _get_preprocessed_artifacts(self) -> dict:
-        asr_result = self._get_asr_result_from_subtitles()
-        return {
-            "asr_transcript": asr_result.get("full_transcript", ""),
-            "dense_captions": None,
-            "audio_events": None,
-            "keyframe_index": [],
-        }
-
-    def _build_verifier_prompt(self, trace_steps: list, trace_answer: str) -> str:
-        return (
-            verifier_propmt.strip()
-            + "\n\nQUESTION:\n"
-            + self._format_question_with_options()
-            + "\n\nTRACE:\n"
-            + self._format_trace_steps(trace_steps)
-            + "\n\nANSWER:\n"
-            + trace_answer
-            + "\n\nVIDEO:\n"
-            + self.video_path
-        )
-
-    def _build_planner_prompt(self, trace_steps: list, trace_answer: str, diagnosis) -> str:
-        diagnosis_text = json.dumps(diagnosis, ensure_ascii=False, indent=2) if isinstance(diagnosis, dict) else str(diagnosis)
-        artifacts_text = json.dumps(self._get_preprocessed_artifacts(), ensure_ascii=False, indent=2)
-        return (
-            planner_prompt.strip()
-            + "\n\nQUESTION:\n"
-            + self._format_question_with_options()
-            + "\n\nTRACE:\n"
-            + self._format_trace_steps(trace_steps)
-            + "\n\nANSWER:\n"
-            + trace_answer
-            + "\n\nDIAGNOSIS:\n"
-            + diagnosis_text
-            + "\n\nPREPROCESSED_ARTIFACTS:\n"
-            + artifacts_text
-        )
-
-    def _call_verifier(self, trace_steps: list, trace_answer: str):
-        prompt = self._build_verifier_prompt(trace_steps, trace_answer)
-        messages = [{"role": "user", "content": prompt}]
-        raw_output = self._text2text(
-            messages, self.planner_model_name, self.planner_api_base, self.planner_api_keys
-        )
-        parsed_output = self._extract_json_payload(raw_output)
-        return raw_output, parsed_output if isinstance(parsed_output, dict) else None
-
-    def _call_planner(self, trace_steps: list, trace_answer: str, diagnosis):
-        prompt = self._build_planner_prompt(trace_steps, trace_answer, diagnosis)
-        messages = [{"role": "user", "content": prompt}]
-        raw_output = self._text2text(
-            messages, self.planner_model_name, self.planner_api_base, self.planner_api_keys
-        )
-        parsed_output = self._extract_json_payload(raw_output)
-        return raw_output, parsed_output if isinstance(parsed_output, dict) else None
-
-    def _execute_refine_tool_call(self, tool_name: str, arguments: dict) -> str:
-        handlers = {
-            "temporal_grounder": self._process_temporal_grounder,
-            "frame_retriever": self._process_frame_retriever,
-            "asr": self._process_asr,
-            "audio_grounder": self._process_audio_grounder,
-            "ocr": self._process_ocr,
-            "spatial_grounder": self._process_spatial_grounder,
-            "counter": self._process_counter,
-            "dense_captioner": self._process_dense_captioner,
-            "action_recognizer": self._process_action_recognizer,
-            "video_qa_reanswerer": self._process_video_qa_reanswerer,
-        }
-        handler = handlers.get(tool_name)
-        if handler is None:
-            return f"Unknown tool: {tool_name}\n"
-
-        payload = json.dumps({
-            "tool_calls": [{"tool": tool_name, "arguments": arguments or {}}]
-        }, ensure_ascii=False)
-        return handler(payload)
-
-    def _execute_refine_plan(self, planner_plan: dict) -> list:
-        if not isinstance(planner_plan, dict):
-            return []
-
-        tool_calls = planner_plan.get("tool_calls", [])
-        if not isinstance(tool_calls, list):
-            return []
-
-        ordered_calls = sorted(
-            [call for call in tool_calls if isinstance(call, dict)],
-            key=lambda call: int(call.get("step", 0) or 0)
-        )
-
-        execution_results = []
-        for call in ordered_calls:
-            tool_name = call.get("tool", "")
-            arguments = call.get("arguments", {})
-            output = self._execute_refine_tool_call(tool_name, arguments if isinstance(arguments, dict) else {})
-            execution_results.append({
-                "step": call.get("step"),
-                "tool": tool_name,
-                "arguments": arguments if isinstance(arguments, dict) else {},
-                "purpose": call.get("purpose", ""),
-                "depends_on": call.get("depends_on", []),
-                "output": output.strip(),
-            })
-        return execution_results
-
-    def _process_temporal_grounder(self, output_text: str) -> str:
-        calls = self._get_refine_tool_calls(output_text, "temporal_grounder")
-        if not calls:
-            return ""
-
-        print("\n[Tool] Temporal Grounder")
-        results = []
-        topk = int(os.getenv('TOPK', '5'))
-
-        for arguments in calls:
-            query = str(arguments.get("query", "")).strip()
-            segments = []
-            if query:
-                try:
-                    clip_results = self.retriever.get_informative_clips(
-                        query, video_path=self.video_path, top_k=topk, total_duration=self.duration
-                    )
-                    for clip_path, score in clip_results:
-                        clip_number = int(os.path.basename(clip_path).split('_')[1])
-                        start = float(clip_number * self.clip_duration)
-                        end = float(min(self.duration, start + self.clip_duration))
-                        segments.append({
-                            "start": start,
-                            "end": end,
-                            "confidence": float(score),
-                        })
-                except Exception as e:
-                    print(f"  Error: {e}")
-
-            result = {
-                "query": query,
-                "segments": sorted(segments, key=lambda x: x["start"]),
-                "video_duration": float(self.duration),
-            }
-            results.append(self._format_refine_tool_result("temporal_grounder", arguments, result))
-
-        return "".join(results)
-
-    def _process_frame_retriever(self, output_text: str) -> str:
-        calls = self._get_refine_tool_calls(output_text, "frame_retriever")
-        if not calls:
-            return ""
-
-        print("\n[Tool] Frame Retriever")
-        results = []
-
-        for arguments in calls:
-            query = str(arguments.get("query", "") or "").strip()
-            timestamps = arguments.get("timestamps")
-            num_frames = max(1, int(arguments.get("num_frames", 5) or 5))
-            if isinstance(timestamps, str):
-                timestamps = robust_eval(timestamps)
-
-            frames = []
-            mode = "timestamp"
-
-            if timestamps:
-                for ts in list(timestamps)[:num_frames]:
-                    frame_path, frame_ts = self._get_frame_at_timestamp(ts)
-                    if frame_path:
-                        frames.append({
-                            "frame_path": frame_path,
-                            "timestamp": float(frame_ts),
-                        })
-            elif query:
-                mode = "query"
-                try:
-                    clip_results = self.retriever.get_informative_clips(
-                        query, video_path=self.video_path, top_k=num_frames, total_duration=self.duration
-                    )
-                except Exception as e:
-                    print(f"  Error: {e}")
-                    clip_results = []
-
-                for clip_path, score in clip_results[:num_frames]:
-                    clip_number = int(os.path.basename(clip_path).split('_')[1])
-                    ts = clip_number * self.clip_duration + self.clip_duration / 2
-                    frame_path, frame_ts = self._get_frame_at_timestamp(ts)
-                    if frame_path:
-                        frames.append({
-                            "frame_path": frame_path,
-                            "timestamp": float(frame_ts),
-                            "relevance_score": float(score),
-                        })
-
-            result = {"mode": mode, "frames": frames}
-            results.append(self._format_refine_tool_result("frame_retriever", arguments, result))
-
-        return "".join(results)
-
-    def _process_asr(self, output_text: str) -> str:
-        calls = self._get_refine_tool_calls(output_text, "asr")
-        if not calls:
-            return ""
-
-        print("\n[Tool] ASR")
-        results = []
-
-        for arguments in calls:
-            result = self._get_asr_result_from_subtitles(
-                arguments.get("start_time"), arguments.get("end_time")
-            )
-            results.append(self._format_refine_tool_result("asr", arguments, result))
-
-        return "".join(results)
-
-    def _process_audio_grounder(self, output_text: str) -> str:
-        calls = self._get_refine_tool_calls(output_text, "audio_grounder")
-        if not calls:
-            return ""
-
-        print("\n[Tool] Audio Grounder")
-        results = []
-
-        for arguments in calls:
-            asr_result = self._get_asr_result_from_subtitles(
-                arguments.get("start_time"), arguments.get("end_time")
-            )
-            summary = (
-                "Speech subtitles are available in this range, but non-speech audio grounding is unavailable."
-                if asr_result["segments"] else
-                "Non-speech audio grounding is unavailable in this runner."
-            )
-            result = {
-                "query": str(arguments.get("query", "")).strip(),
-                "events": [],
-                "audio_summary": summary,
-            }
-            results.append(self._format_refine_tool_result("audio_grounder", arguments, result))
-
-        return "".join(results)
-
-    def _process_ocr(self, output_text: str) -> str:
-        calls = self._get_refine_tool_calls(output_text, "ocr")
-        if not calls:
-            return ""
-
-        print("\n[Tool] OCR")
-        results = []
-
-        for arguments in calls:
-            frame_path = arguments.get("frame_path")
-            frame_ts = self._safe_float(arguments.get("timestamp"), 0.0)
-
-            if not frame_path:
-                frame_path, frame_ts = self._get_frame_at_timestamp(frame_ts)
-
-            source = frame_path if frame_path else f"{self.video_path}@{frame_ts}"
-            result = {"source": source, "detections": [], "full_text": ""}
-
-            if frame_path and os.path.exists(frame_path):
-                try:
-                    import pytesseract
-
-                    data = pytesseract.image_to_data(
-                        Image.open(frame_path), output_type=pytesseract.Output.DICT
-                    )
-                    detections = []
-                    for i, text in enumerate(data.get("text", [])):
-                        text = str(text).strip()
-                        conf = self._safe_float(data["conf"][i], -1.0)
-                        if not text or conf < 0:
-                            continue
-                        x = int(data["left"][i])
-                        y = int(data["top"][i])
-                        w = int(data["width"][i])
-                        h = int(data["height"][i])
-                        detections.append({
-                            "text": text,
-                            "bbox": [x, y, x + w, y + h],
-                            "confidence": conf / 100.0 if conf > 1 else conf,
-                            "text_type": "scene_text",
-                        })
-                    result = {
-                        "source": source,
-                        "detections": detections,
-                        "full_text": "\n".join(x["text"] for x in detections),
-                    }
-                except Exception:
-                    prompt = (
-                        'Extract all visible text and return JSON: '
-                        '{"source":"","detections":[{"text":"","bbox":[0,0,0,0],"confidence":0.0,"text_type":"scene_text"}],"full_text":""}.'
-                    )
-                    result = self._run_vlm_json(
-                        prompt,
-                        [frame_path],
-                        [float(frame_ts)],
-                        result,
-                    )
-                    if isinstance(result, dict):
-                        result.setdefault("source", source)
-
-            results.append(self._format_refine_tool_result("ocr", arguments, result))
-
-        return "".join(results)
-
-    def _process_spatial_grounder(self, output_text: str) -> str:
-        calls = self._get_refine_tool_calls(output_text, "spatial_grounder")
-        if not calls:
-            return ""
-
-        print("\n[Tool] Spatial Grounder")
-        results = []
-
-        for arguments in calls:
-            query = str(arguments.get("query", "")).strip()
-            frame_path = arguments.get("frame_path")
-            frame_ts = self._safe_float(arguments.get("timestamp"), 0.0)
-            if not frame_path:
-                frame_path, frame_ts = self._get_frame_at_timestamp(frame_ts)
-
-            default_result = {
-                "query": query,
-                "detections": [],
-                "spatial_description": "",
-            }
-            prompt = (
-                'Detect objects matching the query and return JSON: '
-                '{"query":"","detections":[{"label":"","bbox":[0,0,0,0],"confidence":0.0,"mask_path":null,"area_fraction":0.0}],'
-                '"spatial_description":""}. '
-                f"Query: {query}"
-            )
-            result = self._run_vlm_json(
-                prompt,
-                [frame_path] if frame_path else [],
-                [float(frame_ts)],
-                default_result,
-            )
-            results.append(self._format_refine_tool_result("spatial_grounder", arguments, result))
-
-        return "".join(results)
-
-    def _process_counter(self, output_text: str) -> str:
-        calls = self._get_refine_tool_calls(output_text, "counter")
-        if not calls:
-            return ""
-
-        print("\n[Tool] Counter")
-        results = []
-
-        for arguments in calls:
-            query = str(arguments.get("query", "")).strip()
-            frame_path = arguments.get("frame_path")
-            frame_ts = self._safe_float(arguments.get("timestamp"), 0.0)
-            if not frame_path:
-                frame_path, frame_ts = self._get_frame_at_timestamp(frame_ts)
-
-            default_result = {
-                "query": query,
-                "count": 0,
-                "confidence": 0.0,
-                "detections": [],
-                "notes": "",
-            }
-            prompt = (
-                'Count the queried objects and return JSON: '
-                '{"query":"","count":0,"confidence":0.0,"detections":[{"bbox":[0,0,0,0],"instance_confidence":0.0}],"notes":""}. '
-                f"Query: {query}"
-            )
-            result = self._run_vlm_json(
-                prompt,
-                [frame_path] if frame_path else [],
-                [float(frame_ts)],
-                default_result,
-            )
-            results.append(self._format_refine_tool_result("counter", arguments, result))
-
-        return "".join(results)
-
-    def _process_dense_captioner(self, output_text: str) -> str:
-        calls = self._get_refine_tool_calls(output_text, "dense_captioner")
-        if not calls:
-            return ""
-
-        print("\n[Tool] Dense Captioner")
-        results = []
-
-        for arguments in calls:
-            granularity = str(arguments.get("granularity", "segment") or "segment")
-            fps = 1.0 if granularity == "frame" else 2.0
-            frame_paths, timestamps, start, end = self._get_frames_for_range(
-                arguments.get("start_time"), arguments.get("end_time"), fps=fps
-            )
-            focus_query = str(arguments.get("focus_query", "")).strip()
-            default_result = {
-                "video_duration": float(self.duration),
-                "captioned_range": {"start": start, "end": end},
-                "captions": [],
-                "overall_summary": "",
-            }
-            prompt = (
-                'Return JSON: {"video_duration":0.0,"captioned_range":{"start":0.0,"end":0.0},'
-                '"captions":[{"start":0.0,"end":0.0,"visual":"","audio":"","on_screen_text":"","actions":[],"objects":[]}],'
-                '"overall_summary":""}. '
-                f"Granularity: {granularity}. Focus query: {focus_query}"
-            )
-            result = self._run_vlm_json(prompt, frame_paths, timestamps, default_result)
-            results.append(self._format_refine_tool_result("dense_captioner", arguments, result))
-
-        return "".join(results)
-
-    def _process_action_recognizer(self, output_text: str) -> str:
-        calls = self._get_refine_tool_calls(output_text, "action_recognizer")
-        if not calls:
-            return ""
-
-        print("\n[Tool] Action Recognizer")
-        results = []
-
-        for arguments in calls:
-            frame_paths, timestamps, start, end = self._get_frames_for_range(
-                arguments.get("start_time"), arguments.get("end_time"), fps=2.0
-            )
-            query = str(arguments.get("query", "")).strip()
-            default_result = {
-                "analyzed_range": {"start": start, "end": end},
-                "actions": [],
-                "query_response": None,
-            }
-            prompt = (
-                'Return JSON: {"analyzed_range":{"start":0.0,"end":0.0},"actions":[{"action":"","start":0.0,"end":0.0,'
-                '"confidence":0.0,"actor":""}],"query_response":null}. '
-                f"Focus on human actions. Query: {query}"
-            )
-            result = self._run_vlm_json(prompt, frame_paths, timestamps, default_result)
-            results.append(self._format_refine_tool_result("action_recognizer", arguments, result))
-
-        return "".join(results)
-
-    def _process_video_qa_reanswerer(self, output_text: str) -> str:
-        calls = self._get_refine_tool_calls(output_text, "video_qa_reanswerer")
-        if not calls:
-            return ""
-
-        print("\n[Tool] Video QA Re-answerer")
-        results = []
-
-        for arguments in calls:
-            question = str(arguments.get("question", "")).strip()
-            frame_paths, timestamps, _, _ = self._get_frames_for_range(None, None, fps=2.0)
-            default_result = {
-                "question": question,
-                "answer": "",
-                "reasoning": "",
-                "confidence": 0.0,
-                "key_evidence": [],
-            }
-            prompt = (
-                'Answer the question from the video and return JSON: '
-                '{"question":"","answer":"","reasoning":"","confidence":0.0,'
-                '"key_evidence":[{"timestamp":0.0,"modality":"visual","observation":""}]}. '
-                f"Question: {question}"
-            )
-            result = self._run_vlm_json(prompt, frame_paths, timestamps, default_result)
-            results.append(self._format_refine_tool_result("video_qa_reanswerer", arguments, result))
-
-        return "".join(results)
-
-    def _process_refine_tool_calls(self, output_text: str) -> str:
-        tool_result = ""
-        tool_result += self._process_temporal_grounder(output_text)
-        tool_result += self._process_frame_retriever(output_text)
-        tool_result += self._process_asr(output_text)
-        tool_result += self._process_audio_grounder(output_text)
-        tool_result += self._process_ocr(output_text)
-        tool_result += self._process_spatial_grounder(output_text)
-        tool_result += self._process_counter(output_text)
-        tool_result += self._process_dense_captioner(output_text)
-        tool_result += self._process_action_recognizer(output_text)
-        tool_result += self._process_video_qa_reanswerer(output_text)
-        return tool_result
     
     # ==================== Tool processing functions ====================
     
@@ -1336,41 +771,108 @@ class VideoQADemo:
         
         return tool_result
 
-    def run_refinement_pipeline(self, trace_steps: list, trace_answer: str = None):
+    def run_refinement_pipeline(self, trace_steps: list, trace_answer: str = None, max_iterations: int = 3):
         print("\n" + "=" * 70)
         print("Starting Trace Refinement Pipeline")
         print("=" * 70 + "\n")
 
         trace_answer = (trace_answer or self._extract_trace_answer(trace_steps) or "").strip()
+        initial_trace = list(trace_steps)
+        initial_answer = trace_answer
+        current_trace = list(trace_steps)
+        current_answer = trace_answer
+        iteration_history = []
+        all_iterations = []
 
-        print("[Verifier] Generating diagnosis...")
-        verifier_raw, verifier_output = self._call_verifier(trace_steps, trace_answer)
-        print(f"\n[Verifier Output]\n{verifier_raw}\n")
+        print("\n" + "=" * 70)
+        print("trace_answer: ", trace_answer)
+        print("=" * 70 + "\n")
 
-        print("[Planner] Generating plan...")
-        planner_raw, planner_output = self._call_planner(
-            trace_steps,
-            trace_answer,
-            verifier_output if verifier_output is not None else verifier_raw,
-        )
-        print(f"\n[Planner Output]\n{planner_raw}\n")
+        final_verifier_raw = None
+        final_verifier_output = None
 
-        print("[Executor] Running planned tool calls...")
-        executed_tools = self._execute_refine_plan(planner_output if planner_output is not None else {})
-        for item in executed_tools:
-            print(f"  Step {item['step']} - {item['tool']}")
+        for iteration in range(max_iterations):
+            print(f"\n[Iteration {iteration + 1}/{max_iterations}]")
+
+            print("[Verifier] Generating diagnosis...")
+            verifier_raw, verifier_output = self._call_verifier(
+                current_trace,
+                current_answer,
+                iteration=iteration,
+                history=iteration_history,
+                max_iterations=max_iterations,
+            )
+            final_verifier_raw, final_verifier_output = verifier_raw, verifier_output
+            print(f"\n[Verifier Output]\n{verifier_raw}\n")
+
+            if isinstance(verifier_output, dict) and verifier_output.get("verdict") == "PASS":
+                print("[Verifier] PASS — stopping refinement loop.")
+                break
+
+            print("[Planner] Generating plan...")
+            planner_raw, planner_output = self._call_planner(
+                current_trace,
+                current_answer,
+                verifier_output if verifier_output is not None else verifier_raw,
+                iteration=iteration,
+                history=iteration_history,
+                max_iterations=max_iterations,
+            )
+            print(f"\n[Planner Output]\n{planner_raw}\n")
+
+            print("[Executor] Running planned tool calls...")
+            executed_tools = self._execute_refine_plan(planner_output if planner_output is not None else {})
+            for item in executed_tools:
+                print(f"  Step {item['step']} - {item['tool']}")
+
+            print("[Refiner] Synthesizing corrected trace...")
+            refiner_raw, refiner_output = self._call_refiner(
+                current_trace,
+                current_answer,
+                verifier_output if verifier_output is not None else verifier_raw,
+                executed_tools,
+                planner_output if planner_output is not None else {},
+            )
+            print(f"\n[Refiner Output]\n{refiner_raw}\n")
+
+            if isinstance(refiner_output, dict):
+                new_trace = refiner_output.get("refined_trace", current_trace)
+                new_answer = refiner_output.get("refined_answer", current_answer)
+                current_trace = self._normalize_refined_trace(new_trace, current_trace)
+                if new_answer is not None and str(new_answer).strip():
+                    current_answer = str(new_answer).strip()
+
+            summary = self._compact_iteration_summary(
+                iteration, verifier_output, refiner_output, executed_tools
+            )
+            iteration_history.append(summary)
+            all_iterations.append(
+                {
+                    "iteration": iteration + 1,
+                    "verifier_raw": verifier_raw,
+                    "verifier_output": verifier_output,
+                    "planner_raw": planner_raw,
+                    "planner_output": planner_output,
+                    "executed_tools": executed_tools,
+                    "refiner_raw": refiner_raw,
+                    "refiner_output": refiner_output,
+                    "iteration_summary": summary,
+                }
+            )
 
         return {
             "question": self.question,
             "options": self.options,
             "video_path": self.video_path,
-            "initial_trace": {"steps": trace_steps},
-            "initial_answer": trace_answer,
-            "verifier_raw": verifier_raw,
-            "verifier_output": verifier_output,
-            "planner_raw": planner_raw,
-            "planner_output": planner_output,
-            "executed_tools": executed_tools,
+            "initial_trace": {"steps": initial_trace},
+            "initial_answer": initial_answer,
+            "final_trace": {"steps": current_trace},
+            "final_answer": current_answer,
+            "verifier_raw": final_verifier_raw,
+            "verifier_output": final_verifier_output,
+            "iteration_history": iteration_history,
+            "all_iterations": all_iterations,
+            "max_iterations": max_iterations,
         }
     
     def run(self):
@@ -1491,7 +993,7 @@ class VideoQADemo:
 def main():
     """Main function: run the trace refinement demo."""
 
-    VIDEO_PATH = "/share/data/drive_1/ghazi/VideoMathQA/videos/875b24c9-a2ab-4965-8186-76495a5b553d.mp4"
+    VIDEO_PATH = "/fs/nexus-scratch/gnanesh/cot/VideoMathQA/videos/875b24c9-a2ab-4965-8186-76495a5b553d.mp4"
     QUESTION = (
         "Among Walmart, Target, Whole Foods, and Albertsons, which store shows the highest "
         "discrepancy between customer-rated Store Cleanliness and Value for Dollar, and what "
@@ -1527,7 +1029,7 @@ def main():
         question=QUESTION,
         options=OPTIONS,
         dataset_folder="./data",
-        clip_duration=10,
+        clip_duration=5,
         use_subtitle=False,
     )
 
@@ -1540,11 +1042,13 @@ def main():
         "options": OPTIONS,
         "initial_trace_steps": INITIAL_TRACE_STEPS,
         "initial_trace_answer": result["initial_answer"],
+        "final_trace_steps": result["final_trace"]["steps"],
+        "final_answer": result["final_answer"],
         "verifier_raw": result["verifier_raw"],
         "verifier_output": result["verifier_output"],
-        "planner_raw": result["planner_raw"],
-        "planner_output": result["planner_output"],
-        "executed_tools": result["executed_tools"],
+        "iteration_history": result["iteration_history"],
+        "all_iterations": result["all_iterations"],
+        "max_iterations": result["max_iterations"],
     }
     with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(record, f, ensure_ascii=False, indent=2)
@@ -1556,10 +1060,11 @@ def main():
     print("="*70)
     print(f"Question: {QUESTION}")
     verifier_verdict = None if not isinstance(result["verifier_output"], dict) else result["verifier_output"].get("verdict")
-    planned_calls = 0 if not isinstance(result["planner_output"], dict) else len(result["planner_output"].get("tool_calls", []))
+    n_iters = len(result.get("all_iterations") or [])
+    n_tools = sum(len(it.get("executed_tools") or []) for it in (result.get("all_iterations") or []))
     print(f"Verifier Verdict: {verifier_verdict}")
-    print(f"Planned Tool Calls: {planned_calls}")
-    print(f"Executed Tool Calls: {len(result['executed_tools'])}")
+    print(f"Refinement iterations run: {n_iters}")
+    print(f"Total executed tool calls: {n_tools}")
     print("="*70 + "\n")
 
 

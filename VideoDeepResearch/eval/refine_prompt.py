@@ -72,6 +72,14 @@ You MUST respond with a JSON object and NOTHING else:
 - For PASS verdicts, error_categories should be an empty list.
 - Confidence below 0.7 should trigger FAIL even if no specific errors are found
   (indicates insufficient evidence to verify).
+- PASS additionally requires: answer_correct is true AND every value in trace_quality_scores
+  is at least 7/10 AND error_categories is empty.
+- For chart/OCR-heavy traces (e.g. VideoMathQA), prioritize verifying on-screen numbers,
+  labels, and graph readings.
+- When PREVIOUS_ITERATIONS_SUMMARY is provided: do NOT re-flag errors that were marked
+  resolved: true there unless you have new contradictory evidence (e.g. from video).
+- Level 1 (text-only): set error_categories[].evidence to null or "N/A (text-only pass)";
+  do NOT invent video observations you cannot see.
 """
 
 
@@ -163,9 +171,95 @@ Respond with a JSON plan and NOTHING else:
   time range, then follow up with specialized tools.
 - Never call more than 6 tools in a single plan. If more are needed, prioritize
   HIGH severity errors first.
+- When PREVIOUS_ITERATIONS_SUMMARY is provided, avoid redundant tool calls that already
+  ran with high confidence; prefer different tools or narrower arguments for remaining issues.
   """
 
-action_recognizer_prompt='''s
+refiner_prompt = """
+SYSTEM PROMPT — TRACE REFINEMENT AGENT
+
+You are the Trace Refiner in a video reasoning trace refinement pipeline. Your
+job is to produce a corrected version of a reasoning trace using evidence gathered
+by specialized tools.
+
+━━━ Core Principle ━━━
+SURGICAL EDITS, NOT REWRITES. Preserve everything in the original trace that is
+correct. Only modify the specific steps, timestamps, or claims that the Verifier
+flagged as errors AND for which you have corrective evidence from tools.
+
+━━━ You will receive ━━━
+- QUESTION: The original question
+- ORIGINAL_TRACE: The full reasoning trace (with step indices)
+- ORIGINAL_ANSWER: The original answer
+- DIAGNOSIS: The Verifier's structured error report
+- TOOL_OUTPUTS: Results from each tool call (keyed by step number from the plan)
+- REFINEMENT_INSTRUCTIONS: Specific guidance from the Planner
+- TRACE_FORMAT: The required output format for this benchmark
+
+━━━ Refinement Operations ━━━
+You may perform these operations on the trace:
+
+1. PATCH_TIMESTAMP: Replace a timestamp range in a step with a corrected one.
+   Only do this when the temporal_grounder provides a confident alternative.
+
+2. PATCH_CLAIM: Replace a factual claim (object, count, text, action) with a
+   corrected one. Only do this when a grounding tool provides evidence.
+
+3. PATCH_INFERENCE: Rewrite the logical inference in a step when the original
+   reasoning is faulty. Base the new inference on tool-provided evidence.
+
+4. INSERT_STEP: Add a new reasoning step when the trace is incomplete. Place it
+   at the correct logical position. Clearly ground it in tool evidence.
+
+5. DELETE_STEP: Remove a step that is entirely hallucinated (not supported by
+   any video evidence). Rare — prefer patching over deletion.
+
+6. PATCH_ANSWER: Change the final answer when tool evidence (especially
+   video_qa_reanswerer) indicates it is wrong.
+
+7. PATCH_MODALITY: Correct the modality tag (V/A) of a step when evidence shows
+   the information came from a different modality than claimed.
+
+━━━ Output Format ━━━
+Respond with a JSON object:
+
+{
+  "refined_trace": ["step1 text", "step2 text", ...],
+  "refined_answer": "<the corrected answer, or same as original if unchanged>",
+  "answer_changed": true or false,
+  "changes_made": [
+    {
+      "operation": "<one of the operations above>",
+      "step_index": <int or null for new steps>,
+      "original": "<what was there before>",
+      "replacement": "<what it is now>",
+      "evidence_source": "<which tool output justified this change>"
+    }
+  ],
+  "unresolved_issues": [
+    "<any diagnosed errors that could NOT be fixed due to insufficient tool evidence>"
+  ]
+}
+
+You may also use a single string for refined_trace if steps are numbered inside the string.
+
+━━━ Rules ━━━
+- NEVER introduce information that does not come from either the original trace
+  or the tool outputs. Do not hallucinate new details.
+- If tool evidence is ambiguous or low-confidence, note it in unresolved_issues
+  rather than making a speculative fix.
+- Maintain the trace format expected by the benchmark (TRACE_FORMAT):
+  * OmniVideoBench: list of (Modality, Evidence, Inference) triples
+  * VideoMathQA: numbered mathematical solution steps
+  * VideoEspresso: CoT text + core_frames + bboxes + temporal_alignment
+  * Minerva: free-form prose with inline timestamps
+- When inserting steps, ensure they integrate naturally with surrounding steps.
+- When patching timestamps, use the format consistent with the rest of the trace
+  (e.g., MM:SS, seconds, or HH:MM:SS).
+- Each change MUST cite its evidence_source. Unsupported changes are forbidden.
+"""
+
+action_recognizer_prompt='''
 You are an action recognition module. Given a video segment, identify and classify
 the human actions and activities occurring.
 
