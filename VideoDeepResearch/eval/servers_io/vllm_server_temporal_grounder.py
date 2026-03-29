@@ -1,5 +1,5 @@
 import os
-os.environ["VLLM_USE_MODELSCOPE"] = "false"   
+import sys
 
 import glob
 import pickle
@@ -9,6 +9,8 @@ import uuid
 import time
 import re
 import logging
+
+import torch
 from vllm import LLM, EngineArgs, SamplingParams
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -214,6 +216,29 @@ def get_recently_modified_files(directory, num_files=30):
 # MODEL_NAME='/share/project/huaying/VideoDeepResearch/train/LLaMA-Factory-main/saves/qwen25-7b-sft-temporal_grounding_real_6k_base'
 MODEL_NAME= os.environ['API_MODEL_NAME_TEMPORAL_GROUNDING']
 
+
+def _listener_tensor_parallel_size() -> int:
+    raw = os.getenv("VLLM_TENSOR_PARALLEL_SIZE", "").strip()
+    if raw:
+        return max(1, int(raw))
+    return max(1, torch.cuda.device_count())
+
+
+def _temporal_llm_kwargs(model_name: str, tensor_parallel_size: int) -> dict:
+    gpu_mem = float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.85"))
+    max_len = int(os.getenv("VLLM_MAX_MODEL_LEN", "32768"))
+    kw = dict(
+        model=model_name,
+        gpu_memory_utilization=gpu_mem,
+        tensor_parallel_size=tensor_parallel_size,
+        max_model_len=max_len,
+        enable_chunked_prefill=True,
+    )
+    if os.getenv("VLLM_ENFORCE_EAGER", "").strip().lower() in ("1", "true", "yes"):
+        kw["enforce_eager"] = True
+    return kw
+
+
 class VLM_Listener:
     def __init__(self):
         self.process_id = f"{os.getpid()}_{uuid.uuid4().hex[:8]}"
@@ -230,15 +255,16 @@ class VLM_Listener:
         self.cleanup_thread.start()
         logger.info("Started cleanup thread for output directory")
 
+        _tp = _listener_tensor_parallel_size()
+        logger.info(
+            "tensor_parallel_size=%s (VLLM_TENSOR_PARALLEL_SIZE to override; visible CUDA=%s)",
+            _tp,
+            torch.cuda.device_count(),
+        )
+        _kw = _temporal_llm_kwargs(MODEL_NAME, _tp)
         try:
             logger.info("Initializing VLLM server with conservative settings...")
-            self.vlm_server = LLM(
-                model = MODEL_NAME, 
-                gpu_memory_utilization=0.85,
-                tensor_parallel_size=1,
-                max_model_len=32768,  
-                enable_chunked_prefill=True,
-            )
+            self.vlm_server = LLM(**_kw)
             logger.info("VLLM server initialized successfully")
         except Exception as e:
             logger.error(f"Error initializing VLLM server: {e}")

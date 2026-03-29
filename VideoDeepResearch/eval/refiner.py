@@ -1,48 +1,53 @@
-import os
-import sys
-import json
-import re
-import time
-import torch
-from pathlib import Path
-from transformers import AutoProcessor
-from vllm import LLM
-from PIL import Image
-from openai import OpenAI
-import random
-
-# Add parent directory to the path
-parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.append(parent_dir)
-
-# Import required utility functions
-from video_utils import (
-    timestamp_to_clip_path, extract_subtitles, parse_subtitle_time,
-    timestamp_to_frames, extract_video_clip, robust_eval
-)
-from retriever_languagebind import Retrieval_Manager
-from prompt import (
-    initial_input_template_subtitle, 
-    initial_input_template_wo_subtitle,
-    initial_input_template_temporal_grounding_agent,
-    initial_input_template_temporal_grounding_agent_wo_subtitle
-)
-from refiner_utils import RefinerUtilsMixin
-from refiner_tools import RefinerToolsMixin
-from refiner_agents import RefinerAgentsMixin
-
-from PIL import Image
-import io
-from multiprocessing import Pool, cpu_count
-from functools import partial
-import multiprocessing as mp
+import fcntl
 import hashlib
 import json
 import os
-import time
 import pickle
-import fcntl
+import random
+import re
+import sys
+import time
 from pathlib import Path
+
+_eval_dir = os.path.dirname(os.path.abspath(__file__))
+if _eval_dir not in sys.path:
+    sys.path.insert(0, _eval_dir)
+
+import hf_cache
+
+hf_cache.ensure_hf_cache_env()
+
+import torch
+from openai import OpenAI
+from PIL import Image
+from transformers import AutoProcessor
+from vllm import LLM
+
+try:
+    from moviepy.video.io.VideoFileClip import VideoFileClip
+except ImportError:
+    VideoFileClip = None
+
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(parent_dir)
+
+from prompt import (
+    initial_input_template_subtitle,
+    initial_input_template_temporal_grounding_agent,
+    initial_input_template_temporal_grounding_agent_wo_subtitle,
+    initial_input_template_wo_subtitle,
+)
+from refiner_agents import RefinerAgentsMixin
+from refiner_tools import RefinerToolsMixin
+from refiner_utils import RefinerUtilsMixin
+from retriever_languagebind import Retrieval_Manager
+from video_utils import (
+    extract_subtitles,
+    extract_video_clip,
+    parse_subtitle_time,
+    robust_eval,
+    timestamp_to_clip_path,
+)
 
 def safe_write_with_lock(data, file_path):
     
@@ -77,7 +82,7 @@ def list_to_sha256(lst):
     return hashlib.sha256(json_str.encode()).hexdigest()
 
 
-MAX_DS_ROUND = 20  # Maximum conversation rounds
+MAX_DS_ROUND = 20
 
 
 class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
@@ -92,21 +97,6 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
                  vlm_model_name: str = None,
                  planner_model_name: str = None,
                  temporal_model_name: str = None):
-        """
-        Demo
-        
-        Args:
-            video_path: 
-            question: Question text
-            answer: Ground-truth answer for evaluation
-            options: Optional answer choices
-            dataset_folder: Dataset folder
-            clip_duration: Video clip duration in seconds (default 5 for finer LanguageBind clips)
-            use_subtitle: Whether to use subtitles
-            vlm_model_name: VLM model name
-            planner_model_name: Planner model name
-            temporal_model_name: Temporal grounding model name
-        """
         self.video_path = video_path
         self.question = question
         self.answer = answer
@@ -114,11 +104,9 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         self.dataset_folder = dataset_folder
         self.clip_duration = clip_duration
         self.use_subtitle = use_subtitle
-        
-        # Set environment variables
+
         self._setup_environment()
-        
-        # Initialize model names
+
         self.vlm_model_name = vlm_model_name or os.getenv('API_MODEL_NAME_VLM', 'Qwen/Qwen2-VL-7B-Instruct')
         self.planner_model_name = planner_model_name or os.getenv('API_MODEL_NAME', 'deepseek-ai/DeepSeek-V3')
         self.temporal_model_name = temporal_model_name or os.getenv('API_MODEL_NAME_TEMPORAL_GROUNDING', 'deepseek-ai/DeepSeek-V3')
@@ -126,26 +114,19 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         # self.vlm_model_name = vlm_model_name or os.getenv('API_MODEL_NAME_VLM', 'Qwen/Qwen2.5-VL-7B-Instruct')
         # self.planner_model_name = planner_model_name or os.getenv('API_MODEL_NAME', 'Qwen/Qwen2.5-VL-7B-Instruct')
         # self.temporal_model_name = temporal_model_name or os.getenv('API_MODEL_NAME_TEMPORAL_GROUNDING', 'Qwen/Qwen2.5-VL-7B-Instruct')
-        
-        # Initialize API configuration
+
         self._setup_api_config()
-        
-        # Initialize models
+
         self._initialize_models()
-        
-        # Get video duration
+
         self.duration = self._get_video_duration()
-        
-        # Initialize retriever
+
         self.retriever = self._initialize_retriever()
-        
-        # If preprocessing was not done in advance, compute clip embeddings for this video
+
         self._ensure_video_clip_embeddings()
-        
-        # Extract subtitles
+
         self.subtitles = self._extract_subtitles()
-        
-        # Conversation history
+
         self.messages = []
         
         print(f"✓ Demo initialized successfully")
@@ -156,25 +137,20 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
             print(f"  Subtitles: {len(self.subtitles)} characters")
 
     def set_task(self, question: str, answer: str = None, options: list = None):
-        """Update QA fields for a new sample on the same video (reuse loaded VLM/retriever)."""
         self.question = (question or "").strip()
         self.answer = answer
         self.options = list(options or [])
         self.messages = []
     
     def _setup_environment(self):
-        """Set environment variables."""
         os.environ["TOKENIZERS_PARALLELISM"] = "true"
         os.environ.setdefault("VLLM_USE_MODELSCOPE", "false")
         torch.backends.cuda.matmul.allow_tf32 = True
     
     def _setup_api_config(self):
-        """Set API configuration."""
-        # Planner model API configuration
         self.planner_api_base = os.getenv('API_BASE_URL', 'http://localhost:8000/v1').split(',')
         self.planner_api_keys = os.getenv('API_KEY', 'EMPTY').split(',')
-        
-        # Temporal grounding model API configuration
+
         self.temporal_api_base = os.getenv('API_BASE_URL_TEMPORAL_GROUNDING', 'http://localhost:8001/v1').split(',')
         self.temporal_api_keys = os.getenv('API_KEY_TEMPORAL_GROUNDING', 'EMPTY').split(',')
     
@@ -205,8 +181,7 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
     
     def _initialize_retriever(self):
         print("Initializing retriever...")
-        
-        # Create a temporary args object
+
         class Args:
             dataset_folder = self.dataset_folder
             dataset = "demo"
@@ -226,7 +201,6 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         return retriever
     
     def _ensure_video_clip_embeddings(self):
-        """Ensure clip embeddings for the current video are ready."""
         folder_path = f'{self.dataset_folder}/embeddings/{self.clip_duration}/large'
         video_clip_paths, _ = self.retriever.calculate_video_clip_embedding(
             self.video_path, folder_path, total_duration=self.duration, pre_calculate=False
@@ -238,17 +212,16 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
             )
     
     def _get_video_duration(self):
-        """Get video duration."""
         try:
-            from moviepy.video.io.VideoFileClip import VideoFileClip
+            if VideoFileClip is None:
+                raise RuntimeError("moviepy not available")
             with VideoFileClip(self.video_path) as video:
                 return int(video.duration)
         except Exception as e:
             print(f"Warning: Could not get video duration: {e}")
-            return 300  # Default to 5 minutes
+            return 300
     
     def _extract_subtitles(self):
-        """Extract subtitles."""
         if not self.use_subtitle:
             return ""
         
@@ -279,7 +252,6 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         return subtitles
     
     def _build_initial_prompt(self):
-        """Build the initial prompt."""
         question_text = self.question.strip()
         
         if self.use_subtitle:
@@ -301,7 +273,6 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
 
     @staticmethod
     def _use_openai_http(api_base: list) -> bool:
-        """OpenAI-compatible HTTP when base URL is not localhost (or REFINER_FORCE_HTTP_LLM=1)."""
         if os.environ.get("REFINER_FORCE_HTTP_LLM", "").strip() == "1":
             return True
         if os.environ.get("REFINER_USE_VLLM_PICKLE", "").strip() == "1":
@@ -386,11 +357,9 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
     
     
     def _batch_video2text(self, tasks: list):
-        """Process video clips in batch."""
         results = []
         
         for prompt, image_paths, timestamps in tasks:
-            # Load images
             image_data = []
             for img_path in image_paths:
                 if os.path.exists(img_path):
@@ -398,8 +367,7 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
                         image = Image.open(img_path)
                         image.verify()
                         image = Image.open(img_path)
-                        
-                        # Resize if needed
+
                         width, height = image.size
                         if max(width, height) > 768:
                             if width > height:
@@ -418,20 +386,17 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
             if not image_data:
                 results.append("Error: No valid frames")
                 continue
-            
-            # Build messages
+
             content = [
                 {"type": "video", "video": image_paths},
                 {"type": "text", "text": prompt}
             ]
             messages = [{"role": "user", "content": content}]
-            
-            # Format prompt
+
             formatted_prompt = self.processor.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True
             )
-            
-            # Generate response
+
             fps = timestamps[1] - timestamps[0] if len(timestamps) > 1 else 2.0
             
             outputs = self.vlm_server.generate(
@@ -451,9 +416,7 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
             results.append(result)
         
         return results
-    
-    # ==================== Tool processing functions ====================
-    
+
     def _process_temporal_grounding(self, output_text: str) -> str:
         print("\n[Tool] Temporal Grounding Agent")
         
@@ -463,8 +426,7 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         except:
             print("Warning: No valid temporal_grounding_agent found")
             return ""
-        
-        # Build the agent's initial prompt
+
         if self.use_subtitle:
             agent_prompt = initial_input_template_temporal_grounding_agent.format(
                 clip_duration=10, question=question, duration=self.duration
@@ -876,12 +838,10 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         }
     
     def run(self):
-        """Run the full multi-round tool-calling workflow."""
         print("\n" + "="*70)
         print("Starting Video QA Demo - Multi-Turn Tool Calling")
         print("="*70 + "\n")
-        
-        # Build the initial prompt
+
         initial_prompt = self._build_initial_prompt()
         self.messages = [{
             "role": "user",
@@ -890,15 +850,13 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         
         cur_turn = 0
         trace_blocks = []
-        
-        # Multi-turn conversation loop
+
         while cur_turn < MAX_DS_ROUND:
             print(f"\n{'='*70}")
             print(f"Round {cur_turn + 1}/{MAX_DS_ROUND}")
             print(f"{'='*70}")
             cur_trace = [f"[Round] {cur_turn + 1}/{MAX_DS_ROUND}"]
-            
-            # Call planner model
+
             print("\n[Planner] Generating response...")
             output_text = self._text2text(
                 self.messages, 
@@ -914,19 +872,16 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
                 cur_trace.append("[System]\nError: No response from planner")
                 trace_blocks.append("\n\n".join(cur_trace))
                 break
-            
-            # Record planner output
+
             self.messages.append({'role': 'assistant', 'content': output_text})
             cur_turn += 1
-            
-            # Check whether a final answer is present
+
             if '<answer>' in output_text:
                 answer = self._extract_final_answer(output_text)
                 print(f"\n{'='*70}")
                 print(f"Final Answer: {answer}")
                 print(f"{'='*70}\n")
-                
-                # Evaluate correctness
+
                 is_correct = False
                 if self.answer:
                     is_correct = (self._normalize_answer(answer) == self._normalize_answer(self.answer))
@@ -942,8 +897,7 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
                     'total_rounds': cur_turn,
                     'round_traces': trace_blocks
                 }
-            
-            # Process tool calls
+
             print("\n[Tool Processor] Processing tool calls...")
             tool_result = self._process_tool_calls(output_text)
             print(f"\n[Tool Results]\n{tool_result}\n")
@@ -964,8 +918,7 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
                 })
                 print("\n[System] Warning: Invalid output format")
                 cur_trace.append("[System]\nWarning: Invalid output format")
-            
-            # Check whether the maximum number of rounds has been reached
+
             if cur_turn >= MAX_DS_ROUND:
                 self.messages.append({
                     'role': 'user',
@@ -991,8 +944,6 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
 
 
 def main():
-    """Main function: run the trace refinement demo."""
-
     VIDEO_PATH = "/fs/nexus-scratch/gnanesh/cot/VideoMathQA/videos/875b24c9-a2ab-4965-8186-76495a5b553d.mp4"
     QUESTION = (
         "Among Walmart, Target, Whole Foods, and Albertsons, which store shows the highest "

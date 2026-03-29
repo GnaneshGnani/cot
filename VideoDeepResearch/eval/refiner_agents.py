@@ -1,7 +1,3 @@
-"""
-Verifier, Planner, and Trace Refiner agent calls (L1/L2 verification, iteration summaries).
-Mixin on VideoQADemo — expects _text2text, _extract_json_payload, _run_vlm_json, etc.
-"""
 import json
 import os
 import re

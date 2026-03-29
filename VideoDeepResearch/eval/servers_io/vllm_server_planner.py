@@ -1,14 +1,47 @@
 import os
-os.environ["VLLM_USE_MODELSCOPE"] = "false"   
+import sys
+
+# os.environ["VLLM_USE_MODELSCOPE"] = "false"
+# sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# import tokenizer_vllm_compat
+
+# tokenizer_vllm_compat.apply()
+
 import glob
 import pickle
 import threading
 import fcntl
-from vllm import LLM, EngineArgs, SamplingParams
 import time
 import re
 
+import torch
+from vllm import LLM, EngineArgs, SamplingParams
+
 file_lock = threading.Lock()
+
+
+def _listener_tensor_parallel_size() -> int:
+    """vLLM shards weights across this many GPUs. Default: all visible CUDA devices (often 1 per Slurm step)."""
+    raw = os.getenv("VLLM_TENSOR_PARALLEL_SIZE", "").strip()
+    if raw:
+        return max(1, int(raw))
+    return max(1, torch.cuda.device_count())
+
+
+def _planner_llm_kwargs(model_name: str, tensor_parallel_size: int) -> dict:
+    """Tune via env if loading large models still OOMs on your GPUs."""
+    gpu_mem = float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.85"))
+    max_len = int(os.getenv("VLLM_MAX_MODEL_LEN", "32768"))
+    kw = dict(
+        model=model_name,
+        gpu_memory_utilization=gpu_mem,
+        tensor_parallel_size=tensor_parallel_size,
+        max_model_len=max_len,
+        enable_chunked_prefill=True,
+    )
+    if os.getenv("VLLM_ENFORCE_EAGER", "").strip().lower() in ("1", "true", "yes"):
+        kw["enforce_eager"] = True
+    return kw
 
 
 def safe_pickle_load(file_path):
@@ -150,26 +183,19 @@ class VLM_Listener:
         print("Started cleanup thread for output directory")
 
     
+        _tp = _listener_tensor_parallel_size()
+        print(f"tensor_parallel_size={_tp} (set VLLM_TENSOR_PARALLEL_SIZE to override; visible CUDA devices={torch.cuda.device_count()})")
+        _base_kw = _planner_llm_kwargs(MODEL_NAME, _tp)
         try:
             print("Initializing VLLM server with conservative settings...")
-            self.vlm_server = LLM(
-                model = MODEL_NAME, 
-                gpu_memory_utilization=0.85,  
-                tensor_parallel_size=1,
-                max_model_len=32768,  
-                enable_chunked_prefill=True,
-            )
+            self.vlm_server = LLM(**_base_kw)
             print("VLLM server initialized successfully")
         except Exception as e:
             print(f"Error initializing VLLM server: {e}")
-            self.vlm_server = LLM(
-                model = MODEL_NAME, 
-                gpu_memory_utilization=0.9, 
-                tensor_parallel_size=1,
-                max_model_len=32768,  
-                enable_chunked_prefill=True,
-                enable_lora=True,
-            )
+            _retry = dict(_base_kw)
+            _retry["gpu_memory_utilization"] = min(0.95, float(_retry.get("gpu_memory_utilization", 0.85)) + 0.05)
+            _retry["enable_lora"] = True
+            self.vlm_server = LLM(**_retry)
 
 
 

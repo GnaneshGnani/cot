@@ -1,12 +1,7 @@
-"""
-Shared helpers for trace refinement (JSON, frames, subtitles, trace formatting).
-Used as a mixin on VideoQADemo — expects self.video_path, self.dataset_folder, self.duration,
-self.clip_duration, self._batch_video2text (from main class).
-"""
 import json
 import re
 
-from video_utils import timestamp_to_clip_path, extract_subtitles, robust_eval
+from video_utils import extract_subtitles, robust_eval, timestamp_to_clip_path
 
 
 class RefinerUtilsMixin:

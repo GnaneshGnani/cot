@@ -1,14 +1,27 @@
-"""
-Refinement tool handlers (temporal grounder, OCR, ASR, etc.) as a mixin on VideoQADemo.
-"""
 import json
 import os
 import subprocess
+import sys
 import tempfile
+
+_eval_dir = os.path.dirname(os.path.abspath(__file__))
+if _eval_dir not in sys.path:
+    sys.path.insert(0, _eval_dir)
+
+import hf_cache
+
+hf_cache.ensure_hf_cache_env()
+
+import numpy as np
+import torch
+import whisperx
+import soundfile as sf
+from laion_clap import CLAP_Module
+from paddleocr import PaddleOCR
+import pytesseract
 
 from PIL import Image
 
-from video_utils import robust_eval
 from refine_prompt import (
     action_recognizer_prompt,
     counter_prompt,
@@ -17,8 +30,8 @@ from refine_prompt import (
     spatial_grunder_prompt,
     video_qa_reanswerer_prompt,
 )
+from video_utils import robust_eval
 
-# Lazy singletons for optional heavy backends
 _WHISPERX_MODEL = None
 _WHISPERX_ALIGN = None
 _WHISPERX_META = None
@@ -92,13 +105,12 @@ class RefinerToolsMixin:
 
     def _get_asr_whisperx(self, start_time=None, end_time=None):
         global _WHISPERX_MODEL, _WHISPERX_ALIGN, _WHISPERX_META
-        import torch
+        if whisperx is None or torch is None:
+            raise ImportError("whisperx or torch not installed")
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         compute_type = "float16" if device == "cuda" else "int8"
         model_name = os.getenv("WHISPERX_MODEL", "large-v3")
-
-        import whisperx
 
         if _WHISPERX_MODEL is None:
             _WHISPERX_MODEL = whisperx.load_model(model_name, device, compute_type=compute_type)
@@ -286,9 +298,13 @@ class RefinerToolsMixin:
 
     def _audio_grounder_clap(self, arguments: dict) -> dict:
         global _CLAP_MODULE
-        import numpy as np
-        import torch
-        import soundfile as sf
+        if np is None or sf is None or torch is None or CLAP_Module is None:
+            return {
+                "query": str(arguments.get("query", "")).strip(),
+                "events": [],
+                "audio_summary": "laion_clap or deps not available",
+                "backend": "none",
+            }
 
         query = str(arguments.get("query", "")).strip()
         st = arguments.get("start_time")
@@ -320,16 +336,6 @@ class RefinerToolsMixin:
         except Exception as e:
             print(f"  ffmpeg audio extract failed: {e}")
             return {"query": query, "events": [], "audio_summary": "audio extract failed", "backend": "none"}
-
-        try:
-            from laion_clap import CLAP_Module
-        except ImportError:
-            return {
-                "query": query,
-                "events": [],
-                "audio_summary": "laion_clap not installed",
-                "backend": "none",
-            }
 
         if _CLAP_MODULE is None:
             _CLAP_MODULE = CLAP_Module(enable_fusion=False)
@@ -428,7 +434,8 @@ class RefinerToolsMixin:
 
     def _ocr_paddle(self, frame_path: str) -> list:
         global _PADDLE_OCR
-        from paddleocr import PaddleOCR
+        if PaddleOCR is None:
+            raise ImportError("paddleocr not installed")
 
         if _PADDLE_OCR is None:
             _PADDLE_OCR = PaddleOCR(use_angle_cls=True, lang="en", show_log=False)
@@ -455,7 +462,8 @@ class RefinerToolsMixin:
         return detections
 
     def _ocr_pytesseract(self, frame_path: str) -> list:
-        import pytesseract
+        if pytesseract is None:
+            raise ImportError("pytesseract not installed")
 
         data = pytesseract.image_to_data(Image.open(frame_path), output_type=pytesseract.Output.DICT)
         detections = []
