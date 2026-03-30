@@ -68,7 +68,10 @@ You MUST respond with a JSON object and NOTHING else:
   available), correct answer, and sufficient completeness.
 - When suggesting tools, choose from: temporal_grounder, frame_retriever, asr,
   audio_grounder, ocr, spatial_grounder, counter, dense_captioner,
-  action_recognizer, video_qa_reanswerer.
+  action_recognizer, chart_analyzer.
+- For frames containing charts, graphs, plots, tables, or flowcharts (e.g.
+  VideoMathQA), prefer chart_analyzer over ocr — it interprets axes, data
+  values, trends, and structural relationships, not just raw text pixels.
 - For PASS verdicts, error_categories should be an empty list.
 - Confidence below 0.7 should trigger FAIL even if no specific errors are found
   (indicates insufficient evidence to verify).
@@ -128,9 +131,12 @@ evidence needed to fix those errors.
    Classifies human actions/activities in a video segment.
    USE WHEN: trace describes actions incorrectly or action verification is needed.
 
-10. video_qa_reanswerer(video_path: str, question: str) -> {answer: str, reasoning: str, confidence: float}
-    Independently answers the question from the video without seeing the original trace.
-    USE WHEN: the answer is suspected to be wrong; need an independent second opinion.
+10. chart_analyzer(frame_path: str | null, timestamp: float | null, query: str | null) -> {chart_type: str, title: str, axes: dict, series: list, key_observations: list, relationships: list, query_response: str | null}
+    Interprets charts, graphs, plots, flowcharts, and diagrams — reads axis labels
+    and ranges, data series values, trends, and structural node/edge relationships.
+    USE WHEN: trace references chart data, graph readings, plot trends, table values,
+    or flowchart logic. Prefer over ocr for any frame where the question involves
+    interpreting a visual structure (e.g. VideoMathQA chart frames, process diagrams).
 
 ━━━ You will receive ━━━
 - QUESTION: The original question
@@ -163,9 +169,17 @@ Respond with a JSON plan and NOTHING else:
 - Minimize tool calls. Only call tools that address diagnosed errors.
 - Order matters: if tool B needs output from tool A, set depends_on correctly.
   Independent calls (no dependency) can run in parallel.
+- To pass a value from a prior step's output into a later step's argument, use
+  the placeholder syntax `<STEP_N:json.path>` where N is the step number and
+  `json.path` is the full dot-and-bracket path to the field. Always use the
+  full path. Examples:
+    - `<STEP_1:frames[0].frame_path>`  →  first frame path from step 1
+    - `<STEP_1:frames[1].frame_path>`  →  second frame path from step 1
+    - `<STEP_2:segments[0].start>`     →  start time of first segment from step 2
+  Never invent other reference formats.
 - Prefer using PREPROCESSED_ARTIFACTS before calling tools (e.g., check the
   cached ASR transcript before calling asr again).
-- If the diagnosis contains ANSWER_ERROR, ALWAYS include video_qa_reanswerer.
+- If the diagnosis contains ANSWER_ERROR, prioritize frame_retriever, dense_captioner, and ocr as needed to verify or correct the answer. Use chart_analyzer instead of (or after) ocr when the frame contains a chart, graph, or diagram.
 - If the diagnosis contains TIMESTAMP_ERROR, ALWAYS include temporal_grounder.
 - For INCOMPLETE_TRACE, typically start with dense_captioner on the relevant
   time range, then follow up with specialized tools.
@@ -214,8 +228,7 @@ You may perform these operations on the trace:
 5. DELETE_STEP: Remove a step that is entirely hallucinated (not supported by
    any video evidence). Rare — prefer patching over deletion.
 
-6. PATCH_ANSWER: Change the final answer when tool evidence (especially
-   video_qa_reanswerer) indicates it is wrong.
+6. PATCH_ANSWER: Change the final answer when tool evidence indicates it is wrong.
 
 7. PATCH_MODALITY: Correct the modality tag (V/A) of a step when evidence shows
    the information came from a different modality than claimed.
@@ -650,52 +663,68 @@ RULES:
 - Timestamps must be precise to 0.1 second granularity.
 '''
 
-video_qa_reanswerer_prompt='''
-SYSTEM PROMPT — VIDEO QA RE-ANSWERER TOOL
-
-You are an independent video question-answering module. Given a video and a
-question, derive the answer from scratch WITHOUT reference to any existing trace
-or answer. You serve as an independent cross-check.
+chart_analyzer_prompt = '''
+You are a chart and diagram analysis module. Given a frame containing a chart,
+graph, flowchart, or diagram, interpret its STRUCTURE and SEMANTICS — not just
+the visible text.
 
 INPUT:
-  - video_path: Path to the video file
-  - question: The question to answer
-  - answer_format: (optional) Expected format — "multiple_choice" (with options),
-    "open_ended", or "numerical"
-  - options: (optional) List of answer choices for multiple_choice format
+  - frame_path: Path to an image file (or video_path + timestamp)
+  - query: (optional) Specific question about the chart
+    (e.g., "what is the peak value?", "which step comes after X?",
+           "what is the trend between 2010 and 2020?")
 
 TASK:
-  1. Watch the video carefully.
-  2. Reason through the question step by step.
-  3. Provide your answer and a reasoning trace.
-  4. If multiple_choice, select the best option. If open_ended, provide a concise
-     answer. If numerical, provide the number.
+  1. Identify the type of visual (bar chart, line graph, pie chart, scatter plot,
+     flowchart, table, heatmap, Venn diagram, etc.).
+  2. Extract structural elements: axes labels and ranges, legend entries, series
+     names, data point values, tick marks, units.
+  3. For flowcharts and diagrams: extract nodes, edges, and edge labels to capture
+     the logical flow or relationships.
+  4. Identify key observations: trends, peaks, minima, comparisons, anomalies.
+  5. If a query is provided, directly answer it using the extracted information.
 
 OUTPUT FORMAT (JSON):
 {
-  "question": "<echoed question>",
-  "answer": "<your answer>",
-  "reasoning": "<step-by-step reasoning trace explaining how you arrived at the
-    answer, with timestamps for key evidence>",
-  "confidence": <float, 0.0-1.0>,
-  "key_evidence": [
+  "chart_type": "<one of: bar, line, pie, scatter, flowchart, table, heatmap,
+                  venn, area, histogram, boxplot, diagram, other>",
+  "title": "<chart title if visible, or empty string>",
+  "axes": {
+    "x": {"label": "<axis label>", "range": [<min>, <max>], "unit": "<unit or null>"},
+    "y": {"label": "<axis label>", "range": [<min>, <max>], "unit": "<unit or null>"}
+  },
+  "series": [
     {
-      "timestamp": <float, seconds>,
-      "modality": "visual" or "audio" or "both",
-      "observation": "<what you observed that supports your answer>"
+      "name": "<series/legend label>",
+      "data_points": [
+        {"x": <value or label>, "y": <value>, "label": "<optional annotation>"}
+      ]
     }
-  ]
+  ],
+  "key_observations": [
+    "<concise observation, e.g., 'Sales peak in Q3 2022 at 450 units'>",
+    "<trend, comparison, or notable feature>"
+  ],
+  "relationships": [
+    {"from": "<node or concept>", "to": "<node or concept>", "label": "<edge label or null>"}
+  ],
+  "query_response": "<direct answer to the query if one was given, or null>"
 }
 
 RULES:
-- You must NOT be given the original trace or answer. Your job is to answer
-  independently.
-- Be thorough: watch/listen to the entire video, not just the beginning.
-- Ground every claim in specific timestamps.
-- If the question is unanswerable from the video content, state so explicitly
-  and set confidence low.
-- For multiple_choice, if uncertain between options, rank your top choices with
-  confidence for each.
-- Your reasoning trace should be detailed enough that the Refiner can use it as
-  an alternative source of truth.
+- For non-chart visuals (plain images, photos), set chart_type to "other" and
+  populate key_observations with a description of what is visible.
+- axes and series may be empty lists/objects if not applicable (e.g., flowchart).
+- relationships is primarily for flowcharts and diagrams; leave empty for charts.
+- Read numerical values carefully — prefer exact values over approximations.
+- If axis ranges or tick values are partially occluded, note this in key_observations.
+- For pie charts, express data_points as {"x": "<slice label>", "y": <percentage or value>}.
+- key_observations should be self-contained sentences useful for downstream reasoning.
 '''
+
+# video_qa_reanswerer tool disabled — prompt kept below for reference.
+# video_qa_reanswerer_prompt='''
+# SYSTEM PROMPT — VIDEO QA RE-ANSWERER TOOL
+# ...
+# '''
+video_qa_reanswerer_prompt = ""

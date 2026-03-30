@@ -1,7 +1,9 @@
 import json
 import os
 import re
+from pathlib import Path
 
+import refiner_debug
 from refine_prompt import planner_prompt, refiner_prompt, verifier_propmt
 
 
@@ -34,8 +36,8 @@ class RefinerAgentsMixin:
             return max(float(d.get("confidence", 0) or 0) for d in dets)
         if tool_name == "counter":
             return float(result.get("confidence", 0) or 0)
-        if tool_name == "video_qa_reanswerer":
-            return float(result.get("confidence", 0) or 0)
+        # if tool_name == "video_qa_reanswerer":
+        #     return float(result.get("confidence", 0) or 0)
         if tool_name == "dense_captioner":
             caps = result.get("captions") or []
             return 1.0 if caps else 0.0
@@ -209,45 +211,87 @@ class RefinerAgentsMixin:
         history: list = None,
         max_iterations: int = 3,
     ):
+        ibase = getattr(self, "_refinement_debug_iter_dir", None)
+        v_out_dir = None
+        if ibase:
+            v_out_dir = refiner_debug.ensure_outputs_dir(Path(ibase) / "verifier")
+
         prompt = self._build_verifier_prompt(
             trace_steps, trace_answer, iteration=iteration, history=history, max_iterations=max_iterations
         )
         messages = [{"role": "user", "content": prompt}]
+        if v_out_dir:
+            refiner_debug.write_json(
+                v_out_dir,
+                "l1_model_input.json",
+                {"model": self.planner_model_name, "input": messages},
+            )
+
         l1_raw = self._text2text(
             messages, self.planner_model_name, self.planner_api_base, self.planner_api_keys
         )
+        if v_out_dir:
+            refiner_debug.write_text(v_out_dir, "l1_output.txt", l1_raw or "")
+
         l1_parsed = self._extract_json_payload(l1_raw)
         l1_out = l1_parsed if isinstance(l1_parsed, dict) else None
 
+        def _write_l1_only_merged():
+            if not v_out_dir:
+                return
+            merged_local = l1_out if isinstance(l1_out, dict) else {}
+            refiner_debug.write_json(v_out_dir, "merged_verdict.json", merged_local)
+            refiner_debug.write_text(v_out_dir, "combined_raw.txt", l1_raw or "")
+
         skip_l2 = self._should_skip_l2(history or [], l1_out or {})
         if skip_l2:
+            _write_l1_only_merged()
             return l1_raw, l1_out
 
-        frame_paths, timestamps, _, _ = self._get_frames_for_range(None, None, fps=0.5)
-        if not frame_paths:
-            return l1_raw, l1_out
+        # L2 (video) verifier: disabled for now. Re-enable by uncommenting below and
+        # removing the _write_l1_only_merged / return block that follows.
+        _write_l1_only_merged()
+        return l1_raw, l1_out
 
-        l2_default = {
-            "verdict": "FAIL",
-            "answer_correct": False,
-            "trace_quality_scores": {
-                "perceptual_correctness": 0,
-                "temporal_accuracy": 0,
-                "logical_coherence": 10,
-                "completeness": 5,
-            },
-            "error_categories": [],
-            "confidence": 0.0,
-            "summary": "L2 skipped: no frames",
-        }
-        l2_prompt = self._build_verifier_l2_prompt(trace_steps, trace_answer, l1_out or {})
-        l2_parsed = self._run_vlm_json(l2_prompt, frame_paths, timestamps, l2_default)
-        l2_out = l2_parsed if isinstance(l2_parsed, dict) else l2_default
-
-        merged = self._merge_verifier_l1_l2(l1_out or {}, l2_out)
-        merged_raw = json.dumps(merged, ensure_ascii=False, indent=2)
-        combined_raw = f"=== L1 (text) ===\n{l1_raw}\n\n=== L2 (video) ===\n{json.dumps(l2_out, ensure_ascii=False, indent=2)}\n\n=== MERGED ===\n{merged_raw}"
-        return combined_raw, merged
+        # frame_paths, timestamps, _, _ = self._get_frames_for_range(None, None, fps=0.5)
+        # if not frame_paths:
+        #     _write_l1_only_merged()
+        #     return l1_raw, l1_out
+        #
+        # l2_default = {
+        #     "verdict": "FAIL",
+        #     "answer_correct": False,
+        #     "trace_quality_scores": {
+        #         "perceptual_correctness": 0,
+        #         "temporal_accuracy": 0,
+        #         "logical_coherence": 10,
+        #         "completeness": 5,
+        #     },
+        #     "error_categories": [],
+        #     "confidence": 0.0,
+        #     "summary": "L2 skipped: no frames",
+        # }
+        # l2_prompt = self._build_verifier_l2_prompt(trace_steps, trace_answer, l1_out or {})
+        # if v_out_dir:
+        #     self._refinement_debug_vlm_outputs_dir = v_out_dir
+        #     self._refinement_debug_vlm_input_basename = "l2_model_input.json"
+        # try:
+        #     l2_parsed = self._run_vlm_json(l2_prompt, frame_paths, timestamps, l2_default)
+        # finally:
+        #     self._refinement_debug_vlm_outputs_dir = None
+        #     self._refinement_debug_vlm_input_basename = None
+        #
+        # l2_out = l2_parsed if isinstance(l2_parsed, dict) else l2_default
+        #
+        # merged = self._merge_verifier_l1_l2(l1_out or {}, l2_out)
+        # merged_raw = json.dumps(merged, ensure_ascii=False, indent=2)
+        # combined_raw = f"=== L1 (text) ===\n{l1_raw}\n\n=== L2 (video) ===\n{json.dumps(l2_out, ensure_ascii=False, indent=2)}\n\n=== MERGED ===\n{merged_raw}"
+        # if v_out_dir:
+        #     refiner_debug.write_json(v_out_dir, "l2_output.json", l2_out)
+        #     refiner_debug.write_json(v_out_dir, "merged_verdict.json", merged)
+        #     refiner_debug.write_text(v_out_dir, "combined_raw.txt", combined_raw)
+        #
+        # return combined_raw, merged
 
     def _build_planner_prompt(
         self,
@@ -293,6 +337,11 @@ class RefinerAgentsMixin:
         history: list = None,
         max_iterations: int = 3,
     ):
+        ibase = getattr(self, "_refinement_debug_iter_dir", None)
+        p_out_dir = None
+        if ibase:
+            p_out_dir = refiner_debug.ensure_outputs_dir(Path(ibase) / "planner")
+
         prompt = self._build_planner_prompt(
             trace_steps,
             trace_answer,
@@ -302,11 +351,25 @@ class RefinerAgentsMixin:
             max_iterations=max_iterations,
         )
         messages = [{"role": "user", "content": prompt}]
+        if p_out_dir:
+            refiner_debug.write_json(
+                p_out_dir,
+                "model_input.json",
+                {"model": self.planner_model_name, "input": messages},
+            )
+
         raw_output = self._text2text(
             messages, self.planner_model_name, self.planner_api_base, self.planner_api_keys
         )
+        if p_out_dir:
+            refiner_debug.write_text(p_out_dir, "raw_output.txt", raw_output or "")
+
         parsed_output = self._extract_json_payload(raw_output)
-        return raw_output, parsed_output if isinstance(parsed_output, dict) else None
+        parsed_dict = parsed_output if isinstance(parsed_output, dict) else None
+        if p_out_dir and parsed_dict is not None:
+            refiner_debug.write_json(p_out_dir, "plan.json", parsed_dict)
+
+        return raw_output, parsed_dict
 
     def _normalize_refined_trace(self, raw, fallback: list) -> list:
         if isinstance(raw, list):
@@ -369,12 +432,31 @@ class RefinerAgentsMixin:
         executed_tools: list,
         planner_output: dict,
     ):
+        ibase = getattr(self, "_refinement_debug_iter_dir", None)
+        r_out_dir = None
+        if ibase:
+            r_out_dir = refiner_debug.ensure_outputs_dir(Path(ibase) / "refiner")
+
         prompt = self._build_refiner_prompt(
             trace_steps, trace_answer, diagnosis, executed_tools, planner_output or {}
         )
         messages = [{"role": "user", "content": prompt}]
+        if r_out_dir:
+            refiner_debug.write_json(
+                r_out_dir,
+                "model_input.json",
+                {"model": self.planner_model_name, "input": messages},
+            )
+
         raw_output = self._text2text(
             messages, self.planner_model_name, self.planner_api_base, self.planner_api_keys
         )
+        if r_out_dir:
+            refiner_debug.write_text(r_out_dir, "raw_output.txt", raw_output or "")
+
         parsed_output = self._extract_json_payload(raw_output)
-        return raw_output, parsed_output if isinstance(parsed_output, dict) else None
+        parsed_dict = parsed_output if isinstance(parsed_output, dict) else None
+        if r_out_dir and parsed_dict is not None:
+            refiner_debug.write_json(r_out_dir, "parsed.json", parsed_dict)
+
+        return raw_output, parsed_dict

@@ -62,6 +62,7 @@ class Retrieval_Manager():
 
         self.clip_embs_cache = {}
         self.frame_embs_cache = {}
+        self.dense_frame_embs_cache = {}
         self.batch_size = 1
         self.clip_save_folder = clip_save_folder
         self.args=args
@@ -532,6 +533,152 @@ class Retrieval_Manager():
         if top_k==0:
             result = result[:10]
 
+        return result
+
+    def _list_dense_frame_paths(self, dataset_folder: str, video_path: str):
+        video_name = os.path.splitext(os.path.basename(video_path))[0]
+        dense_dir = os.path.join(dataset_folder, "dense_frames", video_name)
+        if not os.path.isdir(dense_dir):
+            return [], dense_dir
+        files = [
+            f
+            for f in os.listdir(dense_dir)
+            if f.startswith("frame_") and f.lower().endswith(".png")
+        ]
+        files.sort(key=lambda x: float(x.replace("frame_", "").replace(".png", "")))
+        return [os.path.join(dense_dir, f) for f in files], dense_dir
+
+    @staticmethod
+    def _timestamp_from_dense_frame_path(path: str) -> float:
+        base = os.path.basename(path)
+        # frame_123.45.png
+        num = base.replace("frame_", "").replace(".png", "")
+        return float(num)
+
+    @torch.no_grad()
+    def get_informative_dense_frames(
+        self,
+        query: str,
+        video_path: str,
+        dataset_folder: str,
+        top_k: int = 5,
+        total_duration: float = None,
+        materialize_if_empty: bool = True,
+        dense_sample_fps: float = 24.0,
+        embed_batch: int = 8,
+    ):
+        """Text-to-frame retrieval over all dense PNGs (LanguageBind text vs image embeddings)."""
+        torch.cuda.empty_cache()
+        if not query or not str(query).strip():
+            return []
+
+        frame_paths, dense_dir = self._list_dense_frame_paths(dataset_folder, video_path)
+        if not frame_paths and materialize_if_empty and total_duration is not None and total_duration > 0:
+            try:
+                from video_utils import timestamp_to_clip_path
+
+                timestamp_to_clip_path(
+                    dataset_folder,
+                    0.0,
+                    float(total_duration),
+                    video_path,
+                    fps=float(dense_sample_fps),
+                )
+            except Exception as e:
+                print(f"  dense frame materialize skipped: {e}")
+            frame_paths, dense_dir = self._list_dense_frame_paths(dataset_folder, video_path)
+
+        if not frame_paths:
+            return []
+
+        video_name = os.path.splitext(os.path.basename(video_path))[0]
+        folder_path = os.path.join(
+            dataset_folder, "embeddings", "dense_frame", self.args.retriever_type
+        )
+        os.makedirs(folder_path, exist_ok=True)
+        emb_path = os.path.join(folder_path, f"{video_name}.pkl")
+        paths_path = os.path.join(folder_path, f"{video_name}_frame_paths.pkl")
+
+        q_emb = self.calculate_text_embedding(query, flag_save_embedding=False).cpu()
+        q_emb = q_emb / q_emb.norm(p=2, dim=1, keepdim=True)
+
+        cache_key = os.path.abspath(video_path)
+        frame_embs = None
+        if cache_key in self.dense_frame_embs_cache:
+            cp, fe = self.dense_frame_embs_cache[cache_key]
+            if cp == frame_paths:
+                frame_embs = fe
+            else:
+                del self.dense_frame_embs_cache[cache_key]
+
+        if frame_embs is None and os.path.exists(emb_path) and os.path.exists(paths_path):
+            try:
+                cp = pickle.load(open(paths_path, "rb"))
+                frame_embs = pickle.load(open(emb_path, "rb"))
+                if isinstance(frame_embs, dict):
+                    frame_embs = frame_embs.get("image", frame_embs)
+                if cp == frame_paths:
+                    self.dense_frame_embs_cache[cache_key] = (frame_paths, frame_embs)
+                else:
+                    frame_embs = None
+            except Exception:
+                frame_embs = None
+
+        if frame_embs is None:
+            total_embeddings = []
+            valid_paths = []
+            batch_size = max(1, int(embed_batch))
+            for i in tqdm(
+                range(0, len(frame_paths), batch_size),
+                desc=f"dense_frame_emb {video_name}",
+            ):
+                batch = frame_paths[i : i + batch_size]
+                try:
+                    inputs = {
+                        "image": to_device(
+                            self.modality_transform["image"](batch), self.device
+                        )
+                    }
+                    with torch.no_grad():
+                        emb = self.model(inputs)["image"].cpu()
+                    total_embeddings.append(emb)
+                    valid_paths.extend(batch)
+                except Exception:
+                    for p in batch:
+                        try:
+                            inputs = {
+                                "image": to_device(
+                                    self.modality_transform["image"](p), self.device
+                                )
+                            }
+                            with torch.no_grad():
+                                emb = self.model(inputs)["image"].cpu()
+                            total_embeddings.append(emb)
+                            valid_paths.append(p)
+                        except Exception as e2:
+                            print(f"  skip frame emb {p}: {e2}")
+                    torch.cuda.empty_cache()
+
+            if not total_embeddings:
+                return []
+            frame_embs = torch.cat(total_embeddings, dim=0)
+            if len(valid_paths) != len(frame_paths):
+                frame_paths = valid_paths
+            os.makedirs(folder_path, exist_ok=True)
+            pickle.dump(frame_paths, open(paths_path, "wb"))
+            pickle.dump(frame_embs, open(emb_path, "wb"))
+            self.dense_frame_embs_cache[cache_key] = (frame_paths, frame_embs)
+
+        frame_embs = frame_embs.cpu()
+        frame_embs = frame_embs / frame_embs.norm(p=2, dim=1, keepdim=True)
+        similarities = torch.matmul(q_emb, frame_embs.T)[0]
+        k = min(top_k, similarities.shape[0])
+        top_k_indices = similarities.argsort(descending=True)[:k].tolist()
+
+        result = []
+        for i in top_k_indices:
+            result.append((frame_paths[i], similarities[i].item()))
+        torch.cuda.empty_cache()
         return result
 
 

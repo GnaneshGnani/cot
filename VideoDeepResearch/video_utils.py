@@ -34,6 +34,11 @@ MIN_FRAMES = 20
 MAX_RESOLUTION = 1024
 
 
+def get_max_dense_frames():
+    """No cap: keep all time points requested by ``timestamp_to_clip_path``."""
+    return None
+
+
 from pathlib import Path
 
 import ast
@@ -204,7 +209,7 @@ import cv2
 from PIL import Image
 def timestamp_to_frames(video_path, begin_timestamp, end_timestamp, frame_folder):
     
-    max_frames = MAX_FRAMES
+    max_frames = get_max_dense_frames()
     video_id = os.path.splitext(os.path.basename(video_path))[0]
     frame_folder = os.path.join(frame_folder, video_id)
     os.makedirs(frame_folder, exist_ok=True)
@@ -218,7 +223,7 @@ def timestamp_to_frames(video_path, begin_timestamp, end_timestamp, frame_folder
             clip_frames.append(f'{frame_folder}/{frame}')
             timestamps.append(second)
     
-    if len(clip_frames) > max_frames:
+    if max_frames is not None and len(clip_frames) > max_frames:
         chunk_size = len(clip_frames) // max_frames
         clip_frames = clip_frames[::chunk_size][:max_frames]
         timestamps = timestamps[::chunk_size][:max_frames]
@@ -226,7 +231,7 @@ def timestamp_to_frames(video_path, begin_timestamp, end_timestamp, frame_folder
 
 
 def timestamp_to_clip_path(dataset_folder, begin_time_stamp, end_time_stamp, video_path, fps=2):
-    max_frames = MAX_FRAMES
+    max_frames = get_max_dense_frames()
     video_id = os.path.splitext(os.path.basename(video_path))[0]
     frame_folder = os.path.join(dataset_folder, f'dense_frames/{video_id}/')
     os.makedirs(frame_folder, exist_ok=True)
@@ -235,12 +240,16 @@ def timestamp_to_clip_path(dataset_folder, begin_time_stamp, end_time_stamp, vid
         begin_time_stamp = max(begin_time_stamp - 0.5, 0)
         end_time_stamp += 0.5
 
-    if int((end_time_stamp - begin_time_stamp) * fps) < max_frames: # densely
-        num_frames = int((end_time_stamp - begin_time_stamp) * fps)
+    span = end_time_stamp - begin_time_stamp
+    needed = max(1, int(span * fps))
+    if max_frames is None or needed <= max_frames:
+        num_frames = needed
         time_points = [begin_time_stamp + i * (1.0 / fps) for i in range(num_frames)]
-    else: # sparsely
+    else:
         num_frames = max_frames
-        time_points = [begin_time_stamp + i * ((end_time_stamp - begin_time_stamp) / num_frames) for i in range(num_frames)]
+        time_points = [
+            begin_time_stamp + i * (span / num_frames) for i in range(num_frames)
+        ]
         
         
     cap = cv2.VideoCapture(video_path)
@@ -284,7 +293,7 @@ def timestamp_to_clip_path(dataset_folder, begin_time_stamp, end_time_stamp, vid
 
     cap.release()
 
-    if len(frame_paths) > max_frames:
+    if max_frames is not None and len(frame_paths) > max_frames:
         chunk_size = len(frame_paths) // max_frames
         frame_paths = frame_paths[::chunk_size][:max_frames]
         timestamps = timestamps[::chunk_size][:max_frames]
@@ -349,10 +358,11 @@ def clip_number_to_clip_path(dataset_folder, clip_numbers, video_path, clip_dura
 
     cap.release()
 
-    if len(frame_list) > MAX_FRAMES:
-        interval = len(frame_list) / MAX_FRAMES
-        frame_list = [frame_list[int(i * interval)] for i in range(MAX_FRAMES)]
-        second_list = [second_list[int(i * interval)] for i in range(MAX_FRAMES)]
+    _cap = get_max_dense_frames()
+    if _cap is not None and len(frame_list) > _cap:
+        interval = len(frame_list) / _cap
+        frame_list = [frame_list[int(i * interval)] for i in range(_cap)]
+        second_list = [second_list[int(i * interval)] for i in range(_cap)]
 
     if len(frame_list) < MIN_FRAMES and len(frame_list) > 0:
         interval = len(frame_list) / MIN_FRAMES

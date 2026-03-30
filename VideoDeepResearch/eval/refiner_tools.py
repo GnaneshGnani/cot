@@ -1,8 +1,11 @@
+import base64
+import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 _eval_dir = os.path.dirname(os.path.abspath(__file__))
 if _eval_dir not in sys.path:
@@ -14,21 +17,27 @@ hf_cache.ensure_hf_cache_env()
 
 import numpy as np
 import torch
+import torchvision.transforms as T
 import whisperx
 import soundfile as sf
 from laion_clap import CLAP_Module
+from openai import OpenAI
 from paddleocr import PaddleOCR
 import pytesseract
-
 from PIL import Image
+from torchvision.transforms.functional import InterpolationMode
+from transformers import AutoModel, AutoTokenizer
 
+import refiner_debug
+from refiner_utils import openai_chat_completion_limit_kwargs, openai_chat_temperature_kwargs
 from refine_prompt import (
     action_recognizer_prompt,
+    chart_analyzer_prompt,
     counter_prompt,
     dense_captioner_prompt,
     ocr_prompt,
     spatial_grunder_prompt,
-    video_qa_reanswerer_prompt,
+    # video_qa_reanswerer_prompt,
 )
 from video_utils import robust_eval
 
@@ -40,6 +49,114 @@ _CLAP_MODULE = None
 
 
 class RefinerToolsMixin:
+    def _chart_torch_device(self):
+        raw = str(getattr(self, "chart_device", "cuda:1")).strip()
+        if raw.isdigit():
+            return torch.device(f"cuda:{int(raw)}")
+        return torch.device(raw)
+
+    def _chart_effective_api_bases(self):
+        b = getattr(self, "chart_api_base", None)
+        if b is not None and len(b) and (b[0] or "").strip():
+            return list(b)
+        return list(getattr(self, "planner_api_base", None) or [])
+
+    def _chart_effective_api_keys(self):
+        k = getattr(self, "chart_api_keys", None)
+        if k is not None:
+            return list(k)
+        return list(getattr(self, "planner_api_keys", None) or [])
+
+    def _load_chart_model(self):
+        if getattr(self, "_chart_model", None) is not None:
+            return
+        device = self._chart_torch_device()
+        model_name = self.chart_model_name
+        print(f"  Loading chart VLM: {model_name} on {device}")
+        self._chart_model = AutoModel.from_pretrained(
+            model_name,
+            torch_dtype=torch.bfloat16,
+            low_cpu_mem_usage=True,
+            trust_remote_code=True,
+        ).eval().to(device)
+        self._chart_tokenizer = AutoTokenizer.from_pretrained(
+            model_name,
+            trust_remote_code=True,
+            use_fast=False,
+        )
+        print(f"  ✓ Chart VLM loaded: {model_name}")
+
+    def _call_chart_vision_api(self, prompt_text: str, frame_path: str) -> str:
+        img = Image.open(frame_path).convert("RGB")
+        width, height = img.size
+        if max(width, height) > 768:
+            if width > height:
+                nw, nh = 768, int(height * (768 / width))
+            else:
+                nh, nw = 768, int(width * (768 / height))
+            img = img.resize((nw, nh), Image.Resampling.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                    {"type": "text", "text": prompt_text},
+                ],
+            }
+        ]
+        vlm_out = getattr(self, "_refinement_debug_vlm_outputs_dir", None)
+        if vlm_out:
+            refiner_debug.write_json(
+                vlm_out,
+                "model_input.json",
+                {"model": self.chart_model_name, "messages": messages, "frame_path": frame_path},
+            )
+        bases = self._chart_effective_api_bases()
+        keys = self._chart_effective_api_keys()
+        pairs = list(zip(bases, keys))
+        if not pairs:
+            print("[CHART_VISION_API] ERROR: no API base/key; set chart_api_base/chart_api_keys or planner_api_* for api mode")
+            return ""
+        for base, key in pairs:
+            try:
+                client = OpenAI(base_url=base.strip(), api_key=key.strip())
+                completion = client.chat.completions.create(
+                    model=self.chart_model_name,
+                    messages=messages,
+                    **openai_chat_temperature_kwargs(self.chart_model_name, 0.0),
+                    **openai_chat_completion_limit_kwargs(self.chart_model_name, 1024),
+                )
+                out = completion.choices[0].message.content
+                text = out if isinstance(out, str) else (out or "")
+                if vlm_out:
+                    refiner_debug.write_text(vlm_out, "vlm_raw_output.txt", text)
+                return text
+            except Exception as e:
+                print(f"[CHART_VISION_API] ERROR base={base} model={self.chart_model_name}: {e}")
+        return ""
+
+    def _informative_retrieval(self, query: str, top_k: int):
+        """Dense-frame text–image retrieval by default; optional clip-level search."""
+        if getattr(self, "use_clip_retrieval", False):
+            return "clip", self.retriever.get_informative_clips(
+                query,
+                video_path=self.video_path,
+                top_k=top_k,
+                total_duration=self.duration,
+            )
+        return "dense", self.retriever.get_informative_dense_frames(
+            query,
+            self.video_path,
+            self.dataset_folder,
+            top_k=top_k,
+            total_duration=float(self.duration),
+            dense_sample_fps=float(getattr(self, "dense_frame_fps", 24.0)),
+            embed_batch=int(getattr(self, "dense_frame_embed_batch", 8)),
+        )
+
     def _execute_refine_tool_call(self, tool_name: str, arguments: dict) -> str:
         handlers = {
             "temporal_grounder": self._process_temporal_grounder,
@@ -51,7 +168,8 @@ class RefinerToolsMixin:
             "counter": self._process_counter,
             "dense_captioner": self._process_dense_captioner,
             "action_recognizer": self._process_action_recognizer,
-            "video_qa_reanswerer": self._process_video_qa_reanswerer,
+            "chart_analyzer": self._process_chart_analyzer,
+            # "video_qa_reanswerer": self._process_video_qa_reanswerer,
         }
         handler = handlers.get(tool_name)
         if handler is None:
@@ -85,20 +203,51 @@ class RefinerToolsMixin:
         print("=" * 70 + "\n")
 
         execution_results = []
+        step_results: dict = {}  # step_num (int) → parsed JSON output for dep resolution
+        ibase = getattr(self, "_refinement_debug_iter_dir", None)
+
         for call in ordered_calls:
             tool_name = call.get("tool", "")
             arguments = call.get("arguments", {})
-            output = self._execute_refine_tool_call(
-                tool_name, arguments if isinstance(arguments, dict) else {}
-            )
+            args_dict = arguments if isinstance(arguments, dict) else {}
+
+            # Resolve any <STEPN:json.path> references from prior step outputs
+            args_dict = self._resolve_step_refs(args_dict, step_results)
+
+            tool_out_dir = None
+            if ibase:
+                step = int(call.get("step") or 0)
+                slug = refiner_debug.sanitize_path_component(str(tool_name))
+                tbase = Path(ibase) / f"tool_{step:02d}_{slug}"
+                tool_out_dir = refiner_debug.ensure_outputs_dir(tbase)
+                refiner_debug.write_json(tool_out_dir, "arguments.json", args_dict)
+                self._refinement_debug_vlm_outputs_dir = tool_out_dir
+                self._refinement_debug_vlm_input_basename = "model_input.json"
+
+            try:
+                output = self._execute_refine_tool_call(tool_name, args_dict)
+            finally:
+                self._refinement_debug_vlm_outputs_dir = None
+                self._refinement_debug_vlm_input_basename = None
+
+            if tool_out_dir:
+                refiner_debug.write_text(tool_out_dir, "output.txt", (output or "").strip())
+
+            # Store parsed output so later steps can reference it via <STEPN:...>
+            step_num = int(call.get("step") or 0)
+            if step_num:
+                parsed = self._parse_tool_result_json(output or "")
+                if isinstance(parsed, dict):
+                    step_results[step_num] = parsed
+
             execution_results.append(
                 {
                     "step": call.get("step"),
                     "tool": tool_name,
-                    "arguments": arguments if isinstance(arguments, dict) else {},
+                    "arguments": args_dict,
                     "purpose": call.get("purpose", ""),
                     "depends_on": call.get("depends_on", []),
-                    "output": output.strip(),
+                    "output": (output or "").strip(),
                 }
             )
         return execution_results
@@ -183,27 +332,37 @@ class RefinerToolsMixin:
 
         print("\n[Tool] Temporal Grounder")
         results = []
-        topk = int(os.getenv("TOPK", "5"))
+        topk = int(getattr(self, "retrieval_top_k", 5))
 
         for arguments in calls:
             query = str(arguments.get("query", "")).strip()
             segments = []
             if query:
                 try:
-                    clip_results = self.retriever.get_informative_clips(
-                        query, video_path=self.video_path, top_k=topk, total_duration=self.duration
-                    )
-                    for clip_path, score in clip_results:
-                        clip_number = int(os.path.basename(clip_path).split("_")[1])
-                        start = float(clip_number * self.clip_duration)
-                        end = float(min(self.duration, start + self.clip_duration))
-                        segments.append(
-                            {
-                                "start": start,
-                                "end": end,
-                                "confidence": float(score),
-                            }
-                        )
+                    kind, matches = self._informative_retrieval(query, topk)
+                    if kind == "clip":
+                        for clip_path, score in matches:
+                            clip_number = int(os.path.basename(clip_path).split("_")[1])
+                            start = float(clip_number * self.clip_duration)
+                            end = float(min(self.duration, start + self.clip_duration))
+                            segments.append(
+                                {
+                                    "start": start,
+                                    "end": end,
+                                    "confidence": float(score),
+                                }
+                            )
+                    else:
+                        half = float(getattr(self, "dense_segment_half_width", 0.5))
+                        for frame_path, score in matches:
+                            t = self.retriever._timestamp_from_dense_frame_path(frame_path)
+                            segments.append(
+                                {
+                                    "start": max(0.0, t - half),
+                                    "end": min(float(self.duration), t + half),
+                                    "confidence": float(score),
+                                }
+                            )
                 except Exception as e:
                     print(f"  Error: {e}")
 
@@ -247,22 +406,31 @@ class RefinerToolsMixin:
             elif query:
                 mode = "query"
                 try:
-                    clip_results = self.retriever.get_informative_clips(
-                        query, video_path=self.video_path, top_k=num_frames, total_duration=self.duration
-                    )
+                    kind, matches = self._informative_retrieval(query, num_frames)
                 except Exception as e:
                     print(f"  Error: {e}")
-                    clip_results = []
+                    kind, matches = "dense", []
 
-                for clip_path, score in clip_results[:num_frames]:
-                    clip_number = int(os.path.basename(clip_path).split("_")[1])
-                    ts = clip_number * self.clip_duration + self.clip_duration / 2
-                    frame_path, frame_ts = self._get_frame_at_timestamp(ts)
-                    if frame_path:
+                if kind == "clip":
+                    for clip_path, score in matches[:num_frames]:
+                        clip_number = int(os.path.basename(clip_path).split("_")[1])
+                        ts = clip_number * self.clip_duration + self.clip_duration / 2
+                        frame_path, frame_ts = self._get_frame_at_timestamp(ts)
+                        if frame_path:
+                            frames.append(
+                                {
+                                    "frame_path": frame_path,
+                                    "timestamp": float(frame_ts),
+                                    "relevance_score": float(score),
+                                }
+                            )
+                else:
+                    for frame_path, score in matches[:num_frames]:
+                        ts = self.retriever._timestamp_from_dense_frame_path(frame_path)
                         frames.append(
                             {
                                 "frame_path": frame_path,
-                                "timestamp": float(frame_ts),
+                                "timestamp": float(ts),
                                 "relevance_score": float(score),
                             }
                         )
@@ -438,7 +606,7 @@ class RefinerToolsMixin:
             raise ImportError("paddleocr not installed")
 
         if _PADDLE_OCR is None:
-            _PADDLE_OCR = PaddleOCR(use_angle_cls=True, lang="en", show_log=False)
+            _PADDLE_OCR = PaddleOCR(use_angle_cls=True, lang="en")
         raw = _PADDLE_OCR.ocr(frame_path, cls=True)
         detections = []
         if not raw or raw[0] is None:
@@ -498,7 +666,7 @@ class RefinerToolsMixin:
             frame_path = arguments.get("frame_path")
             frame_ts = self._safe_float(arguments.get("timestamp"), 0.0)
 
-            if not frame_path:
+            if not frame_path or not os.path.exists(frame_path):
                 frame_path, frame_ts = self._get_frame_at_timestamp(frame_ts)
 
             source = frame_path if frame_path else f"{self.video_path}@{frame_ts}"
@@ -556,7 +724,7 @@ class RefinerToolsMixin:
             query = str(arguments.get("query", "")).strip()
             frame_path = arguments.get("frame_path")
             frame_ts = self._safe_float(arguments.get("timestamp"), 0.0)
-            if not frame_path:
+            if not frame_path or not os.path.exists(frame_path):
                 frame_path, frame_ts = self._get_frame_at_timestamp(frame_ts)
 
             default_result = {
@@ -590,7 +758,7 @@ class RefinerToolsMixin:
             query = str(arguments.get("query", "")).strip()
             frame_path = arguments.get("frame_path")
             frame_ts = self._safe_float(arguments.get("timestamp"), 0.0)
-            if not frame_path:
+            if not frame_path or not os.path.exists(frame_path):
                 frame_path, frame_ts = self._get_frame_at_timestamp(frame_ts)
 
             default_result = {
@@ -654,7 +822,7 @@ class RefinerToolsMixin:
 
         for arguments in calls:
             frame_paths, timestamps, start, end = self._get_frames_for_range(
-                arguments.get("start_time"), arguments.get("end_time"), fps=2.0
+                arguments.get("start_time"), arguments.get("end_time"), fps=None
             )
             query = str(arguments.get("query", "")).strip()
             default_result = {
@@ -671,43 +839,131 @@ class RefinerToolsMixin:
 
         return "".join(results)
 
-    def _process_video_qa_reanswerer(self, output_text: str) -> str:
-        calls = self._get_refine_tool_calls(output_text, "video_qa_reanswerer")
+    def _process_chart_analyzer(self, output_text: str) -> str:
+        calls = self._get_refine_tool_calls(output_text, "chart_analyzer")
         if not calls:
             return ""
 
-        print("\n[Tool] Video QA Re-answerer")
+        print("\n[Tool] Chart Analyzer")
         results = []
 
         for arguments in calls:
-            question = str(arguments.get("question", "")).strip()
-            frame_paths, timestamps, _, _ = self._get_frames_for_range(None, None, fps=2.0)
+            frame_path = arguments.get("frame_path")
+            frame_ts = self._safe_float(arguments.get("timestamp"), 0.0)
+            query = str(arguments.get("query", "") or "").strip()
+
+            if not frame_path or not os.path.exists(frame_path):
+                frame_path, frame_ts = self._get_frame_at_timestamp(frame_ts)
+
             default_result = {
-                "question": question,
-                "answer": "",
-                "reasoning": "",
-                "confidence": 0.0,
-                "key_evidence": [],
+                "chart_type": "unknown",
+                "title": "",
+                "axes": {},
+                "series": [],
+                "key_observations": [],
+                "relationships": [],
+                "query_response": None,
             }
-            prompt = (
-                video_qa_reanswerer_prompt.strip()
-                + f"\n\nQuestion: {question}\nReturn JSON only.\n"
-            )
-            result = self._run_vlm_json(prompt, frame_paths, timestamps, default_result)
-            results.append(self._format_refine_tool_result("video_qa_reanswerer", arguments, result))
+
+            if not frame_path or not os.path.exists(frame_path):
+                default_result["query_response"] = "chart_analyzer unavailable or frame not found"
+                results.append(self._format_refine_tool_result("chart_analyzer", arguments, default_result))
+                continue
+
+            try:
+                prompt_text = chart_analyzer_prompt.strip()
+                if query:
+                    prompt_text += f"\n\nQuery: {query}\nReturn JSON only matching the OUTPUT FORMAT above.\n"
+                else:
+                    prompt_text += "\n\nReturn JSON only matching the OUTPUT FORMAT above.\n"
+
+                mode = getattr(self, "chart_mode", "api")
+                raw_output = None
+                parsed = None
+
+                if mode == "api":
+                    raw_output = self._call_chart_vision_api(prompt_text, frame_path)
+                    parsed = self._extract_json_payload(raw_output)
+                elif mode == "vlm":
+                    merged = self._run_vlm_json(
+                        prompt_text, [frame_path], [float(frame_ts)], default_result
+                    )
+                    if isinstance(merged, dict) and "raw_output" in merged:
+                        parsed = self._extract_json_payload(merged.get("raw_output", ""))
+                    elif isinstance(merged, dict):
+                        parsed = merged
+                elif mode == "internvl":
+                    self._load_chart_model()
+                    pixel_values = self._internvl_load_image(frame_path)
+                    generation_config = dict(max_new_tokens=1024, do_sample=False)
+                    raw_output = self._chart_model.chat(
+                        self._chart_tokenizer,
+                        pixel_values,
+                        prompt_text,
+                        generation_config,
+                    )
+                    parsed = self._extract_json_payload(raw_output)
+                else:
+                    default_result["query_response"] = f"unknown chart_mode: {mode}"
+                    results.append(self._format_refine_tool_result("chart_analyzer", arguments, default_result))
+                    continue
+
+                if isinstance(parsed, dict):
+                    result = parsed
+                    result.setdefault("query_response", None)
+                else:
+                    default_result["query_response"] = (raw_output or "").strip() if raw_output else ""
+                    result = default_result
+            except Exception as e:
+                print(f"  Chart analyzer error: {e}")
+                default_result["query_response"] = f"chart_analyzer error: {e}"
+                result = default_result
+
+            results.append(self._format_refine_tool_result("chart_analyzer", arguments, result))
 
         return "".join(results)
 
-    def _process_refine_tool_calls(self, output_text: str) -> str:
-        tool_result = ""
-        tool_result += self._process_temporal_grounder(output_text)
-        tool_result += self._process_frame_retriever(output_text)
-        tool_result += self._process_asr(output_text)
-        tool_result += self._process_audio_grounder(output_text)
-        tool_result += self._process_ocr(output_text)
-        tool_result += self._process_spatial_grounder(output_text)
-        tool_result += self._process_counter(output_text)
-        tool_result += self._process_dense_captioner(output_text)
-        tool_result += self._process_action_recognizer(output_text)
-        tool_result += self._process_video_qa_reanswerer(output_text)
-        return tool_result
+    def _internvl_load_image(self, frame_path: str):
+        """Preprocess a single image for InternVL2 inference."""
+        imagenet_mean = (0.485, 0.456, 0.406)
+        imagenet_std = (0.229, 0.224, 0.225)
+        input_size = 448
+
+        transform = T.Compose([
+            T.Lambda(lambda img: img.convert("RGB") if img.mode != "RGB" else img),
+            T.Resize((input_size, input_size), interpolation=InterpolationMode.BICUBIC),
+            T.ToTensor(),
+            T.Normalize(mean=imagenet_mean, std=imagenet_std),
+        ])
+
+        device = self._chart_torch_device()
+        img = Image.open(frame_path).convert("RGB")
+        pixel_values = transform(img).unsqueeze(0).to(torch.bfloat16).to(device)
+        return pixel_values
+
+    # def _process_video_qa_reanswerer(self, output_text: str) -> str:
+    #     calls = self._get_refine_tool_calls(output_text, "video_qa_reanswerer")
+    #     if not calls:
+    #         return ""
+    #
+    #     print("\n[Tool] Video QA Re-answerer")
+    #     results = []
+    #
+    #     for arguments in calls:
+    #         question = str(arguments.get("question", "")).strip()
+    #         frame_paths, timestamps, _, _ = self._get_frames_for_range(None, None, fps=None)
+    #         default_result = {
+    #             "question": question,
+    #             "answer": "",
+    #             "reasoning": "",
+    #             "confidence": 0.0,
+    #             "key_evidence": [],
+    #         }
+    #         prompt = (
+    #             video_qa_reanswerer_prompt.strip()
+    #             + f"\n\nQuestion: {question}\nReturn JSON only.\n"
+    #         )
+    #         result = self._run_vlm_json(prompt, frame_paths, timestamps, default_result)
+    #         results.append(self._format_refine_tool_result("video_qa_reanswerer", arguments, result))
+    #
+    #     return "".join(results)
