@@ -23,14 +23,12 @@ export API_KEY_TEMPORAL_GROUNDING="$OPENAI_API_KEY"
 export API_MODEL_NAME=gpt-5
 export API_MODEL_NAME_TEMPORAL_GROUNDING=gpt-5
 
-export API_MODEL_NAME_VLM=/share/data/drive_1/huggingface_cache/hub/models--Qwen--Qwen2.5-Omni-7B/snapshots/ae9e1690543ffd5c0221dc27f79834d0294cba00
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 
-bash ./clear.sh
 export TOPK=10
 threads=6
 
-CUDA_VISIBLE_DEVICES=3 python3 refiner.py\
+CUDA_VISIBLE_DEVICES=7 python3 refiner.py\
     --benchmark_dir /share/data/drive_1/ghazi/VideoMathQA \
     --annotation_file mcq.json \
     --output ./traces/gpt_videomathqa_mcq_traces.json \

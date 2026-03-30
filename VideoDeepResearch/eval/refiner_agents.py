@@ -131,7 +131,8 @@ class RefinerAgentsMixin:
             + self._format_trace_steps(trace_steps)
             + "\n\nANSWER:\n"
             + trace_answer
-            + "\n\nNOTE: This pass is Level 1 (text-only). Do not invent video evidence in error_categories[].evidence; use null or \"N/A (text-only pass)\".\n"
+            + "\n\nTEXT_ONLY_MODE:\n"
+            + "This verifier call has no access to video, audio, frames, OCR outputs, or hidden tool state. Use only the text in this prompt and the iteration summary above. Treat unsupported sensory claims as unsupported rather than observed, and set error_categories[].evidence to null or \"N/A (text-only pass)\".\n"
         )
 
     def _build_verifier_l2_prompt(self, trace_steps: list, trace_answer: str, l1_diagnosis: dict) -> str:
@@ -233,7 +234,7 @@ class RefinerAgentsMixin:
         if v_out_dir:
             refiner_debug.write_text(v_out_dir, "l1_output.txt", l1_raw or "")
 
-        l1_parsed = self._extract_json_payload(l1_raw)
+        l1_parsed = self._extract_verifier_payload(l1_raw)
         l1_out = l1_parsed if isinstance(l1_parsed, dict) else None
 
         def _write_l1_only_merged():
@@ -364,7 +365,7 @@ class RefinerAgentsMixin:
         if p_out_dir:
             refiner_debug.write_text(p_out_dir, "raw_output.txt", raw_output or "")
 
-        parsed_output = self._extract_json_payload(raw_output)
+        parsed_output = self._extract_planner_payload(raw_output)
         parsed_dict = parsed_output if isinstance(parsed_output, dict) else None
         if p_out_dir and parsed_dict is not None:
             refiner_debug.write_json(p_out_dir, "plan.json", parsed_dict)
@@ -454,7 +455,7 @@ class RefinerAgentsMixin:
         if r_out_dir:
             refiner_debug.write_text(r_out_dir, "raw_output.txt", raw_output or "")
 
-        parsed_output = self._extract_json_payload(raw_output)
+        parsed_output = self._extract_refiner_payload(raw_output)
         parsed_dict = parsed_output if isinstance(parsed_output, dict) else None
         if r_out_dir and parsed_dict is not None:
             refiner_debug.write_json(r_out_dir, "parsed.json", parsed_dict)

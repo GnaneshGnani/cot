@@ -1,7 +1,289 @@
 import json
 import re
+from typing import Any, Dict, List, Optional, Union
+
+from pydantic import BaseModel, Field, ValidationError, root_validator, validator
 
 from video_utils import extract_subtitles, robust_eval, timestamp_to_clip_path
+
+
+_UNRESOLVED_STEP_REF_RE = re.compile(r"<STEP_?\d+[:\.][^>]+>")
+_UNQUOTED_PLACEHOLDER_RE = re.compile(r'(?<!["\'])<[^<>\n]+>(?!["\'])')
+
+
+def _coerce_float_list(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        parsed = robust_eval(value)
+        value = parsed if parsed != value else [value]
+    elif isinstance(value, (int, float)):
+        value = [value]
+    elif not isinstance(value, list):
+        value = [value]
+    return [float(item) for item in value]
+
+
+class FrameBundleItemModel(BaseModel):
+    frame_path: str
+    timestamp: float
+
+
+class TemporalGrounderArgsModel(BaseModel):
+    query: str
+    video_path: Optional[str] = None
+
+    @validator("query")
+    def _validate_query(cls, value):
+        value = str(value or "").strip()
+        if not value:
+            raise ValueError("query must be non-empty")
+        return value
+
+
+class FrameRetrieverArgsModel(BaseModel):
+    video_path: Optional[str] = None
+    query: Optional[str] = None
+    timestamps: Optional[List[float]] = None
+    num_frames: int = 5
+
+    @validator("timestamps", pre=True)
+    def _normalize_timestamps(cls, value):
+        return _coerce_float_list(value)
+
+    @validator("num_frames")
+    def _validate_num_frames(cls, value):
+        if int(value) < 1:
+            raise ValueError("num_frames must be at least 1")
+        return int(value)
+
+    @root_validator(skip_on_failure=True)
+    def _validate_source(cls, values):
+        query = str(values.get("query") or "").strip()
+        timestamps = values.get("timestamps") or []
+        if not query and not timestamps:
+            raise ValueError("frame_retriever requires either query or timestamps")
+        values["query"] = query or None
+        return values
+
+
+class ChartAnalyzerArgsModel(BaseModel):
+    frame_path: Optional[Union[str, List[str], List[FrameBundleItemModel]]] = None
+    timestamp: Optional[Union[float, List[float]]] = None
+    query: Optional[str] = None
+
+    @validator("timestamp", pre=True)
+    def _normalize_timestamp(cls, value):
+        if value in (None, [], ""):
+            return None
+        if isinstance(value, dict):
+            value = value.get("timestamp")
+        elif isinstance(value, list) and value and all(isinstance(item, dict) for item in value):
+            value = [item.get("timestamp") for item in value]
+        if isinstance(value, list):
+            return [float(item) for item in value]
+        return float(value)
+
+    @validator("query")
+    def _normalize_query(cls, value):
+        if value is None:
+            return None
+        value = str(value).strip()
+        return value or None
+
+
+class VLMFrameBundleModel(BaseModel):
+    frame_paths: List[str] = Field(default_factory=list)
+    timestamps: List[float] = Field(default_factory=list)
+
+    @validator("frame_paths")
+    def _validate_frame_paths(cls, value):
+        if not value:
+            raise ValueError("frame_paths must not be empty")
+        cleaned = []
+        for item in value:
+            path = str(item or "").strip()
+            if not path:
+                raise ValueError("frame_paths must contain non-empty strings")
+            cleaned.append(path)
+        return cleaned
+
+    @validator("timestamps", pre=True)
+    def _normalize_vlm_timestamps(cls, value):
+        coerced = _coerce_float_list(value)
+        return coerced or []
+
+    @root_validator(skip_on_failure=True)
+    def _validate_bundle(cls, values):
+        frame_paths = values.get("frame_paths") or []
+        timestamps = values.get("timestamps") or []
+        if len(frame_paths) != len(timestamps):
+            raise ValueError("frame_paths and timestamps must have the same length")
+        if len(frame_paths) > 1:
+            if any(curr <= prev for prev, curr in zip(timestamps, timestamps[1:])):
+                raise ValueError("multi-frame VLM inputs require strictly increasing timestamps")
+            if len({round(ts, 6) for ts in timestamps}) < 2:
+                raise ValueError("multi-frame VLM inputs require distinct timestamps")
+        return values
+
+
+class PlannerToolCallModel(BaseModel):
+    step: int
+    tool: str
+    arguments: Dict[str, Any] = Field(default_factory=dict)
+    purpose: str = ""
+    depends_on: List[int] = Field(default_factory=list)
+
+    @validator("step", pre=True)
+    def _normalize_step(cls, value):
+        return int(value)
+
+    @validator("tool", pre=True)
+    def _normalize_tool(cls, value):
+        value = str(value or "").strip()
+        if not value:
+            raise ValueError("tool must be non-empty")
+        return value
+
+    @validator("arguments", pre=True)
+    def _normalize_arguments(cls, value):
+        return value if isinstance(value, dict) else {}
+
+    @validator("purpose", pre=True)
+    def _normalize_purpose(cls, value):
+        return str(value or "").strip()
+
+    @validator("depends_on", pre=True)
+    def _normalize_depends_on(cls, value):
+        if value in (None, ""):
+            return []
+        if not isinstance(value, list):
+            value = [value]
+        out = []
+        for item in value:
+            try:
+                out.append(int(item))
+            except (TypeError, ValueError):
+                continue
+        return out
+
+
+class PlannerOutputModel(BaseModel):
+    strategy: str = ""
+    tool_calls: List[PlannerToolCallModel] = Field(default_factory=list)
+    refinement_instructions: str = ""
+
+    @validator("strategy", "refinement_instructions", pre=True)
+    def _normalize_text(cls, value):
+        return str(value or "").strip()
+
+
+class VerifierTraceQualityScoresModel(BaseModel):
+    perceptual_correctness: float = 0.0
+    temporal_accuracy: float = 0.0
+    logical_coherence: float = 0.0
+    completeness: float = 0.0
+
+
+class VerifierErrorCategoryModel(BaseModel):
+    type: str = ""
+    step_index: Optional[int] = None
+    description: str = ""
+    severity: str = "LOW"
+    suggested_tools: List[str] = Field(default_factory=list)
+    evidence: Any = None
+
+    @validator("step_index", pre=True)
+    def _normalize_step_index(cls, value):
+        if value in (None, ""):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @validator("type", "description", "severity", pre=True)
+    def _normalize_string_fields(cls, value):
+        return str(value or "").strip()
+
+    @validator("suggested_tools", pre=True)
+    def _normalize_suggested_tools(cls, value):
+        if value in (None, ""):
+            return []
+        if not isinstance(value, list):
+            value = [value]
+        return [str(item).strip() for item in value if str(item).strip()]
+
+
+class VerifierOutputModel(BaseModel):
+    verdict: str = "FAIL"
+    answer_correct: bool = False
+    trace_quality_scores: VerifierTraceQualityScoresModel = Field(
+        default_factory=VerifierTraceQualityScoresModel
+    )
+    error_categories: List[VerifierErrorCategoryModel] = Field(default_factory=list)
+    confidence: float = 0.0
+    summary: str = ""
+
+    @validator("verdict", pre=True)
+    def _normalize_verdict(cls, value):
+        value = str(value or "FAIL").strip().upper()
+        return value if value in {"PASS", "FAIL"} else "FAIL"
+
+    @validator("summary", pre=True)
+    def _normalize_summary(cls, value):
+        return str(value or "").strip()
+
+
+class RefinerChangeModel(BaseModel):
+    operation: str = ""
+    step_index: Optional[int] = None
+    original: str = ""
+    replacement: str = ""
+    evidence_source: str = ""
+
+    @validator("step_index", pre=True)
+    def _normalize_change_step_index(cls, value):
+        if value in (None, ""):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @validator("operation", "original", "replacement", "evidence_source", pre=True)
+    def _normalize_change_fields(cls, value):
+        return str(value or "").strip()
+
+
+class RefinerOutputModel(BaseModel):
+    refined_trace: Optional[Union[str, List[str]]] = None
+    refined_answer: Optional[str] = None
+    answer_changed: bool = False
+    changes_made: List[RefinerChangeModel] = Field(default_factory=list)
+    unresolved_issues: List[str] = Field(default_factory=list)
+
+    @validator("refined_trace", pre=True)
+    def _normalize_refined_trace(cls, value):
+        if value is None:
+            return None
+        if isinstance(value, list):
+            return [str(item) for item in value]
+        return str(value)
+
+    @validator("refined_answer", pre=True)
+    def _normalize_refined_answer(cls, value):
+        if value is None:
+            return None
+        return str(value).strip() or None
+
+    @validator("unresolved_issues", pre=True)
+    def _normalize_unresolved_issues(cls, value):
+        if value in (None, ""):
+            return []
+        if not isinstance(value, list):
+            value = [value]
+        return [str(item).strip() for item in value if str(item).strip()]
 
 
 def openai_chat_completion_limit_kwargs(model_name: str, limit: int) -> dict:
@@ -37,6 +319,43 @@ class RefinerUtilsMixin:
     #   <STEP1.frame_path>             (no underscore, dot separator)
     _STEP_REF_RE = re.compile(r"<STEP_?(\d+)[:\.]([^>]+)>")
 
+    def _ensure_no_unresolved_step_refs(self, value, path: str = "arguments"):
+        if isinstance(value, str):
+            if _UNRESOLVED_STEP_REF_RE.search(value):
+                raise ValueError(f"{path} contains unresolved step reference: {value}")
+            return
+        if isinstance(value, dict):
+            for key, item in value.items():
+                self._ensure_no_unresolved_step_refs(item, f"{path}.{key}")
+            return
+        if isinstance(value, list):
+            for idx, item in enumerate(value):
+                self._ensure_no_unresolved_step_refs(item, f"{path}[{idx}]")
+
+    def _validate_tool_arguments(self, tool_name: str, arguments: dict) -> dict:
+        if not isinstance(arguments, dict):
+            raise ValueError(f"{tool_name} arguments must be a JSON object")
+
+        self._ensure_no_unresolved_step_refs(arguments)
+
+        model_map = {
+            "temporal_grounder": TemporalGrounderArgsModel,
+            "frame_retriever": FrameRetrieverArgsModel,
+            "chart_analyzer": ChartAnalyzerArgsModel,
+        }
+        model_cls = model_map.get(tool_name)
+        if model_cls is None:
+            return arguments
+
+        validated = model_cls.parse_obj(arguments)
+        return validated.dict(exclude_none=True)
+
+    def _tool_validation_error_result(self, tool_name: str, error: Exception) -> dict:
+        return {
+            "ok": False,
+            "error": f"{tool_name} argument validation failed: {error}",
+        }
+
     def _traverse_json_path(self, obj, path: str):
         """Traverse dot-and-bracket notation on a parsed JSON object.
 
@@ -67,9 +386,23 @@ class RefinerUtilsMixin:
         """
         if obj is None:
             return None
+        m = re.match(r"^\[(\d+)\](?:\.(.+))?$", path)
+        if m:
+            idx = m.group(1)
+            rest = m.group(2)
+            path = f"{idx}.{rest}" if rest else idx
         result = self._traverse_json_path(obj, path)
         if result is not None:
             return result
+        m = re.match(r"^(\d+)\.(.+)$", path)
+        if m and isinstance(obj, dict):
+            idx = int(m.group(1))
+            rest = m.group(2)
+            for val in obj.values():
+                if isinstance(val, list) and idx < len(val):
+                    result = self._traverse_json_path(val[idx], rest)
+                    if result is not None:
+                        return result
         if "." not in path and "[" not in path and isinstance(obj, dict):
             for val in obj.values():
                 if isinstance(val, list) and val and isinstance(val[0], dict):
@@ -108,8 +441,25 @@ class RefinerUtilsMixin:
         return value
 
     def _extract_json_payload(self, text):
+        return self._extract_json_payload_with_schema(text)
+
+    def _repair_json_candidate(self, candidate: str) -> str:
+        if not isinstance(candidate, str) or "<" not in candidate:
+            return candidate
+        return _UNQUOTED_PLACEHOLDER_RE.sub(lambda m: json.dumps(m.group(0)), candidate)
+
+    def _validate_json_payload(self, payload, model_cls=None):
+        if model_cls is None:
+            return payload
+        try:
+            validated = model_cls.parse_obj(payload)
+        except ValidationError:
+            return None
+        return validated.dict(exclude_none=False)
+
+    def _extract_json_payload_with_schema(self, text, model_cls=None, repair_placeholders: bool = False):
         if isinstance(text, (dict, list)):
-            return text
+            return self._validate_json_payload(text, model_cls)
         if not isinstance(text, str):
             return None
 
@@ -127,16 +477,45 @@ class RefinerUtilsMixin:
                 candidates.append(text[start : end + 1])
 
         for candidate in candidates:
-            candidate = candidate.strip()
-            if not candidate:
-                continue
-            try:
-                return json.loads(candidate)
-            except Exception:
-                parsed = robust_eval(candidate)
+            variants = [candidate]
+            if repair_placeholders:
+                repaired = self._repair_json_candidate(candidate)
+                if repaired != candidate:
+                    variants.append(repaired)
+            for variant in variants:
+                variant = variant.strip()
+                if not variant:
+                    continue
+                try:
+                    parsed = json.loads(variant)
+                except Exception:
+                    parsed = robust_eval(variant)
                 if isinstance(parsed, (dict, list)):
-                    return parsed
+                    validated = self._validate_json_payload(parsed, model_cls)
+                    if validated is not None:
+                        return validated
         return None
+
+    def _extract_planner_payload(self, text):
+        return self._extract_json_payload_with_schema(
+            text,
+            model_cls=PlannerOutputModel,
+            repair_placeholders=True,
+        )
+
+    def _extract_verifier_payload(self, text):
+        return self._extract_json_payload_with_schema(
+            text,
+            model_cls=VerifierOutputModel,
+            repair_placeholders=False,
+        )
+
+    def _extract_refiner_payload(self, text):
+        return self._extract_json_payload_with_schema(
+            text,
+            model_cls=RefinerOutputModel,
+            repair_placeholders=False,
+        )
 
     def _get_refine_tool_calls(self, output_text: str, tool_name: str) -> list:
         payload = self._extract_json_payload(output_text)
@@ -194,6 +573,19 @@ class RefinerUtilsMixin:
 
     def _run_vlm_json(self, prompt: str, frame_paths: list, timestamps: list, default_result):
         if not frame_paths:
+            return default_result
+
+        try:
+            validated = VLMFrameBundleModel.parse_obj(
+                {"frame_paths": frame_paths, "timestamps": timestamps}
+            )
+            frame_paths = list(validated.frame_paths)
+            timestamps = list(validated.timestamps)
+        except ValidationError as e:
+            if isinstance(default_result, dict):
+                result = dict(default_result)
+                result["raw_output"] = f"Invalid VLM frame bundle: {e}"
+                return result
             return default_result
 
         output_text = self._batch_video2text([(prompt, frame_paths, timestamps)])[0]

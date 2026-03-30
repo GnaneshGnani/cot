@@ -1,7 +1,7 @@
 import os
 
 # Default scratch layout (override with VDR_RUNTIME_ROOT or NEXUS_RUNTIME_ROOT).
-NEXUS_RUNTIME_ROOT_DEFAULT = "/fs/nexus-scratch/gnanesh/.cache"
+NEXUS_RUNTIME_ROOT_DEFAULT = "/share/data/drive_1/.cache"
 NEXUS_HF_HOME = os.path.join(NEXUS_RUNTIME_ROOT_DEFAULT, "huggingface")
 
 

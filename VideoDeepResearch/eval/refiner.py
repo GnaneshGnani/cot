@@ -109,6 +109,12 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
                  chart_device: str = "cuda:0",
                  chart_api_base=None,
                  chart_api_keys=None,
+                 spatial_grounder_backend: str = "grounding_dino",
+                 spatial_grounder_model_name: str = "IDEA-Research/grounding-dino-base",
+                 spatial_grounder_device: str = "cuda:0",
+                 spatial_grounder_box_threshold: float = 0.25,
+                 spatial_grounder_iou_threshold: float = 0.8,
+                 spatial_grounder_vlm_fallback: bool = True,
                  refinement_debug_root: str = None,
                  dense_frame_fps: float = None,
                  use_clip_retrieval: bool = False,
@@ -138,6 +144,23 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         if cm not in ("api", "vlm", "internvl"):
             raise ValueError(f"chart_mode must be 'api', 'vlm', or 'internvl', got {chart_mode!r}")
         self.chart_mode = cm
+        sgb = (spatial_grounder_backend or "grounding_dino").strip().lower()
+        if sgb in ("grounding-dino", "groundingdino", "gdino", "auto", "hf", "huggingface"):
+            sgb = "grounding_dino"
+        if sgb not in ("grounding_dino", "vlm"):
+            raise ValueError(
+                "spatial_grounder_backend must be 'grounding_dino' or 'vlm', "
+                f"got {spatial_grounder_backend!r}"
+            )
+        self.spatial_grounder_backend = sgb
+        self.spatial_grounder_model_name = (
+            str(spatial_grounder_model_name or "IDEA-Research/grounding-dino-base").strip()
+            or "IDEA-Research/grounding-dino-base"
+        )
+        self.spatial_grounder_device = str(spatial_grounder_device or "cuda:0").strip() or "cuda:0"
+        self.spatial_grounder_box_threshold = float(spatial_grounder_box_threshold)
+        self.spatial_grounder_iou_threshold = float(spatial_grounder_iou_threshold)
+        self.spatial_grounder_vlm_fallback = bool(spatial_grounder_vlm_fallback)
 
         self.planner_api_base = _norm_api_list(planner_api_base, ["http://localhost:8000/v1"])
         self.planner_api_keys = _norm_api_list(planner_api_keys, ["EMPTY"])
@@ -571,12 +594,14 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
 
         final_verifier_raw = None
         final_verifier_output = None
+        verifier_passed = False
 
         debug_resolved = None
         if self.refinement_debug_root:
             stem = refiner_debug.sanitize_path_component(Path(self.video_path).stem)
             base = Path(self.refinement_debug_root) / stem
-            if os.environ.get("REFINER_DEBUG_UNIQUE_RUN", "").strip() == "1":
+            unique_debug = os.environ.get("REFINER_DEBUG_UNIQUE_RUN", "1").strip() != "0"
+            if unique_debug:
                 rid = (os.environ.get("REFINER_DEBUG_RUN_ID") or "").strip() or time.strftime(
                     "%Y%m%d_%H%M%S"
                 )
@@ -611,6 +636,7 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
 
             if isinstance(verifier_output, dict) and verifier_output.get("verdict") == "PASS":
                 print("[Verifier] PASS — stopping refinement loop.")
+                verifier_passed = True
                 break
 
             print("[Planner] Generating plan...")
@@ -664,6 +690,17 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
                 }
             )
 
+        if not verifier_passed and all_iterations and len(all_iterations) >= max_iterations:
+            print("[Verifier] Final post-refinement diagnosis...")
+            final_verifier_raw, final_verifier_output = self._call_verifier(
+                current_trace,
+                current_answer,
+                iteration=max_iterations,
+                history=iteration_history,
+                max_iterations=max_iterations,
+            )
+            print(f"\n[Final Verifier Output]\n{final_verifier_raw}\n")
+
         self._refinement_debug_iter_dir = None
 
         return {
@@ -684,31 +721,25 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
 
 
 def main():
-    VIDEO_PATH = "/fs/nexus-scratch/gnanesh/cot/VideoMathQA/videos/875b24c9-a2ab-4965-8186-76495a5b553d.mp4"
+    VIDEO_PATH = "/share/users/ghazi/cot/VideoDeepResearch/videos/-4PUD-TNhU4.mp4"
     QUESTION = (
-        "Among Walmart, Target, Whole Foods, and Albertsons, which store shows the highest "
-        "discrepancy between customer-rated Store Cleanliness and Value for Dollar, and what "
-        "is the approximate magnitude of that difference in percentage points?"
+        "How many players are below the referee in the frame in the initial faceoff?"
     )
     OPTIONS = [
-        "A. Whole Foods, 40%",
-        "B. Whole Foods, 65%",
-        "C. Walmart, 68%",
-        "D. Whole Foods, 69%",
-        "E. Walmart, 48%",
+        "A. 6",
+        "B. 2",
+        "C. 4",
+        "D. 3",
+        "E. 8",
     ]
     INITIAL_TRACE_STEPS = [
-        "The video investigates why Aldi is considered one of the top value-for-money grocery stores in the U.S. It analyzes Aldi's efficiency-focused design, limited product selection, private label use, and minimalist approach that contribute to high perceived value among customers.",
-        "Around the midpoint of the video (~2:30), the focus shifts from Aldis internal strategies to consumer sentiment, emphasizing how customers perceive 'value for dollar' and introducing survey-based satisfaction data.",
-        "Two key charts are shown: the first at ~2:45 compares customer satisfaction across grocery chains on 'Store Cleanliness' and 'Availability of Items'; the second at ~3:32 shows Value-for-Dollar ratings from a customer survey.",
-        "In Chart 1, Whole Foods' store cleanliness score is 80%.",
-        "In Chart 1, Walmart's store cleanliness score is estimated at 30%, based on it falling between the 20% and 40% gridlines.",
-        "In Chart 2, Whole Foods' value-for-dollar rating is estimated at 15%, based on it appearing between the 0% and 20% marks.",
-        "In Chart 2, Walmarts value-for-dollar rating is estimated at 70%, falling between the 60% and 80% range.",
-        "Calculating the discrepancy between cleanliness and value-for-dollar for each store:",
-        "Whole Foods: |80 - 15| = 65%; Walmart: |30 - 70| = 40%.",
-        "Final answer: Whole Foods has the highest discrepancy between cleanliness and perceived value-for-dollar, at 65%.",
+        "I located the start of the first faceoff at 00:04.",
+        "I identified the referee by his striped shirt.",
+        "I counted the players from both teams visible below the referee in the frame.",
+        "There are 6 players visible below the referee.",
+        "Therefore, the correct answer is A. 6.",
     ]
+    MAX_ITERATIONS = 1
 
     if not os.path.exists(VIDEO_PATH):
         print(f"Error: Video file not found: {VIDEO_PATH}")
@@ -722,7 +753,7 @@ def main():
         dataset_folder="./data",
         use_subtitle=False,
         refinement_debug_root="./debug",
-        dense_frame_fps=10.0,
+        dense_frame_fps=1.0,
         use_clip_retrieval=False,
         dense_segment_half_width=0.5,
         retrieval_top_k=10,
@@ -731,11 +762,11 @@ def main():
         planner_model_name="gpt-5",
         planner_api_base=["https://api.openai.com/v1"],
         planner_api_keys=[os.environ["OPENAI_API_KEY"]],
-        chart_mode="api",
-        chart_model_name="gpt-5",
+        chart_mode="vlm",
+        chart_model_name="Qwen/Qwen3-VL-8B-Instruct",
     )
 
-    result = demo.run_refinement_pipeline(INITIAL_TRACE_STEPS)
+    result = demo.run_refinement_pipeline(INITIAL_TRACE_STEPS, max_iterations=MAX_ITERATIONS)
 
     output_path = "refiner_demo_result.json"
     record = {

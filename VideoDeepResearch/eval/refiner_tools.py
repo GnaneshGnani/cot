@@ -67,6 +67,205 @@ class RefinerToolsMixin:
             return list(k)
         return list(getattr(self, "planner_api_keys", None) or [])
 
+    def _resolve_frame_bundle(self, arguments: dict):
+        raw_paths = arguments.get("frame_paths", arguments.get("frame_path"))
+        raw_ts = arguments.get("timestamps", arguments.get("timestamp"))
+
+        frame_paths = []
+        timestamps = []
+
+        if isinstance(raw_paths, list):
+            for item in raw_paths:
+                if isinstance(item, dict):
+                    frame_paths.append(item.get("frame_path"))
+                    timestamps.append(item.get("timestamp"))
+                else:
+                    frame_paths.append(item)
+        elif raw_paths is not None:
+            frame_paths = [raw_paths]
+
+        if isinstance(raw_ts, str):
+            parsed = robust_eval(raw_ts)
+            raw_ts = parsed if isinstance(parsed, list) else [raw_ts]
+        elif raw_ts is None:
+            raw_ts = []
+        elif not isinstance(raw_ts, list):
+            raw_ts = [raw_ts]
+
+        if raw_ts:
+            timestamps = list(raw_ts)
+
+        resolved_paths = []
+        resolved_timestamps = []
+        total = max(len(frame_paths), len(timestamps))
+
+        for i in range(total):
+            frame_path = frame_paths[i] if i < len(frame_paths) else None
+            frame_ts = timestamps[i] if i < len(timestamps) else None
+            frame_ts = self._safe_float(frame_ts, None)
+
+            if not frame_path or not os.path.exists(frame_path):
+                if frame_ts is None:
+                    continue
+                frame_path, frame_ts = self._get_frame_at_timestamp(frame_ts)
+            else:
+                if frame_ts is None:
+                    try:
+                        frame_ts = float(self.retriever._timestamp_from_dense_frame_path(frame_path))
+                    except Exception:
+                        frame_ts = 0.0
+
+            if frame_path and os.path.exists(frame_path):
+                resolved_paths.append(frame_path)
+                resolved_timestamps.append(float(frame_ts))
+
+        if len(resolved_paths) > 1:
+            ordered = sorted(zip(resolved_timestamps, resolved_paths), key=lambda item: item[0])
+            deduped = []
+            last_ts = None
+            for ts, path in ordered:
+                if last_ts is not None and ts <= last_ts:
+                    continue
+                deduped.append((ts, path))
+                last_ts = ts
+            resolved_timestamps = [ts for ts, _ in deduped]
+            resolved_paths = [path for _, path in deduped]
+
+        return resolved_paths, resolved_timestamps
+
+    def _latest_prior_step_of_type(self, before_step: int, step_tools: dict, target_tool: str):
+        candidates = [
+            step for step, tool in step_tools.items()
+            if step < before_step and tool == target_tool
+        ]
+        return max(candidates) if candidates else None
+
+    def _select_frames_aligned_with_temporal_grounder(
+        self,
+        frame_result: dict,
+        temporal_result: dict,
+    ) -> list:
+        frames = frame_result.get("frames") or []
+        segments = temporal_result.get("segments") or []
+        if not isinstance(frames, list) or not isinstance(segments, list):
+            return []
+
+        normalized_frames = []
+        for item in frames:
+            if not isinstance(item, dict):
+                continue
+            frame_path = item.get("frame_path")
+            ts = self._safe_float(item.get("timestamp"), None)
+            if not frame_path or ts is None:
+                continue
+            normalized_frames.append(
+                {
+                    "frame_path": frame_path,
+                    "timestamp": float(ts),
+                    "relevance_score": float(item.get("relevance_score", 0.0) or 0.0),
+                }
+            )
+        if not normalized_frames:
+            return []
+
+        ranked_segments = []
+        for seg in segments:
+            if not isinstance(seg, dict):
+                continue
+            start = self._safe_float(seg.get("start"), None)
+            end = self._safe_float(seg.get("end"), None)
+            if start is None or end is None:
+                continue
+            conf = float(seg.get("confidence", 0.0) or 0.0)
+            ranked_segments.append(
+                {
+                    "start": float(start),
+                    "end": float(end),
+                    "confidence": conf,
+                    "mid": (float(start) + float(end)) / 2.0,
+                }
+            )
+        if not ranked_segments:
+            return []
+
+        ranked_segments.sort(key=lambda seg: seg["confidence"], reverse=True)
+        tol = max(0.0, float(getattr(self, "dense_segment_half_width", 0.5)))
+
+        for seg in ranked_segments:
+            aligned = [
+                frame for frame in normalized_frames
+                if seg["start"] - tol <= frame["timestamp"] <= seg["end"] + tol
+            ]
+            if aligned:
+                return sorted(
+                    aligned,
+                    key=lambda frame: (
+                        -frame["relevance_score"],
+                        abs(frame["timestamp"] - seg["mid"]),
+                        frame["timestamp"],
+                    ),
+                )
+
+        best_seg = ranked_segments[0]
+        nearest = sorted(
+            normalized_frames,
+            key=lambda frame: (
+                abs(frame["timestamp"] - best_seg["mid"]),
+                -frame["relevance_score"],
+                frame["timestamp"],
+            ),
+        )
+        return nearest[:1]
+
+    def _align_visual_tool_arguments(
+        self,
+        tool_name: str,
+        arguments: dict,
+        current_step: int,
+        depends_on: list,
+        step_results: dict,
+        step_tools: dict,
+    ) -> dict:
+        if tool_name not in {"spatial_grounder", "counter", "chart_analyzer", "ocr"}:
+            return arguments
+
+        frame_step = None
+        for dep in depends_on:
+            if step_tools.get(dep) == "frame_retriever" and isinstance(step_results.get(dep), dict):
+                frame_step = dep
+        if frame_step is None:
+            return arguments
+
+        temporal_step = None
+        for dep in depends_on:
+            if step_tools.get(dep) == "temporal_grounder" and isinstance(step_results.get(dep), dict):
+                temporal_step = dep
+        if temporal_step is None:
+            temporal_step = self._latest_prior_step_of_type(frame_step, step_tools, "temporal_grounder")
+        if temporal_step is None:
+            temporal_step = self._latest_prior_step_of_type(current_step, step_tools, "temporal_grounder")
+        if temporal_step is None:
+            return arguments
+
+        aligned_frames = self._select_frames_aligned_with_temporal_grounder(
+            step_results.get(frame_step) or {},
+            step_results.get(temporal_step) or {},
+        )
+        if not aligned_frames:
+            return arguments
+
+        updated = dict(arguments)
+        if tool_name in {"chart_analyzer", "ocr"}:
+            updated["frame_path"] = [
+                {"frame_path": item["frame_path"], "timestamp": item["timestamp"]}
+                for item in aligned_frames
+            ]
+            updated["timestamp"] = None
+        else:
+            updated["frame_path"] = aligned_frames[0]["frame_path"]
+            updated["timestamp"] = aligned_frames[0]["timestamp"]
+        return updated
+
     def _load_chart_model(self):
         if getattr(self, "_chart_model", None) is not None:
             return
@@ -138,6 +337,326 @@ class RefinerToolsMixin:
                 print(f"[CHART_VISION_API] ERROR base={base} model={self.chart_model_name}: {e}")
         return ""
 
+    def _spatial_grounder_torch_device(self):
+        raw = str(getattr(self, "spatial_grounder_device", "cuda:0")).strip()
+        if not raw or raw.lower() == "auto":
+            return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        if raw.isdigit():
+            raw = f"cuda:{int(raw)}"
+        try:
+            device = torch.device(raw)
+        except Exception:
+            fallback = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+            print(f"  Spatial grounder device {raw!r} is invalid; falling back to {fallback}.")
+            return fallback
+        if device.type == "cuda":
+            if not torch.cuda.is_available():
+                print("  Spatial grounder requested CUDA, but CUDA is unavailable; falling back to cpu.")
+                return torch.device("cpu")
+            if device.index is not None and device.index >= torch.cuda.device_count():
+                fallback = torch.device("cuda:0")
+                print(f"  Spatial grounder device {raw!r} is out of range; falling back to {fallback}.")
+                return fallback
+        return device
+
+    def _load_grounding_dino_model(self):
+        model_name = str(
+            getattr(self, "spatial_grounder_model_name", "IDEA-Research/grounding-dino-base")
+            or "IDEA-Research/grounding-dino-base"
+        ).strip()
+        device = self._spatial_grounder_torch_device()
+        loaded_name = getattr(self, "_grounding_dino_loaded_model_name", None)
+        loaded_device = getattr(self, "_grounding_dino_loaded_device", None)
+        if (
+            getattr(self, "_grounding_dino_model", None) is not None
+            and getattr(self, "_grounding_dino_processor", None) is not None
+            and loaded_name == model_name
+            and loaded_device == str(device)
+        ):
+            return self._grounding_dino_processor, self._grounding_dino_model, device
+
+        try:
+            from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
+        except Exception as e:
+            raise RuntimeError(f"transformers Grounding DINO classes are unavailable: {e}") from e
+
+        print(f"  Loading spatial grounder: {model_name} on {device}")
+        processor = AutoProcessor.from_pretrained(model_name)
+        model = AutoModelForZeroShotObjectDetection.from_pretrained(
+            model_name,
+        ).eval().to(device)
+
+        self._grounding_dino_processor = processor
+        self._grounding_dino_model = model
+        self._grounding_dino_loaded_model_name = model_name
+        self._grounding_dino_loaded_device = str(device)
+        print(f"  ✓ Spatial grounder loaded: {model_name}")
+        return processor, model, device
+
+    def _grounding_dino_model_dtype(self, model) -> torch.dtype:
+        dtype = getattr(model, "dtype", None)
+        if isinstance(dtype, torch.dtype):
+            return dtype
+        try:
+            return next(model.parameters()).dtype
+        except (StopIteration, AttributeError, TypeError):
+            return torch.float32
+
+    def _normalize_grounding_dino_query(self, query: str) -> str:
+        text = " ".join(str(query or "").strip().split()).lower()
+        if text and text[-1] not in ".!?":
+            text += "."
+        return text
+
+    def _bbox_area_fraction(self, bbox, width: int, height: int) -> float:
+        if not bbox or len(bbox) != 4 or width <= 0 or height <= 0:
+            return 0.0
+        x1, y1, x2, y2 = [float(v) for v in bbox]
+        x1 = max(0.0, min(float(width), x1))
+        x2 = max(0.0, min(float(width), x2))
+        y1 = max(0.0, min(float(height), y1))
+        y2 = max(0.0, min(float(height), y2))
+        area = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+        return round(area / float(width * height), 4)
+
+    def _bbox_region(self, bbox, width: int, height: int) -> str:
+        if not bbox or len(bbox) != 4 or width <= 0 or height <= 0:
+            return "unknown"
+        x1, y1, x2, y2 = [float(v) for v in bbox]
+        cx = ((x1 + x2) / 2.0) / float(width)
+        cy = ((y1 + y2) / 2.0) / float(height)
+        horizontal = "left" if cx < (1.0 / 3.0) else ("center" if cx < (2.0 / 3.0) else "right")
+        vertical = "top" if cy < (1.0 / 3.0) else ("middle" if cy < (2.0 / 3.0) else "bottom")
+        if horizontal == "center" and vertical == "middle":
+            return "center"
+        return f"{horizontal}-{vertical}"
+
+    def _spatial_description_from_detections(self, detections: list, width: int, height: int) -> str:
+        if not detections:
+            return ""
+        phrases = []
+        for det in detections[:5]:
+            if not isinstance(det, dict):
+                continue
+            label = str(det.get("label") or "object").strip()
+            bbox = det.get("bbox") or []
+            if len(bbox) != 4:
+                continue
+            phrases.append(f"{label} at {self._bbox_region(bbox, width, height)}")
+        if not phrases:
+            return ""
+        count = len([d for d in detections if isinstance(d, dict)])
+        noun = "detection" if count == 1 else "detections"
+        return f"{count} {noun}: " + "; ".join(phrases)
+
+    def _dedupe_grounding_dino_detections(self, detections: list, iou_threshold: float) -> list:
+        if len(detections) < 2:
+            return detections
+        try:
+            from torchvision.ops import nms
+        except Exception:
+            return detections
+
+        thr = float(self._safe_float(iou_threshold, 0.8) or 0.8)
+        thr = max(0.0, min(1.0, thr))
+        keep_indices = []
+        labels = sorted({str(det.get("label") or "") for det in detections if isinstance(det, dict)})
+        for label in labels:
+            label_indices = [
+                idx for idx, det in enumerate(detections)
+                if isinstance(det, dict) and str(det.get("label") or "") == label
+            ]
+            if len(label_indices) <= 1:
+                keep_indices.extend(label_indices)
+                continue
+            boxes = torch.tensor(
+                [detections[idx]["bbox"] for idx in label_indices],
+                dtype=torch.float32,
+            )
+            scores = torch.tensor(
+                [float(detections[idx].get("confidence", 0.0) or 0.0) for idx in label_indices],
+                dtype=torch.float32,
+            )
+            kept = nms(boxes, scores, thr).tolist()
+            keep_indices.extend(label_indices[i] for i in kept)
+
+        keep_indices = sorted(
+            set(keep_indices),
+            key=lambda idx: float(detections[idx].get("confidence", 0.0) or 0.0),
+            reverse=True,
+        )
+        return [detections[idx] for idx in keep_indices]
+
+    def _run_spatial_grounder_vlm(self, query: str, frame_path: str, frame_ts: float, return_masks: bool = False):
+        default_result = {
+            "query": query,
+            "detections": [],
+            "spatial_description": "",
+            "backend": "vlm",
+        }
+        prompt = (
+            spatial_grunder_prompt.strip()
+            + f"\n\nQuery: {query}\nreturn_masks: {str(bool(return_masks)).lower()}\n"
+            + "Return JSON only matching the OUTPUT FORMAT above.\n"
+        )
+        result = self._run_vlm_json(
+            prompt,
+            [frame_path] if frame_path else [],
+            [float(self._safe_float(frame_ts, 0.0) or 0.0)],
+            default_result,
+        )
+        if isinstance(result, dict):
+            result.setdefault("query", query)
+            result.setdefault("detections", [])
+            result.setdefault("spatial_description", "")
+            result.setdefault("backend", "vlm")
+        return result
+
+    def _run_grounding_dino_spatial_grounder(self, frame_path: str, query: str, return_masks: bool = False):
+        if not frame_path or not os.path.exists(frame_path):
+            return None, "Grounding DINO spatial grounding skipped because the frame path was unavailable."
+
+        model_name = str(
+            getattr(self, "spatial_grounder_model_name", "IDEA-Research/grounding-dino-base")
+            or "IDEA-Research/grounding-dino-base"
+        ).strip()
+        prompt_text = self._normalize_grounding_dino_query(query)
+        if not prompt_text:
+            return None, "Grounding DINO spatial grounding skipped because the query was empty."
+
+        try:
+            processor, model, device = self._load_grounding_dino_model()
+        except Exception as e:
+            return None, f"Grounding DINO backend unavailable because the Hugging Face model could not be loaded: {e}"
+        model_dtype = self._grounding_dino_model_dtype(model)
+
+        box_threshold = float(getattr(self, "spatial_grounder_box_threshold", 0.25))
+        iou_threshold = float(getattr(self, "spatial_grounder_iou_threshold", 0.8))
+        text_threshold = float(
+            self._safe_float(
+                getattr(self, "spatial_grounder_text_threshold", box_threshold),
+                box_threshold,
+            ) or box_threshold
+        )
+
+        debug_dir = getattr(self, "_refinement_debug_vlm_outputs_dir", None)
+        request_payload = {
+            "model": model_name,
+            "device": str(device),
+            "model_dtype": str(model_dtype).replace("torch.", ""),
+            "query": prompt_text,
+            "box_threshold": box_threshold,
+            "text_threshold": text_threshold,
+            "iou_threshold": iou_threshold,
+            "return_masks": bool(return_masks),
+            "frame_path": frame_path,
+        }
+        if debug_dir:
+            refiner_debug.write_json(debug_dir, "grounding_dino_request.json", request_payload)
+
+        try:
+            with Image.open(frame_path) as img:
+                image = img.convert("RGB")
+                width, height = image.size
+            inputs = processor(images=image, text=prompt_text, return_tensors="pt")
+            input_ids = inputs["input_ids"]
+            model_inputs = {}
+            for key, value in inputs.items():
+                if not isinstance(value, torch.Tensor):
+                    model_inputs[key] = value
+                    continue
+                moved = value.to(device)
+                if moved.is_floating_point():
+                    moved = moved.to(dtype=model_dtype)
+                model_inputs[key] = moved
+            with torch.inference_mode():
+                outputs = model(**model_inputs)
+            hf_results = processor.post_process_grounded_object_detection(
+                outputs,
+                input_ids,
+                box_threshold=box_threshold,
+                text_threshold=text_threshold,
+                target_sizes=[(height, width)],
+            )
+        except Exception as e:
+            return None, f"Grounding DINO inference failed: {e}"
+
+        raw_result = {}
+        if hf_results:
+            first = hf_results[0]
+            score_values = first.get("scores")
+            label_values = first.get("labels")
+            box_values = first.get("boxes")
+            if hasattr(score_values, "tolist"):
+                score_values = score_values.tolist()
+            elif score_values is None:
+                score_values = []
+            else:
+                score_values = list(score_values)
+            if hasattr(label_values, "tolist"):
+                label_values = label_values.tolist()
+            elif label_values is None:
+                label_values = []
+            else:
+                label_values = list(label_values)
+            if hasattr(box_values, "tolist"):
+                box_values = box_values.tolist()
+            elif box_values is None:
+                box_values = []
+            else:
+                box_values = [
+                    box.tolist() if hasattr(box, "tolist") else list(box)
+                    for box in box_values
+                ]
+            raw_result = {
+                "scores": [round(float(score), 4) for score in score_values],
+                "labels": [str(label) for label in label_values],
+                "boxes": [
+                    [round(float(v), 2) for v in box]
+                    for box in box_values
+                ],
+            }
+        if debug_dir:
+            refiner_debug.write_json(debug_dir, "grounding_dino_raw_response.json", raw_result)
+
+        detections = []
+        scores = raw_result.get("scores") if isinstance(raw_result, dict) else None
+        labels = raw_result.get("labels") if isinstance(raw_result, dict) else None
+        boxes = raw_result.get("boxes") if isinstance(raw_result, dict) else None
+        total = min(len(scores or []), len(labels or []), len(boxes or []))
+        for idx in range(total):
+            bbox = boxes[idx]
+            if not isinstance(bbox, list) or len(bbox) != 4:
+                continue
+            box = [int(round(float(self._safe_float(v, 0.0) or 0.0))) for v in bbox]
+            score = float(self._safe_float(scores[idx], 0.0) or 0.0)
+            detections.append(
+                {
+                    "label": str(labels[idx] or query).strip() or query,
+                    "bbox": box,
+                    "confidence": max(0.0, min(1.0, score)),
+                    "mask_path": None,
+                    "area_fraction": self._bbox_area_fraction(box, width, height),
+                }
+            )
+
+        detections.sort(key=lambda det: float(det.get("confidence", 0.0) or 0.0), reverse=True)
+        detections = self._dedupe_grounding_dino_detections(detections, iou_threshold)
+        result = {
+            "query": query,
+            "detections": detections,
+            "spatial_description": self._spatial_description_from_detections(detections, width, height),
+            "backend": "grounding_dino_hf",
+            "grounding_model": model_name,
+            "grounding_device": str(device),
+        }
+        if return_masks:
+            result["warning"] = (
+                "Grounding DINO mask outputs are requested, but the Hugging Face runner currently returns bbox detections only; "
+                "mask_path remains null."
+            )
+        return result, None
+
     def _informative_retrieval(self, query: str, top_k: int):
         """Dense-frame text–image retrieval by default; optional clip-level search."""
         if getattr(self, "use_clip_retrieval", False):
@@ -151,6 +670,7 @@ class RefinerToolsMixin:
             query,
             self.video_path,
             self.dataset_folder,
+            
             top_k=top_k,
             total_duration=float(self.duration),
             dense_sample_fps=float(getattr(self, "dense_frame_fps", 24.0)),
@@ -197,6 +717,11 @@ class RefinerToolsMixin:
             [call for call in tool_calls if isinstance(call, dict)],
             key=lambda call: int(call.get("step", 0) or 0),
         )
+        step_tools = {
+            int(call.get("step", 0) or 0): str(call.get("tool", "") or "")
+            for call in ordered_calls
+            if int(call.get("step", 0) or 0)
+        }
 
         print("\n" + "=" * 70)
         print("ordered_calls: ", ordered_calls)
@@ -207,22 +732,56 @@ class RefinerToolsMixin:
         ibase = getattr(self, "_refinement_debug_iter_dir", None)
 
         for call in ordered_calls:
+            step_num = int(call.get("step") or 0)
             tool_name = call.get("tool", "")
             arguments = call.get("arguments", {})
             args_dict = arguments if isinstance(arguments, dict) else {}
+            depends_on = [
+                int(dep) for dep in (call.get("depends_on", []) or [])
+                if str(dep).strip().isdigit()
+            ]
 
             # Resolve any <STEPN:json.path> references from prior step outputs
             args_dict = self._resolve_step_refs(args_dict, step_results)
+            args_dict = self._align_visual_tool_arguments(
+                tool_name,
+                args_dict,
+                step_num,
+                depends_on,
+                step_results,
+                step_tools,
+            )
 
             tool_out_dir = None
             if ibase:
-                step = int(call.get("step") or 0)
                 slug = refiner_debug.sanitize_path_component(str(tool_name))
-                tbase = Path(ibase) / f"tool_{step:02d}_{slug}"
+                tbase = Path(ibase) / f"tool_{step_num:02d}_{slug}"
                 tool_out_dir = refiner_debug.ensure_outputs_dir(tbase)
                 refiner_debug.write_json(tool_out_dir, "arguments.json", args_dict)
                 self._refinement_debug_vlm_outputs_dir = tool_out_dir
                 self._refinement_debug_vlm_input_basename = "model_input.json"
+
+            try:
+                args_dict = self._validate_tool_arguments(tool_name, args_dict)
+            except Exception as e:
+                output = self._format_refine_tool_result(
+                    tool_name,
+                    args_dict,
+                    self._tool_validation_error_result(tool_name, e),
+                )
+                if tool_out_dir:
+                    refiner_debug.write_text(tool_out_dir, "output.txt", (output or "").strip())
+                execution_results.append(
+                    {
+                        "step": call.get("step"),
+                        "tool": tool_name,
+                        "arguments": args_dict,
+                        "purpose": call.get("purpose", ""),
+                        "depends_on": call.get("depends_on", []),
+                        "output": (output or "").strip(),
+                    }
+                )
+                continue
 
             try:
                 output = self._execute_refine_tool_call(tool_name, args_dict)
@@ -234,7 +793,6 @@ class RefinerToolsMixin:
                 refiner_debug.write_text(tool_out_dir, "output.txt", (output or "").strip())
 
             # Store parsed output so later steps can reference it via <STEPN:...>
-            step_num = int(call.get("step") or 0)
             if step_num:
                 parsed = self._parse_tool_result_json(output or "")
                 if isinstance(parsed, dict):
@@ -246,7 +804,7 @@ class RefinerToolsMixin:
                     "tool": tool_name,
                     "arguments": args_dict,
                     "purpose": call.get("purpose", ""),
-                    "depends_on": call.get("depends_on", []),
+                    "depends_on": depends_on,
                     "output": (output or "").strip(),
                 }
             )
@@ -663,29 +1221,30 @@ class RefinerToolsMixin:
         results = []
 
         for arguments in calls:
-            frame_path = arguments.get("frame_path")
-            frame_ts = self._safe_float(arguments.get("timestamp"), 0.0)
-
-            if not frame_path or not os.path.exists(frame_path):
-                frame_path, frame_ts = self._get_frame_at_timestamp(frame_ts)
-
-            source = frame_path if frame_path else f"{self.video_path}@{frame_ts}"
+            frame_paths, frame_timestamps = self._resolve_frame_bundle(arguments)
+            source = (
+                list(frame_paths)
+                if len(frame_paths) > 1
+                else (frame_paths[0] if frame_paths else f"{self.video_path}@0.0")
+            )
             result = {"source": source, "detections": [], "full_text": "", "ocr_backend": "none"}
 
-            if frame_path and os.path.exists(frame_path):
+            if frame_paths:
                 detections = []
-                if os.getenv("REFINER_DISABLE_PADDLEOCR", "").strip() != "1":
-                    try:
-                        detections = self._ocr_paddle(frame_path)
-                        result["ocr_backend"] = "paddleocr"
-                    except Exception as e:
-                        print(f"  PaddleOCR fallback: {e}")
-                if not detections:
-                    try:
-                        detections = self._ocr_pytesseract(frame_path)
-                        result["ocr_backend"] = "pytesseract"
-                    except Exception:
-                        detections = []
+                if len(frame_paths) == 1:
+                    frame_path = frame_paths[0]
+                    if os.getenv("REFINER_DISABLE_PADDLEOCR", "").strip() != "1":
+                        try:
+                            detections = self._ocr_paddle(frame_path)
+                            result["ocr_backend"] = "paddleocr"
+                        except Exception as e:
+                            print(f"  PaddleOCR fallback: {e}")
+                    if not detections:
+                        try:
+                            detections = self._ocr_pytesseract(frame_path)
+                            result["ocr_backend"] = "pytesseract"
+                        except Exception:
+                            detections = []
                 if detections:
                     result = {
                         "source": source,
@@ -696,12 +1255,16 @@ class RefinerToolsMixin:
                 else:
                     prompt = (
                         ocr_prompt.strip()
-                        + "\n\nExtract all visible text from this frame. Return JSON only.\n"
+                        + (
+                            "\n\nExtract all visible text across all provided frames together. Return JSON only.\n"
+                            if len(frame_paths) > 1
+                            else "\n\nExtract all visible text from this frame. Return JSON only.\n"
+                        )
                     )
                     result = self._run_vlm_json(
                         prompt,
-                        [frame_path],
-                        [float(frame_ts)],
+                        frame_paths,
+                        frame_timestamps,
                         result,
                     )
                     if isinstance(result, dict):
@@ -724,24 +1287,43 @@ class RefinerToolsMixin:
             query = str(arguments.get("query", "")).strip()
             frame_path = arguments.get("frame_path")
             frame_ts = self._safe_float(arguments.get("timestamp"), 0.0)
+            return_masks = bool(arguments.get("return_masks", False))
             if not frame_path or not os.path.exists(frame_path):
                 frame_path, frame_ts = self._get_frame_at_timestamp(frame_ts)
 
-            default_result = {
-                "query": query,
-                "detections": [],
-                "spatial_description": "",
-            }
-            prompt = (
-                spatial_grunder_prompt.strip()
-                + f"\n\nQuery: {query}\nReturn JSON only matching the OUTPUT FORMAT above.\n"
-            )
-            result = self._run_vlm_json(
-                prompt,
-                [frame_path] if frame_path else [],
-                [float(frame_ts)],
-                default_result,
-            )
+            backend = str(getattr(self, "spatial_grounder_backend", "grounding_dino") or "grounding_dino").strip().lower()
+            if backend == "grounding_dino":
+                result, warning = self._run_grounding_dino_spatial_grounder(
+                    frame_path,
+                    query,
+                    return_masks=return_masks,
+                )
+                if result is None and bool(getattr(self, "spatial_grounder_vlm_fallback", True)):
+                    result = self._run_spatial_grounder_vlm(
+                        query,
+                        frame_path,
+                        frame_ts,
+                        return_masks=return_masks,
+                    )
+                    if isinstance(result, dict):
+                        result["backend"] = "vlm_fallback"
+                        if warning:
+                            result["warning"] = warning
+                elif result is None:
+                    result = {
+                        "query": query,
+                        "detections": [],
+                        "spatial_description": "",
+                        "backend": "grounding_dino",
+                        "warning": warning or "Grounding DINO inference failed.",
+                    }
+            else:
+                result = self._run_spatial_grounder_vlm(
+                    query,
+                    frame_path,
+                    frame_ts,
+                    return_masks=return_masks,
+                )
             results.append(self._format_refine_tool_result("spatial_grounder", arguments, result))
 
         return "".join(results)
@@ -848,12 +1430,8 @@ class RefinerToolsMixin:
         results = []
 
         for arguments in calls:
-            frame_path = arguments.get("frame_path")
-            frame_ts = self._safe_float(arguments.get("timestamp"), 0.0)
+            frame_paths, frame_timestamps = self._resolve_frame_bundle(arguments)
             query = str(arguments.get("query", "") or "").strip()
-
-            if not frame_path or not os.path.exists(frame_path):
-                frame_path, frame_ts = self._get_frame_at_timestamp(frame_ts)
 
             default_result = {
                 "chart_type": "unknown",
@@ -865,13 +1443,15 @@ class RefinerToolsMixin:
                 "query_response": None,
             }
 
-            if not frame_path or not os.path.exists(frame_path):
+            if not frame_paths:
                 default_result["query_response"] = "chart_analyzer unavailable or frame not found"
                 results.append(self._format_refine_tool_result("chart_analyzer", arguments, default_result))
                 continue
 
             try:
                 prompt_text = chart_analyzer_prompt.strip()
+                if len(frame_paths) > 1:
+                    prompt_text += "\n\nUse all provided frames jointly as multiple retrieved views of the same chart.\n"
                 if query:
                     prompt_text += f"\n\nQuery: {query}\nReturn JSON only matching the OUTPUT FORMAT above.\n"
                 else:
@@ -882,11 +1462,12 @@ class RefinerToolsMixin:
                 parsed = None
 
                 if mode == "api":
-                    raw_output = self._call_chart_vision_api(prompt_text, frame_path)
+                    raw_output = self._call_chart_vision_api(prompt_text, frame_paths[0])
+                    print(f'chart analyzer output: {raw_output}')
                     parsed = self._extract_json_payload(raw_output)
                 elif mode == "vlm":
                     merged = self._run_vlm_json(
-                        prompt_text, [frame_path], [float(frame_ts)], default_result
+                        prompt_text, frame_paths, frame_timestamps, default_result
                     )
                     if isinstance(merged, dict) and "raw_output" in merged:
                         parsed = self._extract_json_payload(merged.get("raw_output", ""))

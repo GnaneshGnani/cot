@@ -14,8 +14,9 @@ All primary settings are **constructor arguments** on `VideoQADemo`. Edit the co
 
 | Role | What calls it | Local option | Remote API option |
 |------|----------------|--------------|-------------------|
-| **VLM** (frame/video tools: OCR fallback, spatial, counter, dense caption, action, etc.) | In-process `vLLM.LLM` | `vlm_model_name`, leave `vlm_api_base` unset | Set `vlm_api_base` + `vlm_model_name` (vision-capable model id on that API) |
+| **VLM** (frame/video tools: OCR fallback, counter, dense caption, action, etc.) | In-process `vLLM.LLM` | `vlm_model_name`, leave `vlm_api_base` unset | Set `vlm_api_base` + `vlm_model_name` (vision-capable model id on that API) |
 | **Planner / verifier / refiner** (text JSON) | `_text2text` | vLLM **pickle queue** when `planner_api_base` is localhost (see below) | OpenAI-compatible **HTTP** when base URL is **not** localhost (or force with env) |
+| **Spatial grounder** | `spatial_grounder` tool | **Grounding DINO** via local Hugging Face Transformers (`spatial_grounder_model_name`, `spatial_grounder_device`) | No API path is wired here; use `spatial_grounder_backend="vlm"` if you want the legacy VLM JSON grounding path instead |
 | **Chart analyzer** | `chart_mode` selects backend | **`api`:** `chart_model_name` + HTTP vision (defaults: `gpt-5`, inherits `planner_api_*` if `chart_api_base` unset) · **`vlm`:** same path as other VLM tools (`vlm_model_name`) · **`internvl`:** HF InternVL on `chart_device` |
 
 ---
@@ -37,6 +38,11 @@ These are the **string ids** passed into the pipeline; change them in code when 
 | `chart_model_name` | `"gpt-5"` | **`api`:** vision chat model id · **`internvl`:** e.g. `OpenGVLab/InternVL2_5-8B` (ignored for **`vlm`** mode) |
 | `chart_api_base` / `chart_api_keys` | `None` / `None` | **`api` only:** `None` = inherit **`planner_api_base`** / **`planner_api_keys`**; set explicitly to override |
 | `chart_device` | `"cuda:0"` | GPU for **`internvl`** mode only |
+| `spatial_grounder_backend` | `"grounding_dino"` | `"grounding_dino"` = local Hugging Face Grounding DINO · `"vlm"` = legacy VLM JSON grounding |
+| `spatial_grounder_model_name` | `"IDEA-Research/grounding-dino-base"` | Hugging Face model id for `spatial_grounder` |
+| `spatial_grounder_device` | `"cuda:0"` | Device for the local Grounding DINO model (`"cuda:0"`, `"cuda:1"`, `"cpu"`, or `"auto"`) |
+| `spatial_grounder_box_threshold` / `spatial_grounder_iou_threshold` | `0.25` / `0.8` | Score threshold for HF post-processing / IoU threshold for local per-label NMS deduplication |
+| `spatial_grounder_vlm_fallback` | `True` | When the local HF model cannot be loaded or inference fails, fall back to the legacy VLM `spatial_grounder` path instead of hard-failing |
 
 ### Refinement agents (LLM, not executor tools)
 
@@ -57,17 +63,25 @@ The planner’s plan is executed by name. Registered tools and what actually run
 | `asr` | Speech-to-text | **WhisperX** (default weights name `large-v3`, overridable with `WHISPERX_MODEL`); fallback: subtitles / `extract_subtitles` |
 | `audio_grounder` | Audio event search in a window | **LAION CLAP** (`CLAP_Module.load_ckpt()`); fallback: subtitle stub |
 | `ocr` | Text in a frame | **PaddleOCR** → **pytesseract** → **`vlm_model_name`** (VLM JSON) |
-| `spatial_grounder` | Objects / regions from a frame | **`vlm_model_name`** (vLLM or remote vision API) |
+| `spatial_grounder` | Objects / regions from a frame | **Grounding DINO** via local Hugging Face Transformers (default model id `IDEA-Research/grounding-dino-base`) with optional legacy **`vlm_model_name`** fallback |
 | `counter` | Count objects in a frame | **`vlm_model_name`** |
 | `dense_captioner` | Captions over a time range | **`vlm_model_name`** |
 | `action_recognizer` | Human actions in a range | **`vlm_model_name`** |
-| `chart_analyzer` | Chart / plot reading | Set **`chart_mode`**: **`api`** (default `gpt-5`, inherits planner API if chart URL unset), **`vlm`** (same stack as spatial/counter), or **`internvl`** (dedicated HF load) |
+| `chart_analyzer` | Chart / plot reading | Set **`chart_mode`**: **`api`** (default `gpt-5`, inherits planner API if chart URL unset), **`vlm`** (same VLM stack as `counter` / `dense_captioner` / `action_recognizer`), or **`internvl`** (dedicated HF load) |
 
 `video_qa_reanswerer` exists in prompts but is **not** registered in the handler map (commented out).
 
 ### Environment toggles for optional backends (tools)
 
 Whisper, CLAP, and PaddleOCR can be disabled or tuned via env vars in `refiner_tools.py` (e.g. `REFINER_DISABLE_WHISPERX`, `REFINER_DISABLE_CLAP`, `REFINER_DISABLE_PADDLEOCR`, `WHISPERX_MODEL`, `WHISPERX_BATCH`, CLAP window/hop/threshold). These do not replace `VideoQADemo` constructor model ids; they only switch or configure fixed pipelines.
+
+### Grounding DINO spatial grounder
+
+`spatial_grounder` now defaults to a local Hugging Face Grounding DINO checkpoint. The default is the official `IDEA-Research/grounding-dino-base` model id, loaded through `transformers` on `spatial_grounder_device`.
+
+There is no API token path in this backend. Make sure the base refiner dependencies from [`../requirements.txt`](../requirements.txt) are installed so `torch`, `torchvision`, and `transformers` are available. On first use, Hugging Face will download the checkpoint into the configured cache.
+
+If the local model load or inference fails and `spatial_grounder_vlm_fallback=True`, the runner falls back to the older VLM JSON grounding path so existing pipelines still execute.
 
 ---
 
@@ -127,7 +141,7 @@ You can pass multiple bases/keys as comma-separated strings or parallel lists fo
 
 ---
 
-## VLM tools: local vLLM (default)
+## VLM tools: local vLLM (default for non-spatial frame tools)
 
 Leave **`vlm_api_base` as default (`None`)**. The process loads **`vlm_model_name`** with in-process vLLM (`LLM(...)`) and uses **`vlm_tensor_parallel_size`**.
 
@@ -174,7 +188,7 @@ demo = VideoQADemo(
 
 ### `vlm` — same Qwen (vLLM or remote) as other frame tools
 
-Chart analysis goes through the same **`vlm_model_name`** path as **`spatial_grounder`** / **`counter`** (in-process vLLM or **`vlm_api_*`**). **`chart_model_name`** is not used for inference in this mode.
+Chart analysis goes through the same **`vlm_model_name`** path as **`counter`**, **`dense_captioner`**, and the legacy/fallback VLM frame tools (in-process vLLM or **`vlm_api_*`**). **`chart_model_name`** is not used for inference in this mode.
 
 ```python
 demo = VideoQADemo(
@@ -201,6 +215,7 @@ demo = VideoQADemo(
 ## Mixing backends (example)
 
 - **Planner/verifier/refiner:** GPT over HTTP  
+- **Spatial grounder:** local Hugging Face Grounding DINO  
 - **VLM tools:** local Qwen vLLM  
 - **Chart:** default **`api`** with **`gpt-5`** (inherits planner API)  
 
@@ -209,6 +224,9 @@ demo = VideoQADemo(
     planner_model_name="gpt-5",
     planner_api_base=["https://api.openai.com/v1"],
     planner_api_keys=[os.environ["OPENAI_API_KEY"]],
+    spatial_grounder_backend="grounding_dino",
+    spatial_grounder_model_name="IDEA-Research/grounding-dino-base",
+    spatial_grounder_device="cuda:0",
     vlm_model_name="Qwen/Qwen2.5-VL-7B-Instruct",
     vlm_api_base=None,
     chart_mode="api",
