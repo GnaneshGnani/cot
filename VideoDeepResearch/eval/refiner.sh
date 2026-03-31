@@ -14,6 +14,7 @@ mkdir -p ./logs ./traces
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export HF_ENDPOINT=https://hf-mirror.com
 export HF_HOME=/share/data/drive_1/huggingface_cache
+export CLAP_CKPT_PATH="${CLAP_CKPT_PATH:-$HF_HOME/assets/laion_clap/630k-audioset-best.pt}"
 
 export OPENAI_API_KEY="${OPENAI_API_KEY:?Set OPENAI_API_KEY before running this script}"
 export API_BASE_URL=https://api.openai.com/v1

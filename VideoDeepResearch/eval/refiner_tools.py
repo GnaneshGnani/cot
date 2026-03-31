@@ -48,6 +48,7 @@ _WHISPERX_ALIGN = None
 _WHISPERX_META = None
 _PADDLE_OCR = None
 _CLAP_MODULE = None
+_CLAP_RUNTIME = {}
 _WHISPERX_SIDECAR_RUNTIME = {}
 
 
@@ -167,6 +168,95 @@ class RefinerToolsMixin:
             parsed = parser(text)
             if isinstance(parsed, (dict, list)):
                 return parsed
+
+    def _clap_torch_device(self):
+        raw = os.getenv("CLAP_DEVICE", "").strip()
+        if not raw or raw.lower() == "auto":
+            return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        if raw.isdigit():
+            raw = f"cuda:{int(raw)}"
+        try:
+            device = torch.device(raw)
+        except Exception:
+            fallback = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+            print(f"  CLAP device {raw!r} is invalid; falling back to {fallback}.")
+            return fallback
+        if device.type == "cuda":
+            if not torch.cuda.is_available():
+                print("  CLAP requested CUDA, but CUDA is unavailable; falling back to cpu.")
+                return torch.device("cpu")
+            if device.index is not None and device.index >= torch.cuda.device_count():
+                fallback = torch.device("cuda:0")
+                print(f"  CLAP device {raw!r} is out of range; falling back to {fallback}.")
+                return fallback
+        return device
+
+    def _clap_checkpoint_path(self):
+        candidates = []
+        raw = os.getenv("CLAP_CKPT_PATH", "").strip()
+        if raw:
+            candidates.append(Path(raw).expanduser())
+
+        hf_home = str(os.getenv("HF_HOME", "")).strip()
+        if hf_home:
+            hf_root = Path(hf_home).expanduser()
+            candidates.append(hf_root / "assets" / "laion_clap" / "630k-audioset-best.pt")
+            snapshots_dir = hf_root / "hub" / "models--lukewys--laion_clap" / "snapshots"
+            if snapshots_dir.is_dir():
+                for snapshot in sorted(snapshots_dir.iterdir()):
+                    candidates.append(snapshot / "630k-audioset-best.pt")
+
+        try:
+            package_dir = Path(sys.modules[CLAP_Module.__module__].__file__).resolve().parent
+            candidates.append(package_dir / "630k-audioset-best.pt")
+        except Exception:
+            pass
+
+        seen = set()
+        for path in candidates:
+            normalized = str(path.resolve()) if path.exists() else str(path)
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            if path.is_file():
+                return path
+        return None
+
+    def _merge_audio_grounder_events(self, events):
+        merged = []
+        ordered = sorted(
+            events or [],
+            key=lambda item: (float(item.get("start", 0.0)), float(item.get("end", 0.0))),
+        )
+        for event in ordered:
+            label = str(event.get("event_label", "")).strip()
+            start = float(event.get("start", 0.0))
+            end = float(event.get("end", start))
+            confidence = float(event.get("confidence", 0.0) or 0.0)
+            if not merged:
+                merged.append(
+                    {
+                        "event_label": label,
+                        "start": start,
+                        "end": end,
+                        "confidence": confidence,
+                    }
+                )
+                continue
+            prev = merged[-1]
+            if prev["event_label"] == label and start <= float(prev["end"]) + 1e-6:
+                prev["end"] = max(float(prev["end"]), end)
+                prev["confidence"] = max(float(prev["confidence"]), confidence)
+                continue
+            merged.append(
+                {
+                    "event_label": label,
+                    "start": start,
+                    "end": end,
+                    "confidence": confidence,
+                }
+            )
+        return merged
 
         if not isinstance(text, str):
             return None
@@ -1405,7 +1495,7 @@ class RefinerToolsMixin:
         return "".join(results)
 
     def _audio_grounder_clap(self, arguments: dict) -> dict:
-        global _CLAP_MODULE
+        global _CLAP_MODULE, _CLAP_RUNTIME
         if np is None or sf is None or torch is None or CLAP_Module is None:
             return {
                 "query": str(arguments.get("query", "")).strip(),
@@ -1441,70 +1531,100 @@ class RefinerToolsMixin:
                 capture_output=True,
                 timeout=600,
             )
-        except Exception as e:
-            print(f"  ffmpeg audio extract failed: {e}")
-            return {"query": query, "events": [], "audio_summary": "audio extract failed", "backend": "none"}
 
-        if _CLAP_MODULE is None:
-            _CLAP_MODULE = CLAP_Module(enable_fusion=False)
-            _CLAP_MODULE.load_ckpt()
-
-        audio_data, sr = sf.read(wav_path)
-        if audio_data.ndim > 1:
-            audio_data = audio_data.mean(axis=1)
-        duration = len(audio_data) / float(sr)
-        win = float(os.getenv("CLAP_WINDOW_SEC", "2.0"))
-        hop = float(os.getenv("CLAP_HOP_SEC", "1.0"))
-        thresh = float(os.getenv("CLAP_SIM_THRESHOLD", "0.25"))
-
-        with torch.no_grad():
-            t_emb = _CLAP_MODULE.get_text_embedding([query], use_tensor=False)
-        t_emb = np.asarray(t_emb).reshape(-1).flatten()
-
-        events = []
-        t = 0.0
-        while t + win <= duration + 1e-6:
-            i0 = int(t * sr)
-            i1 = int(min(len(audio_data), (t + win) * sr))
-            if i1 <= i0:
-                break
-            chunk = audio_data[i0:i1].astype(np.float32)
-            chunk_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
-            try:
-                sf.write(chunk_wav, chunk, int(sr))
-                with torch.no_grad():
-                    a_emb = _CLAP_MODULE.get_audio_embedding_from_filelist(
-                        [chunk_wav], use_tensor=False
+            if _CLAP_MODULE is None:
+                clap_device = self._clap_torch_device()
+                clap_ckpt = self._clap_checkpoint_path()
+                if clap_ckpt is None and os.getenv("HF_HUB_OFFLINE", "").strip() == "1":
+                    raise RuntimeError(
+                        "LAION-CLAP checkpoint 630k-audioset-best.pt is not available in the local cache."
                     )
-                a_emb = np.asarray(a_emb).reshape(-1).flatten()
-            finally:
+                module = CLAP_Module(enable_fusion=False, device=str(clap_device))
+                if clap_ckpt is not None:
+                    module.load_ckpt(ckpt=str(clap_ckpt), verbose=False)
+                else:
+                    module.load_ckpt(verbose=False)
+                _CLAP_MODULE = module
+                _CLAP_RUNTIME = {
+                    "device": str(clap_device),
+                    "checkpoint": str(clap_ckpt) if clap_ckpt is not None else None,
+                }
+
+            audio_data, sr = sf.read(wav_path)
+            if audio_data.ndim > 1:
+                audio_data = audio_data.mean(axis=1)
+            duration = len(audio_data) / float(sr)
+            win = float(os.getenv("CLAP_WINDOW_SEC", "2.0"))
+            hop = float(os.getenv("CLAP_HOP_SEC", "1.0"))
+            thresh = float(os.getenv("CLAP_SIM_THRESHOLD", "0.25"))
+
+            with torch.no_grad():
+                t_emb = _CLAP_MODULE.get_text_embedding([query], use_tensor=False)
+            t_emb = np.asarray(t_emb).reshape(-1).flatten()
+
+            events = []
+            t = 0.0
+            while t + win <= duration + 1e-6:
+                i0 = int(t * sr)
+                i1 = int(min(len(audio_data), (t + win) * sr))
+                if i1 <= i0:
+                    break
+                chunk = audio_data[i0:i1].astype(np.float32)
+                chunk_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
                 try:
-                    os.unlink(chunk_wav)
-                except OSError:
-                    pass
-            sim = float(np.dot(a_emb, t_emb) / (np.linalg.norm(a_emb) * np.linalg.norm(t_emb) + 1e-8))
-            if sim >= thresh:
-                events.append(
-                    {
-                        "event_label": query,
-                        "start": float(t0 + t),
-                        "end": float(t0 + min(t + win, duration)),
-                        "confidence": min(1.0, max(0.0, sim)),
-                    }
-                )
-            t += hop
+                    sf.write(chunk_wav, chunk, int(sr))
+                    with torch.no_grad():
+                        a_emb = _CLAP_MODULE.get_audio_embedding_from_filelist(
+                            [chunk_wav], use_tensor=False
+                        )
+                    a_emb = np.asarray(a_emb).reshape(-1).flatten()
+                finally:
+                    try:
+                        os.unlink(chunk_wav)
+                    except OSError:
+                        pass
+                sim = float(np.dot(a_emb, t_emb) / (np.linalg.norm(a_emb) * np.linalg.norm(t_emb) + 1e-8))
+                if sim >= thresh:
+                    events.append(
+                        {
+                            "event_label": query,
+                            "start": float(t0 + t),
+                            "end": float(t0 + min(t + win, duration)),
+                            "confidence": min(1.0, max(0.0, sim)),
+                        }
+                    )
+                t += hop
 
-        try:
-            os.unlink(wav_path)
-        except OSError:
-            pass
-
-        return {
-            "query": query,
-            "events": events,
-            "audio_summary": f"CLAP scan {len(events)} peaks; query={query!r}",
-            "backend": "laion_clap",
-        }
+            merged_events = self._merge_audio_grounder_events(events)
+            return {
+                "query": query,
+                "events": merged_events,
+                "raw_event_count": len(events),
+                "audio_summary": (
+                    f"CLAP scan {len(events)} peaks; merged {len(merged_events)} events; query={query!r}"
+                ),
+                "backend": "laion_clap",
+                "audio_status": "ok",
+                "audio_error": None,
+                "audio_fallback_used": False,
+                "clap_device": _CLAP_RUNTIME.get("device"),
+                "clap_checkpoint": _CLAP_RUNTIME.get("checkpoint"),
+            }
+        except Exception as e:
+            if "ffmpeg" in type(e).__name__.lower():
+                print(f"  ffmpeg audio extract failed: {e}")
+                return {
+                    "query": query,
+                    "events": [],
+                    "audio_summary": "audio extract failed",
+                    "backend": "none",
+                }
+            raise
+        finally:
+            try:
+                os.unlink(wav_path)
+            except OSError:
+                pass
 
     def _process_audio_grounder(self, output_text: str) -> str:
         calls = self._get_refine_tool_calls(output_text, "audio_grounder")
@@ -1516,11 +1636,17 @@ class RefinerToolsMixin:
 
         for arguments in calls:
             result = None
+            clap_error = None
             if os.getenv("REFINER_DISABLE_CLAP", "").strip() != "1":
                 try:
                     result = self._audio_grounder_clap(arguments if isinstance(arguments, dict) else {})
                 except Exception as e:
+                    clap_error = f"{type(e).__name__}: {e}"
                     print(f"  LAION-CLAP fallback: {e}")
+                if result is not None and result.get("backend") == "none" and clap_error is None:
+                    clap_error = result.get("audio_summary")
+            else:
+                clap_error = "LAION-CLAP disabled by REFINER_DISABLE_CLAP=1"
             if result is None or result.get("backend") == "none":
                 asr_result = self._get_asr_result_from_subtitles(
                     arguments.get("start_time"), arguments.get("end_time")
@@ -1535,7 +1661,14 @@ class RefinerToolsMixin:
                     "events": [],
                     "audio_summary": summary,
                     "backend": "stub",
+                    "audio_status": "unavailable",
+                    "audio_error": clap_error,
+                    "audio_fallback_used": True,
                 }
+            else:
+                result.setdefault("audio_status", "ok")
+                result.setdefault("audio_error", None)
+                result.setdefault("audio_fallback_used", False)
             results.append(self._format_refine_tool_result("audio_grounder", arguments, result))
 
         return "".join(results)
