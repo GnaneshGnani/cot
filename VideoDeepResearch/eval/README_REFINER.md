@@ -60,7 +60,7 @@ The planner’s plan is executed by name. Registered tools and what actually run
 |------|----------------|-----------------|
 | `temporal_grounder` | Text-to-video segment retrieval | **LanguageBind** + **BGE-M3** (text query) via [`retriever_languagebind.py`](../retriever_languagebind.py) (`LanguageBind_Video_FT` / `LanguageBind_Image`, optional local `BGE_M3_MODEL_PATH`); **no** `vlm_model_name` |
 | `frame_retriever` | Frames at timestamps or from retrieval | Same retriever as above + on-disk frames |
-| `asr` | Speech-to-text | **WhisperX** (default weights name `large-v3`, overridable with `WHISPERX_MODEL`); fallback: subtitles / `extract_subtitles` |
+| `asr` | Speech-to-text | **WhisperX** on `asr_device` / `WHISPERX_DEVICE` (default `cuda:0`; weights name `small`, overridable with `WHISPERX_MODEL`). Optional sidecar mode: set `WHISPERX_CONDA_ENV` or `WHISPERX_PYTHON` to run ASR in a separate env via [`whisperx_sidecar.py`](whisperx_sidecar.py). In sidecar mode, use `WHISPERX_AUX_DEVICE` (default `cpu`) for VAD/alignment while transcription stays on `WHISPERX_DEVICE`; fallback: subtitles / `extract_subtitles` |
 | `audio_grounder` | Audio event search in a window | **LAION CLAP** (`CLAP_Module.load_ckpt()`); fallback: subtitle stub |
 | `ocr` | Text in a frame | **PaddleOCR** → **pytesseract** → **`vlm_model_name`** (VLM JSON) |
 | `spatial_grounder` | Objects / regions from a frame | **Grounding DINO** via local Hugging Face Transformers (default model id `IDEA-Research/grounding-dino-base`) with optional legacy **`vlm_model_name`** fallback |
@@ -73,7 +73,36 @@ The planner’s plan is executed by name. Registered tools and what actually run
 
 ### Environment toggles for optional backends (tools)
 
-Whisper, CLAP, and PaddleOCR can be disabled or tuned via env vars in `refiner_tools.py` (e.g. `REFINER_DISABLE_WHISPERX`, `REFINER_DISABLE_CLAP`, `REFINER_DISABLE_PADDLEOCR`, `WHISPERX_MODEL`, `WHISPERX_BATCH`, CLAP window/hop/threshold). These do not replace `VideoQADemo` constructor model ids; they only switch or configure fixed pipelines.
+Whisper, CLAP, and PaddleOCR can be disabled or tuned via env vars in `refiner_tools.py` (e.g. `REFINER_DISABLE_WHISPERX`, `REFINER_DISABLE_CLAP`, `REFINER_DISABLE_PADDLEOCR`, `WHISPERX_MODEL`, `WHISPERX_DEVICE`, `WHISPERX_AUX_DEVICE`, `WHISPERX_COMPUTE_TYPE`, `WHISPERX_BATCH`, `WHISPERX_CONDA_ENV`, `WHISPERX_PYTHON`, CLAP window/hop/threshold). These do not replace `VideoQADemo` constructor model ids; they only switch or configure fixed pipelines.
+
+### WhisperX sidecar env (cuDNN 8 workaround)
+
+If your main refiner env uses cuDNN 9 but WhisperX GPU ASR needs the CUDA 12 + cuDNN 8 stack, keep the refiner in its current env and run ASR in a separate sidecar env instead.
+
+Create the sidecar env:
+
+```bash
+cd eval
+bash setup_whisperx_cudnn8.sh
+```
+
+Then enable sidecar mode:
+
+```bash
+export WHISPERX_CONDA_ENV=cot-whisperx-cudnn8
+export WHISPERX_MODEL=small
+export WHISPERX_DEVICE=cuda:0
+export WHISPERX_AUX_DEVICE=cpu
+export WHISPERX_COMPUTE_TYPE=float16
+```
+
+Alternative: skip `conda run` and point directly at a Python binary:
+
+```bash
+export WHISPERX_PYTHON=/home/ghazi/miniconda3/envs/cot-whisperx-cudnn8/bin/python
+```
+
+When either `WHISPERX_CONDA_ENV` or `WHISPERX_PYTHON` is set, the refiner launches [`whisperx_sidecar.py`](whisperx_sidecar.py) in that target env and keeps the rest of the pipeline in the current process. The sidecar uses `WHISPERX_DEVICE` for CTranslate2 transcription and `WHISPERX_AUX_DEVICE` for the torch-based VAD/alignment path, which avoids dragging cuDNN 9 expectations into the cuDNN 8 ASR runtime.
 
 ### Grounding DINO spatial grounder
 

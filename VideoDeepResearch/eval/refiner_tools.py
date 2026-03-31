@@ -2,9 +2,11 @@ import base64
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 _eval_dir = os.path.dirname(os.path.abspath(__file__))
@@ -46,6 +48,33 @@ _WHISPERX_ALIGN = None
 _WHISPERX_META = None
 _PADDLE_OCR = None
 _CLAP_MODULE = None
+_WHISPERX_SIDECAR_RUNTIME = {}
+
+
+@contextmanager
+def _whisperx_torch_load_compat():
+    """Preserve pre-PyTorch-2.6 checkpoint loading for WhisperX internals.
+
+    WhisperX/pyannote loads a packaged VAD checkpoint that contains non-tensor
+    OmegaConf objects. Under PyTorch 2.6, `torch.load(..., weights_only=None)`
+    now behaves like `weights_only=True`, which rejects that checkpoint. Scope
+    the compatibility override to WhisperX model initialization only.
+    """
+    original_torch_load = getattr(torch, "load", None)
+    if original_torch_load is None:
+        yield
+        return
+
+    def _compat_torch_load(*args, **kwargs):
+        if kwargs.get("weights_only") is None:
+            kwargs["weights_only"] = False
+        return original_torch_load(*args, **kwargs)
+
+    torch.load = _compat_torch_load
+    try:
+        yield
+    finally:
+        torch.load = original_torch_load
 
 
 class RefinerToolsMixin:
@@ -54,6 +83,272 @@ class RefinerToolsMixin:
         if raw.isdigit():
             return torch.device(f"cuda:{int(raw)}")
         return torch.device(raw)
+
+    def _whisperx_torch_device(self):
+        raw = os.getenv("WHISPERX_DEVICE", str(getattr(self, "asr_device", "cuda:0"))).strip()
+        if not raw or raw.lower() == "auto":
+            return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        if raw.isdigit():
+            raw = f"cuda:{int(raw)}"
+        try:
+            device = torch.device(raw)
+        except Exception:
+            fallback = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+            print(f"  WhisperX device {raw!r} is invalid; falling back to {fallback}.")
+            return fallback
+        if device.type == "cuda":
+            if not torch.cuda.is_available():
+                print("  WhisperX requested CUDA, but CUDA is unavailable; falling back to cpu.")
+                return torch.device("cpu")
+            if device.index is not None and device.index >= torch.cuda.device_count():
+                fallback = torch.device("cuda:0")
+                print(f"  WhisperX device {raw!r} is out of range; falling back to {fallback}.")
+                return fallback
+        return device
+
+    def _whisperx_compute_type(self, device: torch.device) -> str:
+        raw = os.getenv("WHISPERX_COMPUTE_TYPE", str(getattr(self, "asr_compute_type", "") or "")).strip()
+        if raw:
+            return raw
+        return "float16" if device.type == "cuda" else "int8"
+
+    def _whisperx_aux_device(self) -> str:
+        raw = os.getenv("WHISPERX_AUX_DEVICE", "cpu").strip()
+        if not raw:
+            return "cpu"
+        if raw.isdigit():
+            return f"cuda:{int(raw)}"
+        return raw
+
+    def _whisperx_ctranslate2_device(self, device_obj: torch.device):
+        if device_obj.type == "cuda":
+            return "cuda", int(device_obj.index or 0)
+        return device_obj.type, 0
+
+    def _whisperx_min_window_seconds(self) -> float:
+        raw = os.getenv("WHISPERX_MIN_WINDOW", "").strip()
+        try:
+            value = float(raw) if raw else 8.0
+        except Exception:
+            value = 8.0
+        duration = max(1.0, float(getattr(self, "duration", 1.0) or 1.0))
+        return max(1.0, min(value, duration))
+
+    def _whisperx_effective_range(self, start_time=None, end_time=None):
+        requested_start, requested_end = self._get_time_range(start_time, end_time)
+        transcribe_start = float(requested_start)
+        transcribe_end = float(requested_end)
+        min_window = self._whisperx_min_window_seconds()
+        if (transcribe_end - transcribe_start) < min_window:
+            mid = (transcribe_start + transcribe_end) / 2.0
+            half = min_window / 2.0
+            duration = float(getattr(self, "duration", transcribe_end) or transcribe_end)
+            transcribe_start = max(0.0, mid - half)
+            transcribe_end = min(duration, mid + half)
+            if (transcribe_end - transcribe_start) < min_window:
+                if transcribe_start <= 0.0:
+                    transcribe_end = min(duration, min_window)
+                else:
+                    transcribe_start = max(0.0, transcribe_end - min_window)
+        return {
+            "requested_start": float(requested_start),
+            "requested_end": float(requested_end),
+            "transcribe_start": float(transcribe_start),
+            "transcribe_end": float(transcribe_end),
+            "expanded": (
+                abs(float(transcribe_start) - float(requested_start)) > 1e-6
+                or abs(float(transcribe_end) - float(requested_end)) > 1e-6
+            ),
+        }
+
+    def _whisperx_extract_json_payload(self, text):
+        parser = getattr(self, "_extract_json_payload", None)
+        if callable(parser):
+            parsed = parser(text)
+            if isinstance(parsed, (dict, list)):
+                return parsed
+
+        if not isinstance(text, str):
+            return None
+        for line in reversed(text.splitlines()):
+            candidate = line.strip()
+            if not candidate:
+                continue
+            if not (candidate.startswith("{") or candidate.startswith("[")):
+                continue
+            try:
+                return json.loads(candidate)
+            except Exception:
+                continue
+        return None
+
+    def _whisperx_dedupe_paths(self, paths):
+        deduped = []
+        seen = set()
+        for path in paths:
+            raw = str(path or "").strip()
+            if not raw:
+                continue
+            key = os.path.realpath(raw)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(raw)
+        return deduped
+
+    def _whisperx_path_looks_like_conda_runtime(self, path: str) -> bool:
+        normalized = os.path.realpath(path).lower()
+        markers = (
+            "/miniconda",
+            "/anaconda",
+            "/miniforge",
+            "/mambaforge",
+            "/micromamba",
+            "/conda/",
+        )
+        return any(marker in normalized for marker in markers)
+
+    def _whisperx_sidecar_runtime(self, base_cmd):
+        cache_key = tuple(base_cmd)
+        if cache_key not in _WHISPERX_SIDECAR_RUNTIME:
+            probe = subprocess.run(
+                base_cmd
+                + [
+                    "-c",
+                    (
+                        "import importlib, json, sys\n"
+                        "paths=[]\n"
+                        "for name in ('nvidia.cublas.lib', 'nvidia.cudnn.lib'):\n"
+                        "    try:\n"
+                        "        mod=importlib.import_module(name)\n"
+                        "        paths.extend(list(getattr(mod, '__path__', []) or []))\n"
+                        "    except Exception:\n"
+                        "        pass\n"
+                        "print(json.dumps({'sys_prefix': sys.prefix, 'gpu_ld_paths': paths}))\n"
+                    ),
+                ],
+                capture_output=True,
+                text=True,
+                env={k: v for k, v in os.environ.items() if k != "LD_LIBRARY_PATH"},
+                check=False,
+            )
+            payload = self._whisperx_extract_json_payload((probe.stdout or "").strip())
+            if not isinstance(payload, dict):
+                payload = {}
+            _WHISPERX_SIDECAR_RUNTIME[cache_key] = {
+                "sys_prefix": str(payload.get("sys_prefix") or "").strip(),
+                "gpu_ld_paths": self._whisperx_dedupe_paths(payload.get("gpu_ld_paths") or []),
+            }
+        return _WHISPERX_SIDECAR_RUNTIME[cache_key]
+
+    def _whisperx_sidecar_base_cmd(self):
+        python_bin = os.getenv("WHISPERX_PYTHON", "").strip()
+        if python_bin:
+            return [python_bin]
+
+        env_name = os.getenv("WHISPERX_CONDA_ENV", "").strip()
+        if not env_name:
+            return None
+
+        conda_exe = (
+            os.getenv("CONDA_EXE", "").strip()
+            or shutil.which("conda")
+            or "/home/ghazi/miniconda3/bin/conda"
+        )
+        return [conda_exe, "run", "--no-capture-output", "-n", env_name, "python"]
+
+    def _whisperx_sidecar_env(self, base_cmd):
+        runtime = self._whisperx_sidecar_runtime(base_cmd)
+        gpu_ld_paths = list(runtime.get("gpu_ld_paths") or [])
+        env = dict(os.environ)
+        filtered_current_ld = []
+        for entry in str(env.get("LD_LIBRARY_PATH", "") or "").split(":"):
+            raw = entry.strip()
+            if not raw:
+                continue
+            real = os.path.realpath(raw)
+            if any(real == os.path.realpath(path) for path in gpu_ld_paths):
+                continue
+            if self._whisperx_path_looks_like_conda_runtime(real):
+                continue
+            filtered_current_ld.append(raw)
+        final_ld = self._whisperx_dedupe_paths(gpu_ld_paths + filtered_current_ld)
+        if final_ld:
+            env["LD_LIBRARY_PATH"] = ":".join(final_ld)
+        else:
+            env.pop("LD_LIBRARY_PATH", None)
+        return env
+
+    def _get_asr_whisperx_sidecar(self, start_time=None, end_time=None):
+        base_cmd = self._whisperx_sidecar_base_cmd()
+        if not base_cmd:
+            raise RuntimeError("WhisperX sidecar is not configured")
+
+        window = self._whisperx_effective_range(start_time, end_time)
+        device_obj = self._whisperx_torch_device()
+        compute_type = self._whisperx_compute_type(device_obj)
+        model_name = os.getenv("WHISPERX_MODEL", "small")
+        sidecar_script = os.path.join(_eval_dir, "whisperx_sidecar.py")
+        cmd = base_cmd + [
+            sidecar_script,
+            "--video-path",
+            self.video_path,
+            "--start-time",
+            str(window["transcribe_start"]),
+            "--end-time",
+            str(window["transcribe_end"]),
+            "--model-name",
+            model_name,
+            "--device",
+            str(device_obj),
+            "--aux-device",
+            self._whisperx_aux_device(),
+            "--compute-type",
+            compute_type,
+            "--batch-size",
+            str(int(os.getenv("WHISPERX_BATCH", "8"))),
+        ]
+        language_hint = os.getenv("WHISPERX_LANGUAGE", "").strip()
+        if language_hint:
+            cmd.extend(["--language", language_hint])
+
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            env=self._whisperx_sidecar_env(base_cmd),
+            check=False,
+        )
+        stdout = (proc.stdout or "").strip()
+        stderr = (proc.stderr or "").strip()
+        if proc.returncode != 0:
+            err_payload = self._whisperx_extract_json_payload(stderr)
+            if isinstance(err_payload, dict) and err_payload.get("error"):
+                detail = f'{err_payload.get("error_type", "RuntimeError")}: {err_payload.get("error")}'
+            else:
+                detail = stderr or stdout or f"sidecar exited with code {proc.returncode}"
+            raise RuntimeError(detail)
+        if not stdout:
+            raise RuntimeError("WhisperX sidecar returned no stdout")
+        result = self._whisperx_extract_json_payload(stdout)
+        if not isinstance(result, dict):
+            raise RuntimeError(f"Invalid JSON from WhisperX sidecar stdout: {stdout[:500]}")
+        result.setdefault(
+            "requested_range",
+            {
+                "start": float(window["requested_start"]),
+                "end": float(window["requested_end"]),
+            },
+        )
+        result.setdefault(
+            "transcription_range",
+            {
+                "start": float(window["transcribe_start"]),
+                "end": float(window["transcribe_end"]),
+            },
+        )
+        result["window_expanded"] = bool(window["expanded"])
+        return result
 
     def _chart_effective_api_bases(self):
         b = getattr(self, "chart_api_base", None)
@@ -815,25 +1110,57 @@ class RefinerToolsMixin:
         if whisperx is None or torch is None:
             raise ImportError("whisperx or torch not installed")
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        compute_type = "float16" if device == "cuda" else "int8"
-        model_name = os.getenv("WHISPERX_MODEL", "large-v3")
+        device_obj = self._whisperx_torch_device()
+        device = str(device_obj)
+        model_device, model_device_index = self._whisperx_ctranslate2_device(device_obj)
+        compute_type = self._whisperx_compute_type(device_obj)
+        model_name = os.getenv("WHISPERX_MODEL", "small")
+        window = self._whisperx_effective_range(start_time, end_time)
+        start = float(window["transcribe_start"])
+        end = float(window["transcribe_end"])
 
         if _WHISPERX_MODEL is None:
-            _WHISPERX_MODEL = whisperx.load_model(model_name, device, compute_type=compute_type)
+            with _whisperx_torch_load_compat():
+                _WHISPERX_MODEL = whisperx.load_model(
+                    model_name,
+                    model_device,
+                    device_index=model_device_index,
+                    compute_type=compute_type,
+                )
         audio = whisperx.load_audio(self.video_path)
-        result = _WHISPERX_MODEL.transcribe(audio, batch_size=int(os.getenv("WHISPERX_BATCH", "8")))
+        sample_rate = float(getattr(getattr(whisperx, "audio", None), "SAMPLE_RATE", 16000))
+        sample_start = max(0, int(start * sample_rate))
+        sample_end = min(len(audio), int(end * sample_rate))
+        audio_window = audio[sample_start:sample_end] if sample_end > sample_start else audio[0:0]
+        if len(audio_window) == 0:
+            return {
+                "language_detected": "unknown",
+                "transcript": "",
+                "full_transcript": "",
+                "segments": [],
+                "words": [],
+                "asr_backend": "whisperx",
+            }
+
+        transcribe_kwargs = {
+            "batch_size": int(os.getenv("WHISPERX_BATCH", "8")),
+        }
+        language_hint = os.getenv("WHISPERX_LANGUAGE", "").strip()
+        if language_hint:
+            transcribe_kwargs["language"] = language_hint
+        result = _WHISPERX_MODEL.transcribe(audio_window, **transcribe_kwargs)
         lang = result.get("language") or "en"
         segs = []
         try:
             if _WHISPERX_ALIGN is None or _WHISPERX_META is None:
-                model_a, meta = whisperx.load_align_model(language_code=lang, device=device)
+                with _whisperx_torch_load_compat():
+                    model_a, meta = whisperx.load_align_model(language_code=lang, device=device)
                 _WHISPERX_ALIGN, _WHISPERX_META = model_a, meta
             aligned = whisperx.align(
                 result["segments"],
                 _WHISPERX_ALIGN,
                 _WHISPERX_META,
-                audio,
+                audio_window,
                 device,
                 return_char_alignments=False,
             )
@@ -850,11 +1177,27 @@ class RefinerToolsMixin:
                 }
                 for s in result.get("segments", [])
             ]
-        start, end = self._get_time_range(start_time, end_time)
-        filtered = [s for s in segs if float(s.get("end", 0)) >= start and float(s.get("start", 0)) <= end]
+
+        time_offset = float(start)
+        normalized = []
+        for s in segs:
+            item = dict(s)
+            item["start"] = float(item.get("start", 0)) + time_offset
+            item["end"] = float(item.get("end", 0)) + time_offset
+            words = []
+            for w in item.get("words") or []:
+                word_item = dict(w)
+                if "start" in word_item:
+                    word_item["start"] = float(word_item.get("start", 0)) + time_offset
+                if "end" in word_item:
+                    word_item["end"] = float(word_item.get("end", 0)) + time_offset
+                words.append(word_item)
+            item["words"] = words
+            normalized.append(item)
+
         segments = []
         words_flat = []
-        for s in filtered:
+        for s in normalized:
             segments.append(
                 {
                     "start": float(s.get("start", 0)),
@@ -881,6 +1224,15 @@ class RefinerToolsMixin:
             "segments": segments,
             "words": words_flat,
             "asr_backend": "whisperx",
+            "requested_range": {
+                "start": float(window["requested_start"]),
+                "end": float(window["requested_end"]),
+            },
+            "transcription_range": {
+                "start": float(window["transcribe_start"]),
+                "end": float(window["transcribe_end"]),
+            },
+            "window_expanded": bool(window["expanded"]),
         }
 
     def _process_temporal_grounder(self, output_text: str) -> str:
@@ -1008,16 +1360,46 @@ class RefinerToolsMixin:
 
         for arguments in calls:
             result = None
+            whisperx_error = None
             if os.getenv("REFINER_DISABLE_WHISPERX", "").strip() != "1":
                 try:
-                    result = self._get_asr_whisperx(arguments.get("start_time"), arguments.get("end_time"))
+                    if self._whisperx_sidecar_base_cmd():
+                        result = self._get_asr_whisperx_sidecar(
+                            arguments.get("start_time"),
+                            arguments.get("end_time"),
+                        )
+                    else:
+                        result = self._get_asr_whisperx(
+                            arguments.get("start_time"),
+                            arguments.get("end_time"),
+                        )
                 except Exception as e:
+                    whisperx_error = f"{type(e).__name__}: {e}"
                     print(f"  WhisperX ASR fallback: {e}")
+            else:
+                whisperx_error = "WhisperX disabled by REFINER_DISABLE_WHISPERX=1"
             if result is None:
                 result = self._get_asr_result_from_subtitles(
                     arguments.get("start_time"), arguments.get("end_time")
                 )
-                result["asr_backend"] = result.get("asr_backend", "subtitles")
+                subtitle_has_content = bool(result.get("segments"))
+                subtitle_source_available = bool(result.get("subtitle_source_available"))
+                result["asr_backend"] = "subtitles" if subtitle_has_content else "none"
+                result["asr_fallback_used"] = True
+                result["asr_error"] = whisperx_error
+                if subtitle_has_content:
+                    result["asr_status"] = "subtitle_fallback"
+                    result["note"] = "WhisperX failed; returning subtitle-derived transcript for the requested range."
+                else:
+                    result["asr_status"] = "unavailable"
+                    if subtitle_source_available:
+                        result["note"] = "WhisperX failed and subtitles exist, but the requested time range has no subtitle coverage."
+                    else:
+                        result["note"] = "WhisperX failed and no subtitle source is available for this video."
+            else:
+                result["asr_fallback_used"] = False
+                result["asr_error"] = None
+                result["asr_status"] = "ok"
             results.append(self._format_refine_tool_result("asr", arguments, result))
 
         return "".join(results)

@@ -107,6 +107,8 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
                  chart_mode: str = "api",
                  chart_model_name: str = "gpt-5",
                  chart_device: str = "cuda:0",
+                 asr_device: str = "cuda:0",
+                 asr_compute_type: str = None,
                  chart_api_base=None,
                  chart_api_keys=None,
                  spatial_grounder_backend: str = "vlm",
@@ -140,6 +142,8 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         self.planner_model_name = planner_model_name
         self.chart_model_name = chart_model_name
         self.chart_device = chart_device
+        self.asr_device = str(asr_device or "cuda:0").strip() or "cuda:0"
+        self.asr_compute_type = None if asr_compute_type is None else str(asr_compute_type).strip()
         cm = (chart_mode or "api").strip().lower()
         if cm not in ("api", "vlm", "internvl"):
             raise ValueError(f"chart_mode must be 'api', 'vlm', or 'internvl', got {chart_mode!r}")
@@ -721,23 +725,25 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
 
 
 def main():
-    VIDEO_PATH = "/share/users/ghazi/cot/VideoDeepResearch/videos/-4PUD-TNhU4.mp4"
+    VIDEO_PATH = "/share/users/ghazi/cot/VideoDeepResearch/videos/5Jrv1h4AztM.mp4"
     QUESTION = (
-        "How many players are below the referee in the frame in the initial faceoff?"
+        "How many fish would need to be added to the bucket on top of the container reading \"SSL\" at the time of the ice packing process to equal the numerical value of the weight of the gift of fishes that the narrator received?"
     )
     OPTIONS = [
-        "A. 6",
-        "B. 2",
-        "C. 4",
-        "D. 3",
-        "E. 8",
+        "A. 3",
+        "B. 4",
+        "C. 5",
+        "D. 1",
+        "E. 2",
     ]
     INITIAL_TRACE_STEPS = [
-        "I located the start of the first faceoff at 00:04.",
-        "I identified the referee by his striped shirt.",
-        "I counted the players from both teams visible below the referee in the frame.",
-        "There are 6 players visible below the referee.",
-        "Therefore, the correct answer is A. 6.",
+        "I found that the ice packing process began at 04:55, when the man in the blue shirt used a tool to fill a bucket with ice, according to the audio at the same timestamp.",
+        "The bucket on top of the container reading \"SSL\" is visible in the background.",
+        "There is a single fish in the bucket.",
+        "I continued watching and listening to the video to find out the weight of the gift the narrator received.",
+        "I found that from 05:54 to 05:59, the narrator said that \"they gifted us a few fishes which was around 2 kilograms.\"",
+        "To reach the numerical value of the weight, 2 kilograms, and not the weight itself, 1 fish would need to be added to the bucket, since there is 1 fish in the bucket.",
+        "Therefore, 2 fishes would equal the numerical value of the weight, 2.",
     ]
     MAX_ITERATIONS = 1
 

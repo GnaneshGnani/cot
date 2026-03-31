@@ -600,15 +600,19 @@ class RefinerUtilsMixin:
         return default_result
 
     def _get_asr_result_from_subtitles(self, start_time=None, end_time=None):
+        subtitle_error = None
         try:
             subtitle_segments = extract_subtitles(self.video_path)
-        except Exception:
+        except Exception as ex:
+            subtitle_error = f"{type(ex).__name__}: {ex}"
             subtitle_segments = []
 
+        requested_range = None
         if start_time is None and end_time is None:
             filtered = subtitle_segments
         else:
             start, end = self._get_time_range(start_time, end_time)
+            requested_range = {"start": float(start), "end": float(end)}
             filtered = [x for x in subtitle_segments if x[1] >= start and x[0] <= end]
 
         segments = [
@@ -628,6 +632,9 @@ class RefinerUtilsMixin:
             "full_transcript": transcript,
             "segments": segments,
             "words": [],
+            "subtitle_source_available": bool(subtitle_segments),
+            "requested_range": requested_range,
+            "subtitle_error": subtitle_error,
         }
 
     def _get_preprocessed_artifacts(self) -> dict:
