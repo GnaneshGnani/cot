@@ -1,0 +1,43 @@
+{
+  "strategy": "Ground the numeric inputs visually from the problem screen, then use those verified values to support or correct the velocity calculation. Since the gap is specifically unsupported on-screen numbers, use targeted frame retrieval plus OCR/chart interpretation rather than broad video summarization.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "<VIDEO_PATH>",
+        "query": "problem screen showing a car motion graph or position-time diagram with labeled numbers for position and time",
+        "timestamps": null,
+        "num_frames": 3
+      },
+      "purpose": "Retrieve candidate frames containing the visual problem statement and the graph/diagram from which the car's position and time values must be read.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "chart_analyzer",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null,
+        "query": "read the car motion graph or position-time diagram and identify the position values and time interval needed to compute the car's velocity"
+      },
+      "purpose": "Interpret the structured visual if the problem is presented as a graph/diagram rather than plain text, extracting the relevant position and time information.",
+      "depends_on": [
+        1
+      ]
+    },
+    {
+      "step": 3,
+      "tool": "ocr",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null
+      },
+      "purpose": "Extract any visible text and numeric labels on the retrieved problem frames so the trace can cite the exact on-screen values for initial position, final position, and time.",
+      "depends_on": [
+        1
+      ]
+    }
+  ],
+  "refinement_instructions": "Rewrite the trace so the numeric inputs are explicitly grounded in the retrieved frame evidence, not stated as unsupported facts. Use the frame-level outputs from STEP 2 and STEP 3 to identify which retrieved frame actually shows the relevant problem screen; do not assume the first retrieved frame is correct just because of ranking. If STEP 2 confirms a graph/diagram, cite chart_analyzer as the source for the read-off positions and time interval; use OCR as supporting evidence for visible labels/text. If STEP 3 instead provides clear plain-text numbers directly, cite OCR for those values. Preserve the arithmetic only if the visually grounded values support displacement 15 m over 3 s; otherwise update the computation and final answer to match the verified values. If the exact values remain partially ambiguous across candidate frames, state that uncertainty explicitly and avoid claiming unsupported numbers."
+}

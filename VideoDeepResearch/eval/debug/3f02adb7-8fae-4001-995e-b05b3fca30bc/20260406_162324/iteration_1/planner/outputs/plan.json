@@ -1,0 +1,67 @@
+{
+  "strategy": "Ground the actual geometry from the problem diagram first, then read any on-screen worked solution or formula that yields the radius. This avoids relying on the unsupported law-of-cosines narrative and directly checks the final numeric value against the visual evidence.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "<video_path>",
+        "query": "question screen showing the original geometry diagram with a square of side 1, two semicircles on adjacent sides, and a larger circle, before any worked-solution annotations are added",
+        "timestamps": null,
+        "num_frames": 3
+      },
+      "purpose": "Retrieve candidate frames containing the original problem diagram so the actual geometric configuration can be inspected instead of assumed.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "chart_analyzer",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null,
+        "query": "interpret the geometry diagram: identify the square, the two semicircles, the large circle, labeled lengths, and the key incidence or tangency relationships needed to determine the radius of the large circle"
+      },
+      "purpose": "Extract the structure of the diagram and any labeled geometric relations that justify the setup for solving the radius.",
+      "depends_on": [
+        1
+      ]
+    },
+    {
+      "step": 3,
+      "tool": "ocr",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null
+      },
+      "purpose": "Read any visible labels, equations, answer choices, or worked-solution text present on the retrieved candidate frames.",
+      "depends_on": [
+        1
+      ]
+    },
+    {
+      "step": 4,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "<video_path>",
+        "query": "worked-solution screen for the same geometry problem showing equations or final numeric radius of the large circle",
+        "timestamps": null,
+        "num_frames": 3
+      },
+      "purpose": "Retrieve candidate frames from the explanation phase where the computation or final answer is shown explicitly.",
+      "depends_on": []
+    },
+    {
+      "step": 5,
+      "tool": "ocr",
+      "arguments": {
+        "frame_path": "<STEP_4:frames>",
+        "timestamp": null
+      },
+      "purpose": "Read the displayed equations or final numerical result from the worked-solution frames to verify the correct option and catch any arithmetic inconsistency.",
+      "depends_on": [
+        4
+      ]
+    }
+  ],
+  "refinement_instructions": "Rewrite the trace using only tool-grounded geometric facts. From Step 2, state the actual diagram configuration and incidence/tangency relations shown; remove unsupported claims such as the large circle's diameter passing through the square's diagonal or a 45-degree triangle unless Step 2 or Step 3 explicitly supports them. Use Step 3 to preserve exact visible labels like side length 1 and any marked lengths or symbols. Then use Step 5 to cite any displayed formula or final numeric value from the worked solution; if the on-screen computation contradicts the original trace's expression or answer, update the final answer accordingly. When multiple frames are returned, inspect the frame-level results rather than assuming the top-ranked frame is correct; prefer the frame that is clearly the original unsolved diagram for setup claims and the frame that clearly shows equations/final value for the computation claim. If the exact derivation remains only partially visible but the final numerical answer is explicit, say that the answer is supported by the displayed solution while the prior law-of-cosines justification should be removed or narrowed."
+}

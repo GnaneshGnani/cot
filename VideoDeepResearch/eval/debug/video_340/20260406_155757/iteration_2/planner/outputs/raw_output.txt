@@ -1,0 +1,29 @@
+{
+  "strategy": "Do not reuse the weakly justified earliest audio candidate. Instead, inspect all candidate bang intervals with a compact visual sweep to find which interval actually contains a man on a bridge, then run targeted action recognition on that narrowed interval to determine whether he is walking, drinking, leaning, or standing.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "<video_path>",
+        "query": null,
+        "timestamps": [4.0, 6.0, 10.0, 12.0, 14.0, 17.0, 19.0, 22.0, 25.0, 39.0, 42.0],
+        "num_frames": 11
+      },
+      "purpose": "Sample frames across all previously identified metallic-bang candidate intervals to determine which candidate interval visually shows a man on a bridge at the time of the sound, instead of assuming the earliest candidate is correct.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "action_recognizer",
+      "arguments": {
+        "video_path": "<video_path>",
+        "start_time": "<chosen interval start from step 1 where sampled frames show a man on a bridge>",
+        "end_time": "<chosen interval end from step 1 where sampled frames show a man on a bridge>"
+      },
+      "purpose": "Classify the man's action within the correct visually grounded bang interval so the final answer can be mapped to walking, drinking, leaning, or standing.",
+      "depends_on": [1]
+    }
+  ],
+  "refinement_instructions": "Use step 1 to replace the unsupported assumption that the 4.0-6.0s interval is the relevant bang moment just because it is the earliest candidate. Inspect the sampled frames by timestamp and identify the candidate interval that actually contains a man on a bridge; if multiple sampled timestamps within one candidate interval show that scene, use that interval as the new anchor. Then use step 2 only on that visually justified interval. In the rewritten trace, preserve the earlier supported fact that 4.0-6.0s shows ship deck/ocean imagery and therefore does not support the original 'leaning' claim, but do not let that narrow finding stand in for the final answer. Cite the action_recognizer result for the selected interval and map the highest-confidence relevant action to the closest answer option. If step 1 fails to reveal any candidate interval with a man on a bridge, the refiner should state that the audio localization remains unresolved and avoid forcing a confident answer; otherwise update the final answer if the new evidence contradicts the original answer."
+}

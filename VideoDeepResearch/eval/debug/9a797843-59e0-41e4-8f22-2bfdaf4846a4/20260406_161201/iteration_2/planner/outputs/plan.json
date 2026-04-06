@@ -1,0 +1,52 @@
+{
+  "strategy": "Reuse the strong anchor that the puzzle appears at the very start, then do a small chronological frame sweep across the opening seconds to capture both displayed cases. Read the sampled frames with OCR and count the glasses in each sampled frame so the refiner can identify the missing 19 cm case and solve the algebra from grounded evidence only.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "<VIDEO_PATH>",
+        "query": null,
+        "timestamps": [
+          0.0,
+          0.5,
+          1.0,
+          1.5,
+          2.0,
+          2.5,
+          3.0
+        ],
+        "num_frames": 7
+      },
+      "purpose": "Sample the opening puzzle chronologically to find separate frames for the first and second displayed glass-stack cases instead of relying on low-confidence semantic retrieval.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "ocr",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null
+      },
+      "purpose": "Read all visible measurement text in the sampled opening frames to identify which frame shows the missing second case and its total height, including whether 19 cm appears on screen.",
+      "depends_on": [
+        1
+      ]
+    },
+    {
+      "step": 3,
+      "tool": "counter",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null,
+        "query": "nested translucent plastic drinking glasses shown in the puzzle illustration",
+        "exemplar_paths": null
+      },
+      "purpose": "Count the number of glasses shown in each sampled puzzle frame so the second case arrangement can be paired with its measured height.",
+      "depends_on": [
+        1
+      ]
+    }
+  ],
+  "refinement_instructions": "Preserve the already grounded fact from the prior iteration that one displayed case is 34 cm and visually appears as four nested glasses, which implies x + 3y = 34 if x is the height of one glass and y is the added height from each extra nested glass. Use Step 2 and Step 3 together at the frame level: identify the specific sampled frame(s) where OCR shows the second case's measurement, then use the matching per-frame counter result to determine how many glasses are drawn in that same case. Do not assume the top-level counter summary answers the question; inspect the per-frame results aligned to Step 1 timestamps. Replace the ungrounded claim 'the second case is x + y = 19' with only what the new tools actually support. If OCR and count show a two-glass case measured at 19 cm, then write the grounded equation x + y = 19, solve together with x + 3y = 34, and update the final answer to the matching option. If the sampled frames instead show a different arrangement, derive the correct equation from that arrangement rather than reusing the old assumption. Remove the prior unsupported statement that the answer is unresolved once the second premise is grounded. If the grounded computed value does not exactly equal an option, explain the closest-option mapping explicitly; otherwise select the exact matching option."
+}

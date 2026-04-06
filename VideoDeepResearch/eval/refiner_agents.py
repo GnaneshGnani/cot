@@ -4,10 +4,39 @@ import re
 from pathlib import Path
 
 import refiner_debug
-from refine_prompt import planner_prompt, refiner_prompt, verifier_propmt
+from refine_prompt import planner_prompt, refiner_prompt, verifier_prompt
 
 
 class RefinerAgentsMixin:
+    def _retry_malformed_json_response(
+        self,
+        raw_output: str,
+        model_name: str,
+        api_base: list,
+        api_keys: list,
+        schema_name: str,
+        required_keys: list | None = None,
+    ) -> str:
+        raw_output = str(raw_output or "").strip()
+        if not raw_output:
+            return ""
+
+        key_text = ", ".join(required_keys or [])
+        prompt = (
+            f"The following {schema_name} response was malformed or truncated.\n"
+            "Repair it into a single valid JSON object.\n"
+            "Return ONLY JSON with no markdown or explanation.\n"
+        )
+        if key_text:
+            prompt += f"Required top-level keys: {key_text}.\n"
+        prompt += "\nMALFORMED_JSON:\n```json\n" + raw_output + "\n```"
+        return self._text2text(
+            [{"role": "user", "content": prompt}],
+            model_name,
+            api_base,
+            api_keys,
+        )
+
     def _parse_tool_result_json(self, output_str: str):
         if not output_str or "are:\n" not in output_str:
             return None
@@ -31,10 +60,30 @@ class RefinerAgentsMixin:
             return sum(confs) / len(confs) if confs else 0.0
         if tool_name == "spatial_grounder":
             dets = result.get("detections") or []
+            if not dets and isinstance(result.get("frames"), list):
+                frame_scores = []
+                for item in result.get("frames") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    fdets = item.get("detections") or []
+                    if isinstance(fdets, list) and fdets:
+                        frame_scores.append(
+                            max(float(d.get("confidence", 0) or 0) for d in fdets if isinstance(d, dict))
+                        )
+                if frame_scores:
+                    return max(frame_scores)
             if not dets:
                 return 0.0
             return max(float(d.get("confidence", 0) or 0) for d in dets)
         if tool_name == "counter":
+            if (result.get("confidence") in {None, 0, 0.0}) and isinstance(result.get("frames"), list):
+                frame_confs = [
+                    float(item.get("confidence", 0) or 0)
+                    for item in (result.get("frames") or [])
+                    if isinstance(item, dict)
+                ]
+                if frame_confs:
+                    return max(frame_confs)
             return float(result.get("confidence", 0) or 0)
         # if tool_name == "video_qa_reanswerer":
         #     return float(result.get("confidence", 0) or 0)
@@ -62,9 +111,26 @@ class RefinerAgentsMixin:
             return max(float(f.get("relevance_score", 1.0) or 1.0) for f in frames)
         if tool_name == "audio_grounder":
             ev = result.get("events") or []
-            if not ev:
-                return 0.0
-            return max(float(e.get("confidence", 0) or 0) for e in ev)
+            if ev:
+                return max(float(e.get("confidence", 0) or 0) for e in ev)
+            groups = result.get("distinct_event_groups") or []
+            if groups:
+                return max(float(g.get("confidence", 0.0) or 0.0) for g in groups)
+            status = str(result.get("audio_status", "") or "").strip().lower()
+            if status in {"ok", "no_match", "analyzed_no_match", "no_subtitle_tags", "empty_window", "too_short"}:
+                return 0.1
+            return 0.0
+        if tool_name == "chart_analyzer":
+            score = 0.0
+            if str(result.get("chart_type", "") or "").strip() not in {"", "unknown", "other"}:
+                score += 0.35
+            if result.get("series"):
+                score += 0.4
+            if result.get("key_observations"):
+                score += 0.15
+            if str(result.get("query_response", "") or "").strip():
+                score += 0.1
+            return min(score, 1.0)
         return 0.0
 
     def _compact_iteration_summary(
@@ -118,21 +184,26 @@ class RefinerAgentsMixin:
         )
 
     def _build_verifier_prompt(
-        self, trace_steps: list, trace_answer: str, iteration: int = 0, history: list = None, max_iterations: int = 3
+        self,
+        trace_steps: list,
+        trace_answer: str,
+        question_text: str = None,
+        iteration: int = 0,
+        history: list = None,
+        max_iterations: int = 3,
     ) -> str:
         ctx = self._iteration_context_block(iteration, max_iterations, history or [])
+        question_block = question_text if question_text is not None else self._format_question_with_options()
         return (
             ctx
             + "\n"
-            + verifier_propmt.strip()
+            + verifier_prompt.strip()
             + "\n\nQUESTION:\n"
-            + self._format_question_with_options()
+            + question_block
             + "\n\nTRACE:\n"
             + self._format_trace_steps(trace_steps)
-            + "\n\nANSWER:\n"
-            + trace_answer
             + "\n\nTEXT_ONLY_MODE:\n"
-            + "This verifier call has no access to video, audio, frames, OCR outputs, or hidden tool state. Use only the text in this prompt and the iteration summary above. Treat unsupported sensory claims as unsupported rather than observed, and set error_categories[].evidence to null or \"N/A (text-only pass)\".\n"
+            + "This verifier call has no access to video, audio, frames, OCR outputs, or hidden tool state. Use only the text in this prompt and the iteration summary above. There is intentionally no separate answer field in this verifier call; infer any final conclusion only from the trace itself. Treat unsupported sensory claims as unsupported rather than observed. However, if the TRACE explicitly attributes a claim to a named tool result and phrases it as a reported tool output, treat that attribution as textual evidence rather than as an unsupported direct observation. Tool names in the iteration summary alone do not supply missing numeric values. Set error_categories[].evidence to null or \"N/A (text-only pass)\".\n"
         )
 
     def _build_verifier_l2_prompt(self, trace_steps: list, trace_answer: str, l1_diagnosis: dict) -> str:
@@ -154,8 +225,6 @@ class RefinerAgentsMixin:
             + self._format_question_with_options()
             + "\n\nTRACE:\n"
             + self._format_trace_steps(trace_steps)
-            + "\n\nANSWER:\n"
-            + trace_answer
         )
 
     def _should_skip_l2(self, history: list, l1_out: dict) -> bool:
@@ -208,6 +277,7 @@ class RefinerAgentsMixin:
         self,
         trace_steps: list,
         trace_answer: str,
+        question_text: str = None,
         iteration: int = 0,
         history: list = None,
         max_iterations: int = 3,
@@ -218,7 +288,12 @@ class RefinerAgentsMixin:
             v_out_dir = refiner_debug.ensure_outputs_dir(Path(ibase) / "verifier")
 
         prompt = self._build_verifier_prompt(
-            trace_steps, trace_answer, iteration=iteration, history=history, max_iterations=max_iterations
+            trace_steps,
+            trace_answer,
+            question_text=question_text,
+            iteration=iteration,
+            history=history,
+            max_iterations=max_iterations,
         )
         messages = [{"role": "user", "content": prompt}]
         if v_out_dir:
@@ -366,15 +441,36 @@ class RefinerAgentsMixin:
             refiner_debug.write_text(p_out_dir, "raw_output.txt", raw_output or "")
 
         parsed_output = self._extract_planner_payload(raw_output)
+        repair_raw_output = ""
+        if parsed_output is None and str(raw_output or "").strip():
+            repair_raw_output = self._retry_malformed_json_response(
+                raw_output,
+                self.planner_model_name,
+                self.planner_api_base,
+                self.planner_api_keys,
+                schema_name="planner",
+                required_keys=["strategy", "tool_calls", "refinement_instructions"],
+            )
+            if p_out_dir:
+                refiner_debug.write_text(p_out_dir, "repair_raw_output.txt", repair_raw_output or "")
+            parsed_output = self._extract_planner_payload(repair_raw_output)
+
         parsed_dict = parsed_output if isinstance(parsed_output, dict) else None
         if p_out_dir and parsed_dict is not None:
             refiner_debug.write_json(p_out_dir, "plan.json", parsed_dict)
+        if parsed_dict is None:
+            raise RuntimeError("Planner returned malformed JSON and could not be repaired.")
 
         return raw_output, parsed_dict
 
     def _normalize_refined_trace(self, raw, fallback: list) -> list:
         if isinstance(raw, list):
-            return [str(x) for x in raw]
+            out = []
+            for item in raw:
+                text = str(item).strip()
+                m = re.match(r"^\d+\.\s*(.*)$", text)
+                out.append(m.group(1) if m else text)
+            return out
         if isinstance(raw, str):
             lines = [ln.rstrip() for ln in raw.split("\n")]
             out = []

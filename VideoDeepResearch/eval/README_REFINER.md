@@ -61,7 +61,7 @@ The planner’s plan is executed by name. Registered tools and what actually run
 | `temporal_grounder` | Text-to-video segment retrieval | **LanguageBind** + **BGE-M3** (text query) via [`retriever_languagebind.py`](../retriever_languagebind.py) (`LanguageBind_Video_FT` / `LanguageBind_Image`, optional local `BGE_M3_MODEL_PATH`); **no** `vlm_model_name` |
 | `frame_retriever` | Frames at timestamps or from retrieval | Same retriever as above + on-disk frames |
 | `asr` | Speech-to-text | **WhisperX** on `asr_device` / `WHISPERX_DEVICE` (default `cuda:0`; weights name `small`, overridable with `WHISPERX_MODEL`). Optional sidecar mode: set `WHISPERX_CONDA_ENV` or `WHISPERX_PYTHON` to run ASR in a separate env via [`whisperx_sidecar.py`](whisperx_sidecar.py). In sidecar mode, use `WHISPERX_AUX_DEVICE` (default `cpu`) for VAD/alignment while transcription stays on `WHISPERX_DEVICE`; fallback: subtitles / `extract_subtitles` |
-| `audio_grounder` | Audio event search in a window | **LAION CLAP** with an explicit checkpoint path (`CLAP_CKPT_PATH`, default `$HF_HOME/assets/laion_clap/630k-audioset-best.pt`); fallback: subtitle stub |
+| `audio_grounder` | Audio event search / distinct-sound inventory in a window | **LAION CLAP** when available for targeted sound queries; fallback chain: subtitle non-speech tags, then heuristic ffmpeg-based non-speech event analysis |
 | `ocr` | Text in a frame | **PaddleOCR** → **pytesseract** → **`vlm_model_name`** (VLM JSON) |
 | `spatial_grounder` | Objects / regions from a frame | **Grounding DINO** via local Hugging Face Transformers (default model id `IDEA-Research/grounding-dino-base`) with optional legacy **`vlm_model_name`** fallback |
 | `counter` | Count objects in a frame | **`vlm_model_name`** |

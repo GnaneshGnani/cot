@@ -1,12 +1,21 @@
 # Refiner / eval extras — install AFTER:
-#   1) torch==2.6.0 + torchvision==0.21.0 + torchaudio==2.6.0 from PyTorch cu124 index
-#   2) pip install -r ../requirements.txt --extra-index-url https://download.pytorch.org/whl/cu124
-#   3) optional: flash_attn prebuilt wheel matching cu124 + torch 2.6 (URL varies by release)
+#   pip install -r ../requirements.txt
 #
-# Do NOT use whisperx>=3.8: those releases require torch~=2.8 and break vllm + torchvision alignment.
+# Single-env stack validated for the current refiner path:
+#   torch==2.8.0
+#   torchvision==0.23.0
+#   torchaudio==2.8.0
+#   triton==3.4.0
+#   transformers==4.57.1
+#   tokenizers==0.22.2
+#   vllm==0.11.0
+#   qwen-vl-utils==0.0.14
+#
+# WhisperX 3.3.1 still imports correctly with this stack.
 
 whisperx==3.3.1
-# Keep metrics on 3.x so numpy can stay at 2.1.x (matches ../requirements.txt).
+# Keep metrics on 3.x; refiner_tools.py handles the older torch.load behavior
+# WhisperX expects during model bootstrap.
 pyannote-metrics>=3.2,<4
 soundfile
 laion-clap
@@ -14,12 +23,13 @@ laion-clap
 # GPU: https://www.paddlepaddle.org.cn/install/quick — match your CUDA, then keep paddleocr.
 paddlepaddle>=2.6.0
 paddleocr
-# With paddleocr + vllm==0.8.4: set VLLM_PLUGINS= (empty) before importing vLLM, or refiner.py does it.
-# See https://github.com/vllm-project/vllm — VLLM_PLUGINS controls optional entry-point plugins.
+# refiner.py clears VLLM_PLUGINS before importing vLLM so PaddleX does not
+# register incompatible optional model plugins.
 pytesseract
 # Spatial grounding uses the Grounding DINO classes in transformers from ../requirements.txt.
-# Re-assert numpy after laion-clap (it declares numpy<2; 2.1.3 usually works at runtime for CLAP).
-numpy==2.1.3
+# LAION-CLAP still declares numpy<2 upstream, but the refiner import path works
+# with the vLLM/Qwen stack below when the needed HF assets are cached locally.
+numpy==2.2.6
 
 # Used by ../retriever_languagebind.py — install separately if needed:
 # pip install git+https://github.com/PKU-YuanGroup/LanguageBind.git

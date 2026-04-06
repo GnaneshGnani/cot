@@ -1,0 +1,31 @@
+{
+  "strategy": "Directly ground the decisive chart evidence with a small candidate frame bundle, then use chart-specific interpretation to verify the line-to-country mapping and the year when China's line overtakes the U.S. line. This avoids unsupported visual claims and replaces the midpoint approximation with chart-backed evidence.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "video",
+        "query": "line chart showing share of world manufacturing exports over time with country lines including China and the United States",
+        "timestamps": null,
+        "num_frames": 3
+      },
+      "purpose": "Retrieve likely frames containing the relevant chart near the discussed portion of the video without assuming an exact timestamp.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "chart_analyzer",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null,
+        "query": "Identify the chart title, the country-to-line mapping for China and the United States, and determine the year when China's line first rises above the United States line."
+      },
+      "purpose": "Read the chart structure directly and resolve the answer-critical crossover year from grounded chart evidence.",
+      "depends_on": [
+        1
+      ]
+    }
+  ],
+  "refinement_instructions": "Rewrite the trace so the chart claim is explicitly attributed to tool evidence, e.g. that frame retrieval found candidate chart frames and chart_analyzer identified the chart and the China/U.S. line mapping. Do not keep the unsupported statement that the crossing is 'around 2005' or the midpoint-style justification. Use the frame-level chart_analyzer result on the retrieved candidates to cite whichever frame most clearly shows the crossover year and line identities. If chart_analyzer gives a specific crossover year that contradicts the original answer, update the final answer accordingly. If the chart evidence is approximate rather than exact, explain the closest-option mapping based on the grounded crossover location on the chart."
+}

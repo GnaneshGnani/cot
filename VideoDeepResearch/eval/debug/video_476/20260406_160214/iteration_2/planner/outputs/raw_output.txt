@@ -1,0 +1,42 @@
+{
+  "strategy": "Use the already-grounded ASR timing around the Magnolia introduction as a narrow visual anchor, then retrieve frames around both the opening first-dog moment and the Magnolia moment to compare who is holding each dog. Add a short dense visual description only if needed to tie the holders to the family roles without relying on unsupported inference from sparse query retrieval.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "<video_path>",
+        "query": null,
+        "timestamps": [0.5, 2.5, 5.0, 42.8, 44.2, 45.5, 46.2],
+        "num_frames": 7
+      },
+      "purpose": "Get direct chronological frames from the opening first-dog segment and the ASR-grounded Magnolia segment so the refiner can visually compare the dog holders instead of relying on a broad semantic retrieval ranking.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "dense_captioner",
+      "arguments": {
+        "video_path": "<video_path>",
+        "start_time": 0.0,
+        "end_time": 7.0,
+        "granularity": "frame"
+      },
+      "purpose": "Describe the opening segment to identify who is holding the first dog and whether the scene shows a younger person with an older mother figure or a romantic partner pair.",
+      "depends_on": []
+    },
+    {
+      "step": 3,
+      "tool": "dense_captioner",
+      "arguments": {
+        "video_path": "<video_path>",
+        "start_time": 42.0,
+        "end_time": 47.0,
+        "granularity": "frame"
+      },
+      "purpose": "Describe the Magnolia introduction segment to determine who brings out and holds Magnolia and how that person visually relates to the opening dog holder.",
+      "depends_on": []
+    }
+  ],
+  "refinement_instructions": "Keep the earlier ASR facts that Magnolia is introduced around 44–46s and that someone says 'Ma, bring out the first model.' Do not reuse the old inference that 'domestic partner' answers the question unless the visual evidence clearly shows the queried holders are the opening pair addressed by that line. Use Step 1's timestamped frames, not retrieval rank, to identify: (a) who is holding the first dog in the opening shot and (b) who is holding Magnolia in the 42.8–46.2s frames. Then use Steps 2 and 3 to narratively confirm the roles in those bounded intervals. If the opening holder is a younger female presenter and the Magnolia holder is the older 'Ma' figure, rewrite the trace to conclude a mother-daughter relation; if the evidence instead shows the same two opening romantic partners, then preserve that. Cite the bounded visual evidence explicitly (opening segment vs Magnolia segment), and state uncertainty if the visual descriptions still do not resolve identity linkage. Non-confirming OCR from the previous iteration should remain irrelevant and should not be used to block a visually grounded conclusion."
+}

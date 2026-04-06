@@ -448,6 +448,64 @@ class RefinerUtilsMixin:
             return candidate
         return _UNQUOTED_PLACEHOLDER_RE.sub(lambda m: json.dumps(m.group(0)), candidate)
 
+    def _repair_truncated_json_candidate(self, candidate: str) -> str:
+        if not isinstance(candidate, str):
+            return candidate
+
+        text = candidate.strip()
+        if not text:
+            return text
+
+        starts = [idx for idx in (text.find("{"), text.find("[")) if idx != -1]
+        if starts:
+            text = text[min(starts) :]
+
+        out = []
+        stack = []
+        in_string = False
+        escape = False
+
+        for ch in text:
+            out.append(ch)
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                continue
+
+            if ch == '"':
+                in_string = True
+            elif ch in "{[":
+                stack.append(ch)
+            elif ch == "}" and stack and stack[-1] == "{":
+                stack.pop()
+            elif ch == "]" and stack and stack[-1] == "[":
+                stack.pop()
+
+        repaired = "".join(out).rstrip()
+        if in_string:
+            trailing_backslashes = 0
+            for ch in reversed(repaired):
+                if ch == "\\":
+                    trailing_backslashes += 1
+                else:
+                    break
+            if trailing_backslashes % 2 == 1:
+                repaired += "\\"
+            repaired += '"'
+
+        repaired = repaired.rstrip()
+        if repaired.endswith(":"):
+            repaired += " null"
+        while repaired.endswith(","):
+            repaired = repaired[:-1].rstrip()
+
+        repaired += "".join("}" if opener == "{" else "]" for opener in reversed(stack))
+        return repaired
+
     def _validate_json_payload(self, payload, model_cls=None):
         if model_cls is None:
             return payload
@@ -469,6 +527,9 @@ class RefinerUtilsMixin:
 
         candidates = re.findall(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.DOTALL)
         candidates.append(text)
+        starts = [idx for idx in (text.find("{"), text.find("[")) if idx != -1]
+        if starts:
+            candidates.append(text[min(starts) :])
 
         for left, right in (("{", "}"), ("[", "]")):
             start = text.find(left)
@@ -478,11 +539,25 @@ class RefinerUtilsMixin:
 
         for candidate in candidates:
             variants = [candidate]
+            truncated = self._repair_truncated_json_candidate(candidate)
+            if truncated != candidate:
+                variants.append(truncated)
             if repair_placeholders:
-                repaired = self._repair_json_candidate(candidate)
-                if repaired != candidate:
-                    variants.append(repaired)
+                repaired_variants = []
+                for variant in list(variants):
+                    repaired = self._repair_json_candidate(variant)
+                    if repaired != variant:
+                        repaired_variants.append(repaired)
+                variants.extend(repaired_variants)
+            deduped_variants = []
+            seen = set()
             for variant in variants:
+                key = str(variant)
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped_variants.append(variant)
+            for variant in deduped_variants:
                 variant = variant.strip()
                 if not variant:
                     continue
@@ -571,7 +646,7 @@ class RefinerUtilsMixin:
         best_idx = min(range(len(timestamps)), key=lambda i: abs(timestamps[i] - timestamp))
         return frame_paths[best_idx], float(timestamps[best_idx])
 
-    def _run_vlm_json(self, prompt: str, frame_paths: list, timestamps: list, default_result):
+    def _run_vlm_json(self, prompt: str, frame_paths: list, timestamps: list, default_result, force_local: bool = False):
         if not frame_paths:
             return default_result
 
@@ -588,7 +663,7 @@ class RefinerUtilsMixin:
                 return result
             return default_result
 
-        output_text = self._batch_video2text([(prompt, frame_paths, timestamps)])[0]
+        output_text = self._batch_video2text([(prompt, frame_paths, timestamps)], force_local=force_local)[0]
         parsed = self._extract_json_payload(output_text)
         if parsed is not None:
             return parsed

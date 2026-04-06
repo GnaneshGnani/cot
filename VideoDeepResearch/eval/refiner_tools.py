@@ -2,10 +2,12 @@ import base64
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import wave
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -20,11 +22,31 @@ hf_cache.ensure_hf_cache_env()
 import numpy as np
 import torch
 import torchvision.transforms as T
-import whisperx
-import soundfile as sf
-from laion_clap import CLAP_Module
+try:
+    import whisperx
+except Exception:
+    whisperx = None
+
+try:
+    import soundfile as sf
+except Exception:
+    sf = None
+
+try:
+    from faster_whisper import utils as faster_whisper_utils
+except Exception:
+    faster_whisper_utils = None
+try:
+    from laion_clap import CLAP_Module
+except Exception:
+    CLAP_Module = None
+
 from openai import OpenAI
-from paddleocr import PaddleOCR
+try:
+    from paddleocr import PaddleOCR
+except Exception:
+    PaddleOCR = None
+
 import pytesseract
 from PIL import Image
 from torchvision.transforms.functional import InterpolationMode
@@ -39,11 +61,11 @@ from refine_prompt import (
     dense_captioner_prompt,
     ocr_prompt,
     spatial_grunder_prompt,
-    # video_qa_reanswerer_prompt,
 )
 from video_utils import robust_eval
 
 _WHISPERX_MODEL = None
+_WHISPERX_MODEL_KEY = None
 _WHISPERX_ALIGN = None
 _WHISPERX_META = None
 _PADDLE_OCR = None
@@ -121,6 +143,260 @@ class RefinerToolsMixin:
             return f"cuda:{int(raw)}"
         return raw
 
+    def _env_flag(self, name: str, default: bool = False) -> bool:
+        raw = str(os.getenv(name, "") or "").strip().lower()
+        if not raw:
+            return bool(default)
+        return raw in {"1", "true", "yes", "on"}
+
+    def _whisperx_download_root(self):
+        raw = str(os.getenv("WHISPERX_DOWNLOAD_ROOT", "") or "").strip()
+        if raw:
+            return str(Path(raw).expanduser())
+        for key in ("HUGGINGFACE_HUB_CACHE", "HF_HUB_CACHE"):
+            candidate = str(os.getenv(key, "") or "").strip()
+            if candidate:
+                return str(Path(candidate).expanduser())
+        hf_home = str(os.getenv("HF_HOME", "") or "").strip()
+        if hf_home:
+            return str((Path(hf_home).expanduser() / "hub").resolve())
+        return None
+
+    def _whisperx_hub_roots(self):
+        roots = []
+        for key in ("HUGGINGFACE_HUB_CACHE", "HF_HUB_CACHE"):
+            candidate = str(os.getenv(key, "") or "").strip()
+            if candidate:
+                roots.append(Path(candidate).expanduser())
+        hf_home = str(os.getenv("HF_HOME", "") or "").strip()
+        if hf_home:
+            hf_root = Path(hf_home).expanduser()
+            roots.append(hf_root / "hub")
+            roots.append(hf_root)
+        deduped = []
+        seen = set()
+        for root in roots:
+            normalized = str(root.resolve()) if root.exists() else str(root)
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            deduped.append(root)
+        return deduped
+
+    def _whisperx_repo_id(self, model_name: str) -> str:
+        raw_name = str(model_name or "").strip()
+        if not raw_name:
+            return "Systran/faster-whisper-small"
+        if "/" in raw_name:
+            return raw_name
+        mapped = getattr(faster_whisper_utils, "_MODELS", {}).get(raw_name)
+        return str(mapped or raw_name)
+
+    def _resolve_hf_snapshot(self, repo_id: str):
+        raw_repo = str(repo_id or "").strip()
+        if not raw_repo:
+            return None
+        repo_dir_name = f"models--{raw_repo.replace('/', '--')}"
+        for hub_root in self._whisperx_hub_roots():
+            repo_dir = hub_root / repo_dir_name
+            snapshots_dir = repo_dir / "snapshots"
+            ref_main = repo_dir / "refs" / "main"
+            if ref_main.is_file():
+                snapshot_id = ref_main.read_text(encoding="utf-8").strip()
+                if snapshot_id:
+                    snapshot_path = snapshots_dir / snapshot_id
+                    if snapshot_path.is_dir():
+                        return str(snapshot_path.resolve())
+            if snapshots_dir.is_dir():
+                snapshot_dirs = sorted(p for p in snapshots_dir.iterdir() if p.is_dir())
+                if snapshot_dirs:
+                    return str(snapshot_dirs[-1].resolve())
+        return None
+
+    def _resolve_cached_model_snapshot(self, repo_id: str, required_any=None):
+        snapshot = self._resolve_hf_snapshot(repo_id)
+        if snapshot is None:
+            return None
+        snapshot_path = Path(snapshot)
+        if required_any:
+            for name in required_any:
+                if (snapshot_path / str(name)).is_file():
+                    return str(snapshot_path.resolve())
+            return None
+        return str(snapshot_path.resolve())
+
+    def _whisperx_model_config(self):
+        requested = str(os.getenv("WHISPERX_MODEL", "small") or "").strip() or "small"
+        direct_path = Path(requested).expanduser()
+        if direct_path.exists():
+            return {
+                "requested_name": requested,
+                "model_spec": str(direct_path.resolve()),
+                "download_root": None,
+                "local_files_only": True,
+            }
+
+        repo_id = self._whisperx_repo_id(requested)
+        cached_snapshot = self._resolve_hf_snapshot(repo_id)
+        if cached_snapshot:
+            return {
+                "requested_name": requested,
+                "model_spec": cached_snapshot,
+                "download_root": None,
+                "local_files_only": True,
+            }
+
+        local_files_only = self._env_flag(
+            "WHISPERX_LOCAL_FILES_ONLY",
+            default=self._env_flag("HF_HUB_OFFLINE", default=False),
+        )
+        if local_files_only:
+            roots = [str(root) for root in self._whisperx_hub_roots()] or ["<unset cache roots>"]
+            raise RuntimeError(
+                f"WhisperX model {requested!r} is not cached locally. "
+                f"Expected a snapshot for {repo_id!r} under one of: {', '.join(roots)}. "
+                "Set WHISPERX_MODEL to a local path, pre-download the model, "
+                "or set WHISPERX_LOCAL_FILES_ONLY=0 to allow an on-demand download."
+            )
+
+        return {
+            "requested_name": requested,
+            "model_spec": repo_id,
+            "download_root": self._whisperx_download_root(),
+            "local_files_only": False,
+        }
+
+    @contextmanager
+    def _whisperx_hub_access(self, allow_download: bool):
+        if not allow_download:
+            yield
+            return
+        previous = {
+            "HF_HUB_OFFLINE": os.environ.get("HF_HUB_OFFLINE"),
+            "TRANSFORMERS_OFFLINE": os.environ.get("TRANSFORMERS_OFFLINE"),
+        }
+        os.environ["HF_HUB_OFFLINE"] = "0"
+        os.environ["TRANSFORMERS_OFFLINE"] = "0"
+        try:
+            yield
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+    def _ffmpeg_binary_candidates(self):
+        candidates = []
+        for env_name in ("WHISPERX_FFMPEG_PATH", "FFMPEG_BINARY", "IMAGEIO_FFMPEG_EXE"):
+            raw = str(os.getenv(env_name, "") or "").strip()
+            if raw:
+                candidates.append(Path(raw).expanduser())
+        which_hit = shutil.which("ffmpeg")
+        if which_hit:
+            candidates.append(Path(which_hit))
+        try:
+            import imageio_ffmpeg
+
+            imageio_hit = imageio_ffmpeg.get_ffmpeg_exe()
+            if imageio_hit:
+                candidates.append(Path(imageio_hit))
+        except Exception:
+            pass
+        conda_prefix = str(os.getenv("CONDA_PREFIX", "") or "").strip()
+        if conda_prefix:
+            candidates.append(Path(conda_prefix) / "bin" / "ffmpeg")
+        python_bin = Path(sys.executable).resolve().parent / "ffmpeg"
+        candidates.append(python_bin)
+        candidates.extend(
+            [
+                Path("/apps/local/anaconda3/bin/ffmpeg"),
+                Path("/usr/bin/ffmpeg"),
+                Path("/bin/ffmpeg"),
+            ]
+        )
+
+        deduped = []
+        seen = set()
+        for path in candidates:
+            normalized = str(path.expanduser().resolve()) if path.expanduser().exists() else str(path)
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            deduped.append(path)
+        return deduped
+
+    def _resolve_ffmpeg_binary(self) -> str:
+        for path in self._ffmpeg_binary_candidates():
+            candidate = Path(path).expanduser()
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate.resolve())
+        raise FileNotFoundError(
+            "ffmpeg binary not found. Set WHISPERX_FFMPEG_PATH or install ffmpeg."
+        )
+
+    def _ffmpeg_ready_env(self, env=None):
+        prepared = dict(env or os.environ)
+        ffmpeg_bin = self._resolve_ffmpeg_binary()
+        ffmpeg_dir = str(Path(ffmpeg_bin).resolve().parent)
+        current_path = str(prepared.get("PATH", "") or "")
+        path_entries = [entry for entry in current_path.split(":") if entry]
+        if ffmpeg_dir not in path_entries:
+            prepared["PATH"] = f"{ffmpeg_dir}:{current_path}" if current_path else ffmpeg_dir
+        prepared["FFMPEG_BINARY"] = ffmpeg_bin
+        prepared["IMAGEIO_FFMPEG_EXE"] = ffmpeg_bin
+        return prepared
+
+    def _load_audio_with_ffmpeg(self, file_path: str):
+        sample_rate = int(float(getattr(getattr(whisperx, "audio", None), "SAMPLE_RATE", 16000)))
+        cmd = [
+            self._resolve_ffmpeg_binary(),
+            "-nostdin",
+            "-threads",
+            "0",
+            "-i",
+            file_path,
+            "-f",
+            "s16le",
+            "-ac",
+            "1",
+            "-acodec",
+            "pcm_s16le",
+            "-ar",
+            str(sample_rate),
+            "-",
+        ]
+        try:
+            out = subprocess.run(
+                cmd,
+                capture_output=True,
+                check=True,
+                env=self._ffmpeg_ready_env(),
+            ).stdout
+        except subprocess.CalledProcessError as e:
+            detail = (e.stderr or b"").decode(errors="ignore").strip()
+            raise RuntimeError(f"Failed to load audio with ffmpeg: {detail}") from e
+
+        return np.frombuffer(out, np.int16).flatten().astype(np.float32) / 32768.0
+
+    def _whisperx_should_retry_on_cpu(self, error) -> bool:
+        text = str(error or "").lower()
+        markers = (
+            "cuda failed with error",
+            "cuda driver version is insufficient",
+            "requested cuda, but cuda is unavailable",
+            "device cuda is invalid",
+            "no cuda-capable device is detected",
+            "could not load library libcudnn",
+            "libcudnn",
+            "cudnn_ops_infer",
+            "cublas",
+            "libcuda",
+            "subprocess for 'conda run",
+            "aborted",
+        )
+        return any(marker in text for marker in markers)
+
     def _whisperx_ctranslate2_device(self, device_obj: torch.device):
         if device_obj.type == "cuda":
             return "cuda", int(device_obj.index or 0)
@@ -197,18 +473,38 @@ class RefinerToolsMixin:
         if raw:
             candidates.append(Path(raw).expanduser())
 
-        hf_home = str(os.getenv("HF_HOME", "")).strip()
-        if hf_home:
-            hf_root = Path(hf_home).expanduser()
+        hf_roots = []
+        for env_name in ("HF_HOME", "VDR_SHARED_HF_HOME"):
+            raw_root = str(os.getenv(env_name, "")).strip()
+            if raw_root:
+                hf_roots.append(Path(raw_root).expanduser())
+        for hf_root in hf_roots:
             candidates.append(hf_root / "assets" / "laion_clap" / "630k-audioset-best.pt")
             snapshots_dir = hf_root / "hub" / "models--lukewys--laion_clap" / "snapshots"
             if snapshots_dir.is_dir():
                 for snapshot in sorted(snapshots_dir.iterdir()):
                     candidates.append(snapshot / "630k-audioset-best.pt")
 
+        torch_home = str(os.getenv("TORCH_HOME", "")).strip()
+        if torch_home:
+            candidates.append(Path(torch_home).expanduser() / "hub" / "checkpoints" / "630k-audioset-best.pt")
+
+        retriever_assets = str(os.getenv("RETRIEVER_ASSETS_ROOT", "")).strip()
+        if retriever_assets:
+            assets_root = Path(retriever_assets).expanduser()
+            candidates.append(assets_root / "laion_clap" / "630k-audioset-best.pt")
+            candidates.append(assets_root / "audio" / "laion_clap" / "630k-audioset-best.pt")
+
+        conda_prefix = str(os.getenv("CONDA_PREFIX", "")).strip()
+        if conda_prefix:
+            prefix_root = Path(conda_prefix).expanduser()
+            candidates.append(prefix_root / "share" / "laion_clap" / "630k-audioset-best.pt")
+            candidates.append(prefix_root / "checkpoints" / "630k-audioset-best.pt")
+
         try:
             package_dir = Path(sys.modules[CLAP_Module.__module__].__file__).resolve().parent
             candidates.append(package_dir / "630k-audioset-best.pt")
+            candidates.append(package_dir / "checkpoints" / "630k-audioset-best.pt")
         except Exception:
             pass
 
@@ -221,6 +517,30 @@ class RefinerToolsMixin:
             if path.is_file():
                 return path
         return None
+
+    def _clap_text_model_snapshot(self):
+        return self._resolve_cached_model_snapshot(
+            "roberta-base",
+            required_any=(
+                "model.safetensors",
+                "pytorch_model.bin",
+                "model.safetensors.index.json",
+                "pytorch_model.bin.index.json",
+            ),
+        )
+
+    def _clap_text_model_error(self) -> str:
+        roots = [str(root) for root in self._whisperx_hub_roots()] or ["<unset cache roots>"]
+        return (
+            "LAION-CLAP requires cached roberta-base weights for its text branch, "
+            "but no local model weights were found. Expected a roberta-base snapshot with "
+            "`model.safetensors` or `pytorch_model.bin` under one of: "
+            + ", ".join(roots)
+        )
+
+    def _audio_grounder_allow_targeted_heuristic_fallback(self) -> bool:
+        raw = os.getenv("REFINER_AUDIO_GROUNDER_ALLOW_TARGETED_HEURISTIC", "").strip().lower()
+        return raw in {"1", "true", "yes", "on"}
 
     def _merge_audio_grounder_events(self, events):
         merged = []
@@ -258,19 +578,429 @@ class RefinerToolsMixin:
             )
         return merged
 
-        if not isinstance(text, str):
-            return None
-        for line in reversed(text.splitlines()):
-            candidate = line.strip()
-            if not candidate:
+    def _normalize_audio_label(self, text: str) -> str:
+        cleaned = re.sub(r"[\[\]\(\)\{\}_\-]+", " ", str(text or "").strip().lower())
+        cleaned = re.sub(r"[^a-z0-9\s]+", " ", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned
+
+    def _audio_grounder_query_mode(self, query: str) -> str:
+        q = self._normalize_audio_label(query)
+        if not q:
+            return "inventory"
+        broad_markers = (
+            "distinct sound",
+            "different sound",
+            "sound effect",
+            "sound effects",
+            "audio cue",
+            "audio cues",
+            "non speech",
+            "non speech sound",
+            "non speech sounds",
+            "non speech audio",
+            "how many sounds",
+            "what sounds",
+            "which sounds",
+            "various sounds",
+        )
+        if any(marker in q for marker in broad_markers):
+            return "inventory"
+        return "targeted"
+
+    def _load_audio_window_with_ffmpeg(self, start_time=None, end_time=None, sample_rate: int = 16000):
+        start, end = self._get_time_range(start_time, end_time)
+        duration = max(0.05, float(end - start))
+        cmd = [
+            self._resolve_ffmpeg_binary(),
+            "-nostdin",
+            "-threads",
+            "0",
+            "-ss",
+            str(float(start)),
+            "-i",
+            self.video_path,
+            "-t",
+            str(duration),
+            "-f",
+            "s16le",
+            "-ac",
+            "1",
+            "-acodec",
+            "pcm_s16le",
+            "-ar",
+            str(int(sample_rate)),
+            "-",
+        ]
+        try:
+            out = subprocess.run(
+                cmd,
+                capture_output=True,
+                check=True,
+                env=self._ffmpeg_ready_env(),
+            ).stdout
+        except subprocess.CalledProcessError as e:
+            detail = (e.stderr or b"").decode(errors="ignore").strip()
+            raise RuntimeError(f"Failed to extract audio window with ffmpeg: {detail}") from e
+
+        audio = np.frombuffer(out, np.int16).flatten().astype(np.float32) / 32768.0
+        return audio, int(sample_rate), float(start), float(end)
+
+    def _write_mono_wav(self, wav_path: str, audio_data, sample_rate: int) -> None:
+        if audio_data is None:
+            audio = np.asarray([], dtype=np.float32)
+        else:
+            audio = np.asarray(audio_data, dtype=np.float32).flatten()
+        audio = np.clip(audio, -1.0, 1.0)
+        pcm = (audio * 32767.0).astype(np.int16)
+        with wave.open(wav_path, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(int(sample_rate))
+            wf.writeframes(pcm.tobytes())
+
+    def _audio_grounder_match_label(self, label: str, query: str) -> bool:
+        normalized_label = self._normalize_audio_label(label)
+        normalized_query = self._normalize_audio_label(query)
+        if not normalized_label or not normalized_query:
+            return False
+        if normalized_label in normalized_query or normalized_query in normalized_label:
+            return True
+
+        stop = {
+            "a", "an", "and", "audio", "background", "cue", "cues", "different",
+            "distinct", "during", "effect", "effects", "find", "for", "in",
+            "is", "non", "of", "or", "sound", "sounds", "speech", "the", "to",
+            "when", "with",
+        }
+        label_tokens = {tok for tok in normalized_label.split() if tok not in stop}
+        query_tokens = {tok for tok in normalized_query.split() if tok not in stop}
+        if label_tokens and query_tokens and (label_tokens & query_tokens):
+            return True
+
+        alias_groups = [
+            {"music", "melody", "song", "instrumental", "violin", "piano", "guitar"},
+            {"applause", "clap", "clapping", "cheer", "cheering", "crowd"},
+            {"bell", "doorbell", "ring", "ringing", "chime", "alarm", "beep"},
+            {"glass", "breaking", "break", "smash", "crash", "bang", "thud", "slam", "impact"},
+            {"engine", "motor", "rev", "revving", "vehicle", "car"},
+            {"dog", "bark", "barking", "woof", "duck", "quack", "bird", "chirp", "cat", "meow", "animal"},
+        ]
+        for group in alias_groups:
+            if (label_tokens & group) and (query_tokens & group):
+                return True
+        return False
+
+    def _audio_grounder_from_subtitle_tags(self, arguments: dict) -> dict:
+        query = str(arguments.get("query", "")).strip()
+        mode = self._audio_grounder_query_mode(query)
+        subtitle_result = self._get_asr_result_from_subtitles(
+            arguments.get("start_time"), arguments.get("end_time")
+        )
+        segments = subtitle_result.get("segments") or []
+        if not segments:
+            return {
+                "query": query,
+                "query_mode": mode,
+                "events": [],
+                "audio_summary": "No subtitle-derived non-speech tags found in the requested range.",
+                "backend": "subtitle_tags",
+                "audio_status": "no_subtitle_tags",
+            }
+
+        explicit_music = {"music", "background music", "instrumental music", "song"}
+        events = []
+        for seg in segments:
+            text = str(seg.get("text", "") or "").strip()
+            if not text:
                 continue
-            if not (candidate.startswith("{") or candidate.startswith("[")):
+            tags = []
+            for pattern in (r"\[([^\]]+)\]", r"\(([^\)]+)\)", r"♪([^♪]+)♪"):
+                tags.extend(re.findall(pattern, text))
+            normalized_text = self._normalize_audio_label(text)
+            if "♪" in text and not tags:
+                tags.append("music")
+            if not tags and normalized_text in explicit_music:
+                tags.append(normalized_text)
+
+            for raw_tag in tags:
+                clean_tag = re.sub(r"\s+", " ", str(raw_tag or "").strip()).strip(" -:;,.")
+                if not clean_tag:
+                    continue
+                if mode == "targeted" and not self._audio_grounder_match_label(clean_tag, query):
+                    continue
+                events.append(
+                    {
+                        "event_label": clean_tag,
+                        "start": float(seg.get("start", 0.0) or 0.0),
+                        "end": float(seg.get("end", 0.0) or 0.0),
+                        "confidence": 1.0,
+                    }
+                )
+
+        merged = self._merge_audio_grounder_events(events)
+        distinct_groups = []
+        by_label = {}
+        for event in merged:
+            key = event["event_label"]
+            bucket = by_label.setdefault(key, [])
+            bucket.append(event)
+        for label, members in sorted(by_label.items(), key=lambda item: min(x["start"] for x in item[1])):
+            distinct_groups.append(
+                {
+                    "event_label": label,
+                    "count": len(members),
+                    "start": min(float(x["start"]) for x in members),
+                    "end": max(float(x["end"]) for x in members),
+                    "confidence": max(float(x.get("confidence", 0.0) or 0.0) for x in members),
+                }
+            )
+        summary = (
+            f"Subtitle tags indicate {len(distinct_groups)} distinct non-speech sound types."
+            if distinct_groups
+            else "Subtitles are available, but no matching non-speech sound tags were found for this query."
+        )
+        return {
+            "query": query,
+            "query_mode": mode,
+            "events": merged,
+            "distinct_event_groups": distinct_groups,
+            "audio_summary": summary,
+            "backend": "subtitle_tags",
+            "audio_status": "ok" if merged else "no_match",
+        }
+
+    def _audio_grounder_match_heuristic_label(self, event_label: str, query: str) -> bool:
+        label = self._normalize_audio_label(event_label)
+        q = self._normalize_audio_label(query)
+        if not label or not q:
+            return False
+        if self._audio_grounder_match_label(label, q):
+            return True
+
+        query_to_labels = {
+            "music": {"sustained tonal sound", "tonal chime or ring"},
+            "melody": {"sustained tonal sound", "tonal chime or ring"},
+            "song": {"sustained tonal sound"},
+            "violin": {"sustained tonal sound"},
+            "piano": {"sustained tonal sound"},
+            "bell": {"tonal chime or ring"},
+            "ring": {"tonal chime or ring"},
+            "chime": {"tonal chime or ring"},
+            "alarm": {"tonal chime or ring", "broadband noise"},
+            "beep": {"tonal chime or ring"},
+            "engine": {"low hum or engine"},
+            "motor": {"low hum or engine"},
+            "rev": {"low hum or engine"},
+            "glass": {"sharp broadband impact", "percussive noise burst"},
+            "break": {"sharp broadband impact", "percussive noise burst"},
+            "crash": {"sharp broadband impact", "percussive noise burst"},
+            "bang": {"sharp broadband impact", "percussive noise burst"},
+            "slam": {"sharp broadband impact", "percussive noise burst"},
+            "impact": {"sharp broadband impact", "percussive noise burst"},
+            "dog": {"animal like call"},
+            "bark": {"animal like call"},
+            "duck": {"animal like call"},
+            "quack": {"animal like call"},
+            "bird": {"animal like call"},
+            "chirp": {"animal like call"},
+            "cat": {"animal like call"},
+            "meow": {"animal like call"},
+            "animal": {"animal like call"},
+            "applause": {"percussive noise burst", "broadband noise"},
+            "clap": {"percussive noise burst"},
+            "cheer": {"broadband noise", "percussive noise burst"},
+            "crowd": {"broadband noise", "percussive noise burst"},
+            "whoosh": {"whoosh or swish"},
+            "swish": {"whoosh or swish"},
+        }
+        for token, labels in query_to_labels.items():
+            if token in q and label in labels:
+                return True
+        return False
+
+    def _audio_grounder_heuristic(self, arguments: dict) -> dict:
+        query = str(arguments.get("query", "")).strip()
+        mode = self._audio_grounder_query_mode(query)
+        audio_data, sr, start, end = self._load_audio_window_with_ffmpeg(
+            arguments.get("start_time"),
+            arguments.get("end_time"),
+            sample_rate=16000,
+        )
+        if len(audio_data) == 0:
+            return {
+                "query": query,
+                "query_mode": mode,
+                "events": [],
+                "audio_summary": "The requested audio window is empty after extraction.",
+                "backend": "heuristic_audio",
+                "audio_status": "empty_window",
+            }
+
+        frame_sec = 0.064
+        hop_sec = 0.032
+        frame_len = max(256, int(frame_sec * sr))
+        hop_len = max(128, int(hop_sec * sr))
+        if len(audio_data) < frame_len:
+            padded = np.zeros(frame_len, dtype=np.float32)
+            padded[: len(audio_data)] = audio_data
+            audio_data = padded
+
+        window = np.hanning(frame_len).astype(np.float32)
+        rms_values = []
+        descriptors = []
+        cursor = 0
+        while cursor + frame_len <= len(audio_data):
+            frame = audio_data[cursor : cursor + frame_len]
+            weighted = frame * window
+            spectrum = np.abs(np.fft.rfft(weighted)) + 1e-8
+            freqs = np.fft.rfftfreq(frame_len, d=1.0 / sr)
+            total = float(spectrum.sum())
+            centroid = float((freqs * spectrum).sum() / total)
+            bandwidth = float(np.sqrt((((freqs - centroid) ** 2) * spectrum).sum() / total))
+            flatness = float(np.exp(np.mean(np.log(spectrum))) / np.mean(spectrum))
+            rms = float(np.sqrt(np.mean(frame ** 2) + 1e-10))
+            signs = np.sign(frame)
+            zero_cross = float(np.mean(np.abs(np.diff(signs)) > 0))
+            rms_values.append(rms)
+            descriptors.append(
+                {
+                    "time": cursor / float(sr),
+                    "rms": rms,
+                    "centroid": centroid,
+                    "bandwidth": bandwidth,
+                    "flatness": flatness,
+                    "zero_cross": zero_cross,
+                }
+            )
+            cursor += hop_len
+
+        if not descriptors:
+            return {
+                "query": query,
+                "query_mode": mode,
+                "events": [],
+                "audio_summary": "The requested audio window is too short for heuristic analysis.",
+                "backend": "heuristic_audio",
+                "audio_status": "too_short",
+            }
+
+        rms_arr = np.asarray(rms_values, dtype=np.float32)
+        smooth_rms = np.convolve(rms_arr, np.ones(3, dtype=np.float32) / 3.0, mode="same")
+        baseline = float(np.percentile(smooth_rms, 25))
+        high = float(np.percentile(smooth_rms, 85))
+        threshold = max(0.008, baseline + 0.35 * max(0.0, high - baseline))
+        active = smooth_rms >= threshold
+
+        gap_frames = max(1, int(round(0.10 / hop_sec)))
+        min_frames = max(1, int(round(0.08 / hop_sec)))
+        for idx in range(1, len(active) - 1):
+            if not active[idx] and active[max(0, idx - gap_frames) : idx].any() and active[idx + 1 : min(len(active), idx + gap_frames + 1)].any():
+                active[idx] = True
+
+        raw_events = []
+        idx = 0
+        while idx < len(active):
+            if not active[idx]:
+                idx += 1
                 continue
-            try:
-                return json.loads(candidate)
-            except Exception:
+            start_idx = idx
+            while idx < len(active) and active[idx]:
+                idx += 1
+            end_idx = idx
+            if (end_idx - start_idx) < min_frames:
                 continue
-        return None
+            block = descriptors[start_idx:end_idx]
+            if not block:
+                continue
+            event_start = float(start + block[0]["time"])
+            event_end = float(start + block[-1]["time"] + frame_sec)
+            duration = max(0.0, event_end - event_start)
+            mean_centroid = float(np.mean([x["centroid"] for x in block]))
+            mean_bandwidth = float(np.mean([x["bandwidth"] for x in block]))
+            mean_flatness = float(np.mean([x["flatness"] for x in block]))
+            mean_zcr = float(np.mean([x["zero_cross"] for x in block]))
+            peak_rms = float(np.max([x["rms"] for x in block]))
+
+            if duration >= 0.65 and mean_flatness < 0.20 and mean_bandwidth < 1200 and mean_centroid < 900:
+                label = "low hum or engine"
+            elif duration >= 0.25 and mean_flatness < 0.22 and mean_bandwidth < 1500 and mean_centroid > 1200:
+                label = "tonal chime or ring"
+            elif 0.12 <= duration <= 0.7 and mean_flatness < 0.32 and 500 <= mean_centroid <= 2600 and mean_bandwidth < 1800:
+                label = "animal like call"
+            elif duration < 0.35 and mean_flatness > 0.42 and mean_centroid > 1800:
+                label = "sharp broadband impact"
+            elif duration < 0.6 and mean_bandwidth > 2200 and mean_flatness > 0.22:
+                label = "whoosh or swish"
+            elif duration < 0.5 and mean_flatness > 0.30:
+                label = "percussive noise burst"
+            elif duration >= 0.45 and mean_flatness < 0.28:
+                label = "sustained tonal sound"
+            elif duration >= 0.45:
+                label = "broadband noise"
+            else:
+                label = "generic non speech sound"
+
+            confidence = min(0.95, max(0.25, peak_rms / (float(np.max(smooth_rms)) + 1e-8)))
+            raw_events.append(
+                {
+                    "event_label": label,
+                    "start": event_start,
+                    "end": min(float(end), event_end),
+                    "confidence": float(confidence),
+                }
+            )
+
+        if mode == "targeted":
+            filtered_events = [
+                event for event in raw_events
+                if self._audio_grounder_match_heuristic_label(event["event_label"], query)
+            ]
+        else:
+            filtered_events = raw_events
+
+        merged = self._merge_audio_grounder_events(filtered_events)
+        distinct_groups = []
+        by_label = {}
+        for event in merged:
+            key = event["event_label"]
+            bucket = by_label.setdefault(key, [])
+            bucket.append(event)
+        for label, members in sorted(by_label.items(), key=lambda item: min(x["start"] for x in item[1])):
+            distinct_groups.append(
+                {
+                    "event_label": label,
+                    "count": len(members),
+                    "start": min(float(x["start"]) for x in members),
+                    "end": max(float(x["end"]) for x in members),
+                    "confidence": max(float(x.get("confidence", 0.0) or 0.0) for x in members),
+                }
+            )
+
+        if mode == "inventory":
+            summary = (
+                f"Heuristic audio analysis found {len(distinct_groups)} distinct non-speech sound types "
+                f"in the requested interval."
+            )
+        elif merged:
+            summary = f"Heuristic audio analysis found {len(merged)} matching non-speech events for the query."
+        else:
+            summary = "Heuristic audio analysis found non-speech activity, but none matched the requested sound query."
+
+        return {
+            "query": query,
+            "query_mode": mode,
+            "events": merged,
+            "distinct_event_groups": distinct_groups,
+            "raw_event_count": len(raw_events),
+            "audio_summary": summary,
+            "backend": "heuristic_audio",
+            "audio_status": (
+                "ok"
+                if (merged or distinct_groups)
+                else ("analyzed_no_match" if raw_events else "no_match")
+            ),
+        }
 
     def _whisperx_dedupe_paths(self, paths):
         deduped = []
@@ -350,7 +1080,7 @@ class RefinerToolsMixin:
     def _whisperx_sidecar_env(self, base_cmd):
         runtime = self._whisperx_sidecar_runtime(base_cmd)
         gpu_ld_paths = list(runtime.get("gpu_ld_paths") or [])
-        env = dict(os.environ)
+        env = self._ffmpeg_ready_env()
         filtered_current_ld = []
         for entry in str(env.get("LD_LIBRARY_PATH", "") or "").split(":"):
             raw = entry.strip()
@@ -375,49 +1105,77 @@ class RefinerToolsMixin:
             raise RuntimeError("WhisperX sidecar is not configured")
 
         window = self._whisperx_effective_range(start_time, end_time)
+        model_config = self._whisperx_model_config()
+        sidecar_script = os.path.join(_eval_dir, "whisperx_sidecar.py")
+        language_hint = os.getenv("WHISPERX_LANGUAGE", "").strip()
+        batch_size = str(int(os.getenv("WHISPERX_BATCH", "8")))
+        sidecar_env = self._whisperx_sidecar_env(base_cmd)
+
+        def build_cmd(active_device: str, active_compute_type: str):
+            cmd = base_cmd + [
+                sidecar_script,
+                "--video-path",
+                self.video_path,
+                "--start-time",
+                str(window["transcribe_start"]),
+                "--end-time",
+                str(window["transcribe_end"]),
+                "--model-name",
+                str(model_config["model_spec"]),
+                "--device",
+                active_device,
+                "--aux-device",
+                self._whisperx_aux_device(),
+                "--compute-type",
+                active_compute_type,
+                "--batch-size",
+                batch_size,
+            ]
+            if model_config.get("download_root"):
+                cmd.extend(["--download-root", str(model_config["download_root"])])
+            if bool(model_config.get("local_files_only")):
+                cmd.append("--local-files-only")
+            if language_hint:
+                cmd.extend(["--language", language_hint])
+            return cmd
+
+        def run_cmd(cmd):
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                env=sidecar_env,
+                check=False,
+            )
+            stdout = (proc.stdout or "").strip()
+            stderr = (proc.stderr or "").strip()
+            if proc.returncode != 0:
+                err_payload = self._whisperx_extract_json_payload(stderr)
+                if isinstance(err_payload, dict) and err_payload.get("error"):
+                    detail = f'{err_payload.get("error_type", "RuntimeError")}: {err_payload.get("error")}'
+                else:
+                    detail = stderr or stdout or f"sidecar exited with code {proc.returncode}"
+                raise RuntimeError(detail)
+            return stdout
+
         device_obj = self._whisperx_torch_device()
         compute_type = self._whisperx_compute_type(device_obj)
-        model_name = os.getenv("WHISPERX_MODEL", "small")
-        sidecar_script = os.path.join(_eval_dir, "whisperx_sidecar.py")
-        cmd = base_cmd + [
-            sidecar_script,
-            "--video-path",
-            self.video_path,
-            "--start-time",
-            str(window["transcribe_start"]),
-            "--end-time",
-            str(window["transcribe_end"]),
-            "--model-name",
-            model_name,
-            "--device",
-            str(device_obj),
-            "--aux-device",
-            self._whisperx_aux_device(),
-            "--compute-type",
-            compute_type,
-            "--batch-size",
-            str(int(os.getenv("WHISPERX_BATCH", "8"))),
-        ]
-        language_hint = os.getenv("WHISPERX_LANGUAGE", "").strip()
-        if language_hint:
-            cmd.extend(["--language", language_hint])
-
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            env=self._whisperx_sidecar_env(base_cmd),
-            check=False,
-        )
-        stdout = (proc.stdout or "").strip()
-        stderr = (proc.stderr or "").strip()
-        if proc.returncode != 0:
-            err_payload = self._whisperx_extract_json_payload(stderr)
-            if isinstance(err_payload, dict) and err_payload.get("error"):
-                detail = f'{err_payload.get("error_type", "RuntimeError")}: {err_payload.get("error")}'
+        try:
+            stdout = run_cmd(build_cmd(str(device_obj), compute_type))
+        except RuntimeError as exc:
+            if device_obj.type != "cuda":
+                raise
+            original_error = exc
+            should_retry = self._whisperx_should_retry_on_cpu(exc)
+            if should_retry:
+                print(f"  WhisperX CUDA failed ({exc}); retrying ASR on cpu.")
             else:
-                detail = stderr or stdout or f"sidecar exited with code {proc.returncode}"
-            raise RuntimeError(detail)
+                print(f"  WhisperX initial CUDA run failed ({exc}); attempting cpu fallback.")
+            try:
+                stdout = run_cmd(build_cmd("cpu", "int8"))
+            except RuntimeError:
+                raise original_error
+
         if not stdout:
             raise RuntimeError("WhisperX sidecar returned no stdout")
         result = self._whisperx_extract_json_payload(stdout)
@@ -451,6 +1209,26 @@ class RefinerToolsMixin:
         if k is not None:
             return list(k)
         return list(getattr(self, "planner_api_keys", None) or [])
+
+    def _score_chart_analysis_result(self, result: dict) -> float:
+        if not isinstance(result, dict):
+            return -1.0
+        score = 0.0
+        query_response = str(result.get("query_response", "") or "").strip().lower()
+        if query_response.startswith("chart_analyzer error:") or query_response.startswith(
+            "chart_analyzer unavailable"
+        ):
+            score -= 10.0
+        if str(result.get("chart_type", "") or "").strip() not in {"", "unknown", "other"}:
+            score += 3.0
+        if str(result.get("title", "") or "").strip():
+            score += 1.0
+        score += float(len(result.get("series") or [])) * 3.0
+        score += float(len(result.get("key_observations") or []))
+        score += float(len(result.get("relationships") or []))
+        if query_response:
+            score += 2.0
+        return score
 
     def _resolve_frame_bundle(self, arguments: dict):
         raw_paths = arguments.get("frame_paths", arguments.get("frame_path"))
@@ -496,7 +1274,11 @@ class RefinerToolsMixin:
             else:
                 if frame_ts is None:
                     try:
-                        frame_ts = float(self.retriever._timestamp_from_dense_frame_path(frame_path))
+                        retriever = getattr(self, "retriever", None)
+                        if retriever is not None:
+                            frame_ts = float(retriever._timestamp_from_dense_frame_path(frame_path))
+                        else:
+                            frame_ts = 0.0
                     except Exception:
                         frame_ts = 0.0
 
@@ -602,6 +1384,28 @@ class RefinerToolsMixin:
         )
         return nearest[:1]
 
+    def _extract_retrieved_frames(self, frame_result: dict) -> list:
+        frames = frame_result.get("frames") or []
+        if not isinstance(frames, list):
+            return []
+
+        normalized = []
+        for item in frames:
+            if not isinstance(item, dict):
+                continue
+            frame_path = item.get("frame_path")
+            ts = self._safe_float(item.get("timestamp"), None)
+            if not frame_path or ts is None:
+                continue
+            normalized.append(
+                {
+                    "frame_path": frame_path,
+                    "timestamp": float(ts),
+                    "relevance_score": float(item.get("relevance_score", 0.0) or 0.0),
+                }
+            )
+        return sorted(normalized, key=lambda item: (item["timestamp"], -item["relevance_score"]))
+
     def _align_visual_tool_arguments(
         self,
         tool_name: str,
@@ -611,6 +1415,43 @@ class RefinerToolsMixin:
         step_results: dict,
         step_tools: dict,
     ) -> dict:
+        if tool_name == "frame_retriever":
+            temporal_step = None
+            for dep in depends_on:
+                if step_tools.get(dep) == "temporal_grounder" and isinstance(step_results.get(dep), dict):
+                    temporal_step = dep
+            if temporal_step is None:
+                return arguments
+
+            temporal_result = step_results.get(temporal_step) or {}
+            segments = [
+                seg for seg in (temporal_result.get("segments") or [])
+                if isinstance(seg, dict)
+                and self._safe_float(seg.get("start"), None) is not None
+                and self._safe_float(seg.get("end"), None) is not None
+            ]
+            if not segments:
+                return arguments
+
+            ranked_segments = sorted(
+                segments,
+                key=lambda seg: float(seg.get("confidence", 0.0) or 0.0),
+                reverse=True,
+            )
+            timestamps = []
+            for seg in ranked_segments:
+                start = float(seg["start"])
+                end = float(seg["end"])
+                if end <= start:
+                    timestamps.append(start)
+                    continue
+                step = (end - start) / 4.0
+                timestamps.extend([start + step, start + 2.0 * step, start + 3.0 * step])
+
+            updated = dict(arguments)
+            updated["timestamps"] = timestamps
+            return updated
+
         if tool_name not in {"spatial_grounder", "counter", "chart_analyzer", "ocr"}:
             return arguments
 
@@ -621,6 +1462,11 @@ class RefinerToolsMixin:
         if frame_step is None:
             return arguments
 
+        frame_result = step_results.get(frame_step) or {}
+        retrieved_frames = self._extract_retrieved_frames(frame_result)
+        if not retrieved_frames:
+            return arguments
+
         temporal_step = None
         for dep in depends_on:
             if step_tools.get(dep) == "temporal_grounder" and isinstance(step_results.get(dep), dict):
@@ -629,15 +1475,15 @@ class RefinerToolsMixin:
             temporal_step = self._latest_prior_step_of_type(frame_step, step_tools, "temporal_grounder")
         if temporal_step is None:
             temporal_step = self._latest_prior_step_of_type(current_step, step_tools, "temporal_grounder")
-        if temporal_step is None:
-            return arguments
-
-        aligned_frames = self._select_frames_aligned_with_temporal_grounder(
-            step_results.get(frame_step) or {},
-            step_results.get(temporal_step) or {},
-        )
-        if not aligned_frames:
-            return arguments
+        if temporal_step is not None:
+            aligned_frames = self._select_frames_aligned_with_temporal_grounder(
+                frame_result,
+                step_results.get(temporal_step) or {},
+            )
+            if not aligned_frames:
+                aligned_frames = retrieved_frames
+        else:
+            aligned_frames = retrieved_frames
 
         updated = dict(arguments)
         if tool_name in {"chart_analyzer", "ocr"}:
@@ -647,8 +1493,11 @@ class RefinerToolsMixin:
             ]
             updated["timestamp"] = None
         else:
-            updated["frame_path"] = aligned_frames[0]["frame_path"]
-            updated["timestamp"] = aligned_frames[0]["timestamp"]
+            updated["frame_path"] = [
+                {"frame_path": item["frame_path"], "timestamp": item["timestamp"]}
+                for item in aligned_frames
+            ]
+            updated["timestamp"] = None
         return updated
 
     def _load_chart_model(self):
@@ -1044,6 +1893,10 @@ class RefinerToolsMixin:
 
     def _informative_retrieval(self, query: str, top_k: int):
         """Dense-frame text–image retrieval by default; optional clip-level search."""
+        ensure_retriever = getattr(self, "_ensure_retriever_ready", None)
+        if callable(ensure_retriever) and not ensure_retriever():
+            return "dense", []
+
         if getattr(self, "use_clip_retrieval", False):
             return "clip", self.retriever.get_informative_clips(
                 query,
@@ -1060,6 +1913,152 @@ class RefinerToolsMixin:
             total_duration=float(self.duration),
             dense_sample_fps=float(getattr(self, "dense_frame_fps", 24.0)),
             embed_batch=int(getattr(self, "dense_frame_embed_batch", 8)),
+        )
+
+    def _rerank_frame_candidates(self, query: str, frames: list, top_k: int):
+        def _fallback(items):
+            return [
+                {
+                    "frame_path": item["frame_path"],
+                    "timestamp": item["timestamp"],
+                    "relevance_score": float(item.get("relevance_score", 0.0) or 0.0),
+                }
+                for item in items[:top_k]
+            ]
+
+        if not query or not frames:
+            return _fallback(frames)
+
+        ensure_retriever = getattr(self, "_ensure_retriever_ready", None)
+        if callable(ensure_retriever) and not ensure_retriever():
+            return _fallback(frames)
+
+        retriever = getattr(self, "retriever", None)
+        if retriever is None:
+            return _fallback(frames)
+
+        unique_frames = []
+        seen = set()
+        for item in frames:
+            frame_path = str(item.get("frame_path") or "").strip()
+            if not frame_path or not os.path.exists(frame_path):
+                continue
+            key = os.path.realpath(frame_path)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_frames.append(
+                {
+                    "frame_path": frame_path,
+                    "timestamp": float(item.get("timestamp", 0.0) or 0.0),
+                }
+            )
+
+        if not unique_frames:
+            return []
+
+        try:
+            from languagebind import to_device
+
+            q_emb = retriever.calculate_text_embedding(query, flag_save_embedding=False, modality="image").cpu()
+            q_emb = q_emb / q_emb.norm(p=2, dim=1, keepdim=True)
+
+            scored = []
+            batch_size = max(1, int(getattr(self, "dense_frame_embed_batch", 8)))
+            device = getattr(retriever, "device", torch.device("cpu"))
+
+            for i in range(0, len(unique_frames), batch_size):
+                batch = unique_frames[i : i + batch_size]
+                batch_paths = [item["frame_path"] for item in batch]
+                try:
+                    inputs = {"image": to_device(retriever.modality_transform["image"](batch_paths), device)}
+                    with torch.no_grad():
+                        emb = retriever.model(inputs)["image"].cpu()
+                    emb = emb / emb.norm(p=2, dim=1, keepdim=True)
+                    similarities = torch.matmul(q_emb, emb.T)[0].tolist()
+                    for item, score in zip(batch, similarities):
+                        scored.append(
+                            {
+                                "frame_path": item["frame_path"],
+                                "timestamp": item["timestamp"],
+                                "relevance_score": float(score),
+                            }
+                        )
+                except Exception:
+                    for item in batch:
+                        try:
+                            inputs = {
+                                "image": to_device(retriever.modality_transform["image"](item["frame_path"]), device)
+                            }
+                            with torch.no_grad():
+                                emb = retriever.model(inputs)["image"].cpu()
+                            emb = emb / emb.norm(p=2, dim=1, keepdim=True)
+                            score = torch.matmul(q_emb, emb.T)[0][0].item()
+                            scored.append(
+                                {
+                                    "frame_path": item["frame_path"],
+                                    "timestamp": item["timestamp"],
+                                    "relevance_score": float(score),
+                                }
+                            )
+                        except Exception as e:
+                            print(f"  skip frame rerank {item['frame_path']}: {e}")
+                    torch.cuda.empty_cache()
+        except Exception as e:
+            print(f"  frame rerank fallback: {e}")
+            return _fallback(unique_frames)
+
+        if not scored:
+            return _fallback(unique_frames)
+        scored.sort(key=lambda item: (-item["relevance_score"], item["timestamp"]))
+        torch.cuda.empty_cache()
+        return scored[:top_k]
+
+    def _clip_path_to_segment(self, clip_path: str, score: float) -> dict | None:
+        if not clip_path:
+            return None
+
+        base = os.path.basename(clip_path)
+        stem, _ = os.path.splitext(base)
+        parts = stem.split("_")
+
+        # Expected format: clip_<idx>_<HH-MM-SS>_to_<HH-MM-SS>
+        if len(parts) >= 5 and parts[0] == "clip" and parts[3] == "to":
+            try:
+                start_h, start_m, start_s = [int(x) for x in parts[2].split("-")]
+                end_h, end_m, end_s = [int(x) for x in parts[4].split("-")]
+                start = float(start_h * 3600 + start_m * 60 + start_s)
+                end = float(end_h * 3600 + end_m * 60 + end_s)
+                return {
+                    "start": start,
+                    "end": min(float(self.duration), end),
+                    "confidence": float(score),
+                }
+            except Exception:
+                pass
+
+        try:
+            clip_number = int(parts[1])
+            start = float(clip_number * self.clip_duration)
+            end = float(min(self.duration, start + self.clip_duration))
+            return {
+                "start": start,
+                "end": end,
+                "confidence": float(score),
+            }
+        except Exception:
+            return None
+
+    def _informative_clip_retrieval(self, query: str, top_k: int):
+        ensure_retriever = getattr(self, "_ensure_retriever_ready", None)
+        if callable(ensure_retriever) and not ensure_retriever():
+            return []
+
+        return self.retriever.get_informative_clips(
+            query,
+            video_path=self.video_path,
+            top_k=top_k,
+            total_duration=self.duration,
         )
 
     def _execute_refine_tool_call(self, tool_name: str, arguments: dict) -> str:
@@ -1196,7 +2195,7 @@ class RefinerToolsMixin:
         return execution_results
 
     def _get_asr_whisperx(self, start_time=None, end_time=None):
-        global _WHISPERX_MODEL, _WHISPERX_ALIGN, _WHISPERX_META
+        global _WHISPERX_MODEL, _WHISPERX_MODEL_KEY, _WHISPERX_ALIGN, _WHISPERX_META
         if whisperx is None or torch is None:
             raise ImportError("whisperx or torch not installed")
 
@@ -1204,20 +2203,34 @@ class RefinerToolsMixin:
         device = str(device_obj)
         model_device, model_device_index = self._whisperx_ctranslate2_device(device_obj)
         compute_type = self._whisperx_compute_type(device_obj)
-        model_name = os.getenv("WHISPERX_MODEL", "small")
+        model_config = self._whisperx_model_config()
         window = self._whisperx_effective_range(start_time, end_time)
         start = float(window["transcribe_start"])
         end = float(window["transcribe_end"])
+        model_key = (
+            str(model_config["model_spec"]),
+            str(model_device),
+            int(model_device_index),
+            str(compute_type),
+        )
 
-        if _WHISPERX_MODEL is None:
+        if _WHISPERX_MODEL is None or _WHISPERX_MODEL_KEY != model_key:
             with _whisperx_torch_load_compat():
-                _WHISPERX_MODEL = whisperx.load_model(
-                    model_name,
-                    model_device,
-                    device_index=model_device_index,
-                    compute_type=compute_type,
-                )
-        audio = whisperx.load_audio(self.video_path)
+                with self._whisperx_hub_access(
+                    allow_download=not bool(model_config.get("local_files_only"))
+                ):
+                    _WHISPERX_MODEL = whisperx.load_model(
+                        str(model_config["model_spec"]),
+                        model_device,
+                        device_index=model_device_index,
+                        compute_type=compute_type,
+                        download_root=model_config.get("download_root"),
+                        local_files_only=bool(model_config.get("local_files_only")),
+                    )
+            _WHISPERX_MODEL_KEY = model_key
+            _WHISPERX_ALIGN = None
+            _WHISPERX_META = None
+        audio = self._load_audio_with_ffmpeg(self.video_path)
         sample_rate = float(getattr(getattr(whisperx, "audio", None), "SAMPLE_RATE", 16000))
         sample_start = max(0, int(start * sample_rate))
         sample_end = min(len(audio), int(end * sample_rate))
@@ -1337,40 +2350,33 @@ class RefinerToolsMixin:
         for arguments in calls:
             query = str(arguments.get("query", "")).strip()
             segments = []
+            warning = None
             if query:
                 try:
-                    kind, matches = self._informative_retrieval(query, topk)
-                    if kind == "clip":
-                        for clip_path, score in matches:
-                            clip_number = int(os.path.basename(clip_path).split("_")[1])
-                            start = float(clip_number * self.clip_duration)
-                            end = float(min(self.duration, start + self.clip_duration))
-                            segments.append(
-                                {
-                                    "start": start,
-                                    "end": end,
-                                    "confidence": float(score),
-                                }
-                            )
-                    else:
-                        half = float(getattr(self, "dense_segment_half_width", 0.5))
-                        for frame_path, score in matches:
-                            t = self.retriever._timestamp_from_dense_frame_path(frame_path)
-                            segments.append(
-                                {
-                                    "start": max(0.0, t - half),
-                                    "end": min(float(self.duration), t + half),
-                                    "confidence": float(score),
-                                }
-                            )
+                    matches = self._informative_clip_retrieval(query, topk)
+                    for clip_path, score in matches:
+                        segment = self._clip_path_to_segment(clip_path, score)
+                        if segment is not None:
+                            segments.append(segment)
                 except Exception as e:
                     print(f"  Error: {e}")
+                    warning = str(e)
+
+            retriever_error = getattr(self, "_retriever_init_error", None)
+            if warning is None and retriever_error and not segments:
+                warning = f"clip retriever unavailable: {retriever_error}"
 
             result = {
                 "query": query,
-                "segments": sorted(segments, key=lambda x: x["start"]),
+                "segments": sorted(
+                    segments,
+                    key=lambda x: (-float(x.get("confidence", 0.0) or 0.0), float(x.get("start", 0.0))),
+                ),
                 "video_duration": float(self.duration),
+                "retrieval_backend": "clip",
             }
+            if warning:
+                result["warning"] = warning
             results.append(self._format_refine_tool_result("temporal_grounder", arguments, result))
 
         return "".join(results)
@@ -1393,7 +2399,20 @@ class RefinerToolsMixin:
             frames = []
             mode = "timestamp"
 
-            if timestamps:
+            if timestamps and query:
+                candidates = []
+                for ts in list(timestamps):
+                    frame_path, frame_ts = self._get_frame_at_timestamp(ts)
+                    if frame_path:
+                        candidates.append(
+                            {
+                                "frame_path": frame_path,
+                                "timestamp": float(frame_ts),
+                            }
+                        )
+                frames = self._rerank_frame_candidates(query, candidates, min(3, num_frames))
+                mode = "query"
+            elif timestamps:
                 for ts in list(timestamps)[:num_frames]:
                     frame_path, frame_ts = self._get_frame_at_timestamp(ts)
                     if frame_path:
@@ -1496,42 +2515,21 @@ class RefinerToolsMixin:
 
     def _audio_grounder_clap(self, arguments: dict) -> dict:
         global _CLAP_MODULE, _CLAP_RUNTIME
-        if np is None or sf is None or torch is None or CLAP_Module is None:
+        if np is None or torch is None or CLAP_Module is None:
             return {
                 "query": str(arguments.get("query", "")).strip(),
+                "query_mode": self._audio_grounder_query_mode(str(arguments.get("query", "")).strip()),
                 "events": [],
                 "audio_summary": "laion_clap or deps not available",
                 "backend": "none",
             }
 
         query = str(arguments.get("query", "")).strip()
+        query_mode = self._audio_grounder_query_mode(query)
         st = arguments.get("start_time")
         ed = arguments.get("end_time")
         t0, t1 = self._get_time_range(st, ed)
-
-        wav_path = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
         try:
-            subprocess.run(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-i",
-                    self.video_path,
-                    "-ss",
-                    str(max(0.0, t0)),
-                    "-to",
-                    str(min(float(self.duration), t1)),
-                    "-ar",
-                    "48000",
-                    "-ac",
-                    "1",
-                    wav_path,
-                ],
-                check=True,
-                capture_output=True,
-                timeout=600,
-            )
-
             if _CLAP_MODULE is None:
                 clap_device = self._clap_torch_device()
                 clap_ckpt = self._clap_checkpoint_path()
@@ -1539,6 +2537,9 @@ class RefinerToolsMixin:
                     raise RuntimeError(
                         "LAION-CLAP checkpoint 630k-audioset-best.pt is not available in the local cache."
                     )
+                clap_text_snapshot = self._clap_text_model_snapshot()
+                if clap_text_snapshot is None and os.getenv("HF_HUB_OFFLINE", "").strip() == "1":
+                    raise RuntimeError(self._clap_text_model_error())
                 module = CLAP_Module(enable_fusion=False, device=str(clap_device))
                 if clap_ckpt is not None:
                     module.load_ckpt(ckpt=str(clap_ckpt), verbose=False)
@@ -1548,11 +2549,10 @@ class RefinerToolsMixin:
                 _CLAP_RUNTIME = {
                     "device": str(clap_device),
                     "checkpoint": str(clap_ckpt) if clap_ckpt is not None else None,
+                    "text_model_snapshot": clap_text_snapshot,
                 }
 
-            audio_data, sr = sf.read(wav_path)
-            if audio_data.ndim > 1:
-                audio_data = audio_data.mean(axis=1)
+            audio_data, sr, _, _ = self._load_audio_window_with_ffmpeg(t0, t1, sample_rate=48000)
             duration = len(audio_data) / float(sr)
             win = float(os.getenv("CLAP_WINDOW_SEC", "2.0"))
             hop = float(os.getenv("CLAP_HOP_SEC", "1.0"))
@@ -1572,7 +2572,7 @@ class RefinerToolsMixin:
                 chunk = audio_data[i0:i1].astype(np.float32)
                 chunk_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
                 try:
-                    sf.write(chunk_wav, chunk, int(sr))
+                    self._write_mono_wav(chunk_wav, chunk, int(sr))
                     with torch.no_grad():
                         a_emb = _CLAP_MODULE.get_audio_embedding_from_filelist(
                             [chunk_wav], use_tensor=False
@@ -1598,6 +2598,7 @@ class RefinerToolsMixin:
             merged_events = self._merge_audio_grounder_events(events)
             return {
                 "query": query,
+                "query_mode": query_mode,
                 "events": merged_events,
                 "raw_event_count": len(events),
                 "audio_summary": (
@@ -1609,22 +2610,19 @@ class RefinerToolsMixin:
                 "audio_fallback_used": False,
                 "clap_device": _CLAP_RUNTIME.get("device"),
                 "clap_checkpoint": _CLAP_RUNTIME.get("checkpoint"),
+                "clap_text_model_snapshot": _CLAP_RUNTIME.get("text_model_snapshot"),
             }
         except Exception as e:
             if "ffmpeg" in type(e).__name__.lower():
                 print(f"  ffmpeg audio extract failed: {e}")
                 return {
                     "query": query,
+                    "query_mode": query_mode,
                     "events": [],
                     "audio_summary": "audio extract failed",
                     "backend": "none",
                 }
             raise
-        finally:
-            try:
-                os.unlink(wav_path)
-            except OSError:
-                pass
 
     def _process_audio_grounder(self, output_text: str) -> str:
         calls = self._get_refine_tool_calls(output_text, "audio_grounder")
@@ -1637,7 +2635,10 @@ class RefinerToolsMixin:
         for arguments in calls:
             result = None
             clap_error = None
-            if os.getenv("REFINER_DISABLE_CLAP", "").strip() != "1":
+            query = str(arguments.get("query", "")).strip()
+            query_mode = self._audio_grounder_query_mode(query)
+
+            if query_mode == "targeted" and os.getenv("REFINER_DISABLE_CLAP", "").strip() != "1":
                 try:
                     result = self._audio_grounder_clap(arguments if isinstance(arguments, dict) else {})
                 except Exception as e:
@@ -1645,19 +2646,49 @@ class RefinerToolsMixin:
                     print(f"  LAION-CLAP fallback: {e}")
                 if result is not None and result.get("backend") == "none" and clap_error is None:
                     clap_error = result.get("audio_summary")
-            else:
+            elif query_mode == "targeted":
                 clap_error = "LAION-CLAP disabled by REFINER_DISABLE_CLAP=1"
-            if result is None or result.get("backend") == "none":
+
+            if result is None or not (result.get("events") or result.get("distinct_event_groups")):
+                subtitle_result = self._audio_grounder_from_subtitle_tags(
+                    arguments if isinstance(arguments, dict) else {}
+                )
+                if subtitle_result.get("events") or subtitle_result.get("distinct_event_groups"):
+                    result = subtitle_result
+
+            if result is None or not (result.get("events") or result.get("distinct_event_groups")):
+                try:
+                    allow_heuristic = query_mode != "targeted" or self._audio_grounder_allow_targeted_heuristic_fallback()
+                    heuristic_result = (
+                        self._audio_grounder_heuristic(arguments if isinstance(arguments, dict) else {})
+                        if allow_heuristic
+                        else None
+                    )
+                except Exception as e:
+                    heuristic_result = None
+                    print(f"  heuristic audio fallback: {e}")
+                    if clap_error is None:
+                        clap_error = f"{type(e).__name__}: {e}"
+                if heuristic_result is not None:
+                    result = heuristic_result
+
+            if result is None:
                 asr_result = self._get_asr_result_from_subtitles(
                     arguments.get("start_time"), arguments.get("end_time")
                 )
-                summary = (
-                    "Speech subtitles are available in this range, but non-speech audio grounding is unavailable."
-                    if asr_result["segments"]
-                    else "Non-speech audio grounding is unavailable in this runner."
-                )
+                if query_mode == "targeted" and not self._audio_grounder_allow_targeted_heuristic_fallback():
+                    summary = (
+                        "Targeted non-speech audio grounding requires LAION-CLAP; heuristic fallback is disabled for targeted queries."
+                    )
+                else:
+                    summary = (
+                        "Speech subtitles are available in this range, but non-speech audio grounding could not be completed."
+                        if asr_result["segments"]
+                        else "Non-speech audio grounding could not be completed with the available backends."
+                    )
                 result = {
-                    "query": str(arguments.get("query", "")).strip(),
+                    "query": query,
+                    "query_mode": query_mode,
                     "events": [],
                     "audio_summary": summary,
                     "backend": "stub",
@@ -1666,9 +2697,11 @@ class RefinerToolsMixin:
                     "audio_fallback_used": True,
                 }
             else:
+                result.setdefault("query", query)
+                result.setdefault("query_mode", query_mode)
                 result.setdefault("audio_status", "ok")
-                result.setdefault("audio_error", None)
-                result.setdefault("audio_fallback_used", False)
+                result.setdefault("audio_error", clap_error)
+                result.setdefault("audio_fallback_used", result.get("backend") != "laion_clap")
             results.append(self._format_refine_tool_result("audio_grounder", arguments, result))
 
         return "".join(results)
@@ -1776,15 +2809,52 @@ class RefinerToolsMixin:
                             else "\n\nExtract all visible text from this frame. Return JSON only.\n"
                         )
                     )
-                    result = self._run_vlm_json(
-                        prompt,
-                        frame_paths,
-                        frame_timestamps,
-                        result,
-                    )
-                    if isinstance(result, dict):
-                        result.setdefault("source", source)
-                        result["ocr_backend"] = "vlm"
+                    if len(frame_paths) > 1 and not self._use_vlm_remote_api():
+                        merged_detections = []
+                        merged_text = []
+                        merged_raw = []
+                        for frame_path, frame_ts in zip(frame_paths, frame_timestamps):
+                            single_default = {
+                                "source": frame_path,
+                                "detections": [],
+                                "full_text": "",
+                                "ocr_backend": "none",
+                            }
+                            single_result = self._run_vlm_json(
+                                prompt,
+                                [frame_path],
+                                [frame_ts],
+                                single_default,
+                            )
+                            if not isinstance(single_result, dict):
+                                continue
+                            for det in (single_result.get("detections") or []):
+                                if isinstance(det, dict):
+                                    merged_detections.append(det)
+                            text = str(single_result.get("full_text", "") or "").strip()
+                            if text:
+                                merged_text.append(text)
+                            raw = str(single_result.get("raw_output", "") or "").strip()
+                            if raw:
+                                merged_raw.append(raw)
+                        result = {
+                            "source": source,
+                            "detections": merged_detections,
+                            "full_text": "\n".join(merged_text),
+                            "ocr_backend": "vlm",
+                        }
+                        if merged_raw and not merged_detections and not merged_text:
+                            result["raw_output"] = "\n\n".join(merged_raw)
+                    else:
+                        result = self._run_vlm_json(
+                            prompt,
+                            frame_paths,
+                            frame_timestamps,
+                            result,
+                        )
+                        if isinstance(result, dict):
+                            result.setdefault("source", source)
+                            result["ocr_backend"] = "vlm"
 
             results.append(self._format_refine_tool_result("ocr", arguments, result))
 
@@ -1800,45 +2870,98 @@ class RefinerToolsMixin:
 
         for arguments in calls:
             query = str(arguments.get("query", "")).strip()
-            frame_path = arguments.get("frame_path")
-            frame_ts = self._safe_float(arguments.get("timestamp"), 0.0)
+            frame_paths, frame_timestamps = self._resolve_frame_bundle(arguments)
             return_masks = bool(arguments.get("return_masks", False))
-            if not frame_path or not os.path.exists(frame_path):
-                frame_path, frame_ts = self._get_frame_at_timestamp(frame_ts)
+
+            if not frame_paths:
+                frame_ts = self._safe_float(arguments.get("timestamp"), 0.0)
+                frame_path = arguments.get("frame_path")
+                if not frame_path or not os.path.exists(frame_path):
+                    frame_path, frame_ts = self._get_frame_at_timestamp(frame_ts)
+                if frame_path and os.path.exists(frame_path):
+                    frame_paths = [frame_path]
+                    frame_timestamps = [float(frame_ts or 0.0)]
 
             backend = str(getattr(self, "spatial_grounder_backend", "grounding_dino") or "grounding_dino").strip().lower()
-            if backend == "grounding_dino":
-                result, warning = self._run_grounding_dino_spatial_grounder(
-                    frame_path,
-                    query,
-                    return_masks=return_masks,
-                )
-                if result is None and bool(getattr(self, "spatial_grounder_vlm_fallback", True)):
+            frame_results = []
+            for frame_path, frame_ts in zip(frame_paths, frame_timestamps):
+                if backend == "grounding_dino":
+                    result, warning = self._run_grounding_dino_spatial_grounder(
+                        frame_path,
+                        query,
+                        return_masks=return_masks,
+                    )
+                    if result is None and bool(getattr(self, "spatial_grounder_vlm_fallback", True)):
+                        result = self._run_spatial_grounder_vlm(
+                            query,
+                            frame_path,
+                            frame_ts,
+                            return_masks=return_masks,
+                        )
+                        if isinstance(result, dict):
+                            result["backend"] = "vlm_fallback"
+                            if warning:
+                                result["warning"] = warning
+                    elif result is None:
+                        result = {
+                            "query": query,
+                            "detections": [],
+                            "spatial_description": "",
+                            "backend": "grounding_dino",
+                            "warning": warning or "Grounding DINO inference failed.",
+                        }
+                else:
                     result = self._run_spatial_grounder_vlm(
                         query,
                         frame_path,
                         frame_ts,
                         return_masks=return_masks,
                     )
-                    if isinstance(result, dict):
-                        result["backend"] = "vlm_fallback"
-                        if warning:
-                            result["warning"] = warning
-                elif result is None:
+
+                if not isinstance(result, dict):
                     result = {
                         "query": query,
                         "detections": [],
                         "spatial_description": "",
-                        "backend": "grounding_dino",
-                        "warning": warning or "Grounding DINO inference failed.",
+                        "backend": backend,
                     }
-            else:
-                result = self._run_spatial_grounder_vlm(
-                    query,
-                    frame_path,
-                    frame_ts,
-                    return_masks=return_masks,
+
+                frame_results.append(
+                    {
+                        "frame_path": frame_path,
+                        "timestamp": float(frame_ts),
+                        **result,
+                    }
                 )
+
+            if len(frame_results) <= 1:
+                result = frame_results[0] if frame_results else {
+                    "query": query,
+                    "detections": [],
+                    "spatial_description": "",
+                    "backend": backend,
+                }
+            else:
+                def _score(item):
+                    dets = item.get("detections") or []
+                    if isinstance(dets, list) and dets:
+                        return max(float(det.get("confidence", 0.0) or 0.0) for det in dets if isinstance(det, dict))
+                    return 0.0
+
+                ranked = sorted(
+                    frame_results,
+                    key=lambda item: (-_score(item), -len(item.get("detections") or []), float(item.get("timestamp", 0.0) or 0.0)),
+                )
+                best = ranked[0]
+                result = {
+                    "query": query,
+                    "frames": frame_results,
+                    "best_frame": best,
+                    "detections": list(best.get("detections") or []),
+                    "spatial_description": str(best.get("spatial_description", "") or ""),
+                    "backend": "multi_frame",
+                    "selection_reason": "Top-level fields mirror one high-salience candidate frame; inspect frames[] for all frame-level grounding results.",
+                }
             results.append(self._format_refine_tool_result("spatial_grounder", arguments, result))
 
         return "".join(results)
@@ -1853,10 +2976,15 @@ class RefinerToolsMixin:
 
         for arguments in calls:
             query = str(arguments.get("query", "")).strip()
-            frame_path = arguments.get("frame_path")
-            frame_ts = self._safe_float(arguments.get("timestamp"), 0.0)
-            if not frame_path or not os.path.exists(frame_path):
-                frame_path, frame_ts = self._get_frame_at_timestamp(frame_ts)
+            frame_paths, frame_timestamps = self._resolve_frame_bundle(arguments)
+            if not frame_paths:
+                frame_ts = self._safe_float(arguments.get("timestamp"), 0.0)
+                frame_path = arguments.get("frame_path")
+                if not frame_path or not os.path.exists(frame_path):
+                    frame_path, frame_ts = self._get_frame_at_timestamp(frame_ts)
+                if frame_path and os.path.exists(frame_path):
+                    frame_paths = [frame_path]
+                    frame_timestamps = [float(frame_ts or 0.0)]
 
             default_result = {
                 "query": query,
@@ -1869,12 +2997,43 @@ class RefinerToolsMixin:
                 counter_prompt.strip()
                 + f"\n\nQuery: {query}\nReturn JSON only matching the OUTPUT FORMAT above.\n"
             )
-            result = self._run_vlm_json(
-                prompt,
-                [frame_path] if frame_path else [],
-                [float(frame_ts)],
-                default_result,
-            )
+
+            frame_results = []
+            for frame_path, frame_ts in zip(frame_paths, frame_timestamps):
+                single_result = self._run_vlm_json(
+                    prompt,
+                    [frame_path] if frame_path else [],
+                    [float(frame_ts)],
+                    dict(default_result),
+                )
+                if not isinstance(single_result, dict):
+                    single_result = dict(default_result)
+                frame_results.append(
+                    {
+                        "frame_path": frame_path,
+                        "timestamp": float(frame_ts),
+                        **single_result,
+                    }
+                )
+
+            if len(frame_results) <= 1:
+                result = frame_results[0] if frame_results else dict(default_result)
+            else:
+                ranked = sorted(
+                    frame_results,
+                    key=lambda item: (-float(item.get("confidence", 0.0) or 0.0), -int(item.get("count", 0) or 0), float(item.get("timestamp", 0.0) or 0.0)),
+                )
+                best = ranked[0]
+                result = {
+                    "query": query,
+                    "frames": frame_results,
+                    "best_frame": best,
+                    "count": int(best.get("count", 0) or 0),
+                    "confidence": float(best.get("confidence", 0.0) or 0.0),
+                    "detections": list(best.get("detections") or []),
+                    "notes": str(best.get("notes", "") or ""),
+                    "selection_reason": "Top-level fields mirror one high-salience candidate frame; inspect frames[] for all frame-level counting results.",
+                }
             results.append(self._format_refine_tool_result("counter", arguments, result))
 
         return "".join(results)
@@ -1902,9 +3061,22 @@ class RefinerToolsMixin:
             }
             prompt = (
                 dense_captioner_prompt.strip()
-                + f"\n\nGranularity: {granularity}. Focus query: {focus_query}\nReturn JSON only.\n"
+                + (
+                    f"\n\nRequested segment: {start:.3f}s to {end:.3f}s."
+                    " The attached frames are in chronological order from this interval."
+                    " Use absolute seconds within this requested segment for"
+                    " `captioned_range.start`, `captioned_range.end`, and every"
+                    " `captions[].start` / `captions[].end` field."
+                )
+                + f"\nGranularity: {granularity}. Focus query: {focus_query}\nReturn JSON only.\n"
             )
-            result = self._run_vlm_json(prompt, frame_paths, timestamps, default_result)
+            result = self._run_vlm_json(
+                prompt,
+                frame_paths,
+                timestamps,
+                default_result,
+                force_local=True,
+            )
             results.append(self._format_refine_tool_result("dense_captioner", arguments, result))
 
         return "".join(results)
@@ -1981,9 +3153,29 @@ class RefinerToolsMixin:
                     print(f'chart analyzer output: {raw_output}')
                     parsed = self._extract_json_payload(raw_output)
                 elif mode == "vlm":
-                    merged = self._run_vlm_json(
-                        prompt_text, frame_paths, frame_timestamps, default_result
-                    )
+                    if len(frame_paths) > 1:
+                        merged = None
+                        best_score = -1.0
+                        for frame_path, frame_ts in zip(frame_paths, frame_timestamps):
+                            candidate = self._run_vlm_json(
+                                prompt_text,
+                                [frame_path],
+                                [frame_ts],
+                                dict(default_result),
+                                force_local=True,
+                            )
+                            score = self._score_chart_analysis_result(candidate)
+                            if score > best_score:
+                                merged = candidate
+                                best_score = score
+                    else:
+                        merged = self._run_vlm_json(
+                            prompt_text,
+                            frame_paths,
+                            frame_timestamps,
+                            dict(default_result),
+                            force_local=True,
+                        )
                     if isinstance(merged, dict) and "raw_output" in merged:
                         parsed = self._extract_json_payload(merged.get("raw_output", ""))
                     elif isinstance(merged, dict):
@@ -2008,7 +3200,12 @@ class RefinerToolsMixin:
                     result = parsed
                     result.setdefault("query_response", None)
                 else:
-                    default_result["query_response"] = (raw_output or "").strip() if raw_output else ""
+                    fallback_text = ""
+                    if isinstance(merged, dict):
+                        fallback_text = str(merged.get("raw_output", "") or "").strip()
+                    if not fallback_text:
+                        fallback_text = (raw_output or "").strip() if raw_output else ""
+                    default_result["query_response"] = fallback_text
                     result = default_result
             except Exception as e:
                 print(f"  Chart analyzer error: {e}")

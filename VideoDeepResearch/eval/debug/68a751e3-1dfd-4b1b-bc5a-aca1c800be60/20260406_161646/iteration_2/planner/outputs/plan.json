@@ -1,0 +1,35 @@
+{
+  "strategy": "Reuse the already-grounded question frame around 13.0s, but apply a diagram-structure tool that can parse the geometry rather than just detect the blue angle or text. First isolate a small local frame bundle around the known question moment, then run chart_analyzer on that bundle with a geometry-diagram query to extract the structural relationships needed to compute the blue angle and map it to one option.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "<video_path>",
+        "query": null,
+        "timestamps": [
+          12.5,
+          13.0,
+          13.5
+        ],
+        "num_frames": 3
+      },
+      "purpose": "Collect a tight local bundle around the previously grounded 13.0s question moment so the downstream diagram analyzer can compare nearby variants and use the clearest unsolved question-state frame rather than relying on the earlier low-confidence semantic retrieval.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "chart_analyzer",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null,
+        "query": "Geometry diagram with a blue-marked unknown angle near a diagonal and vertical segment; identify the diagram structure, any square/parallel/perpendicular relationships, any diagonals or subdividing lines, and determine the measure of the blue angle from those visible relationships."
+      },
+      "purpose": "Read the full geometric structure of the candidate diagram frames and infer the blue angle from the actual visual relationships, which the prior OCR and spatial grounding did not recover.",
+      "depends_on": [
+        1
+      ]
+    }
+  ],
+  "refinement_instructions": "Keep the previously supported facts that OCR found only a '?' near the target and that spatial_grounder correctly localized the blue angle and its bounding rays. Use step 2 as the decisive evidence source for the missing answer-critical geometry: inspect any frame-level results and select the frame that clearly corresponds to the unsolved question-state diagram near 13.0s. Replace the prior 'cannot be determined' ending with a diagram-grounded derivation only if chart_analyzer explicitly reports enough structural relationships to support a unique angle value; then map that verified value to the matching option. Do not resurrect the unsupported 15°→75°→105° chain unless the analyzer specifically identifies the visual relationships that justify it. If chart_analyzer identifies a different angle value, treat that as superseding the old chain and update the final answer accordingly. If the analyzer still cannot resolve a unique value from the visible structure, the refiner should state that explicitly, but it should first exhaust the frame-level chart output rather than relying on the earlier insufficiency claim."
+}

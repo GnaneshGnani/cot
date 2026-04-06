@@ -1,0 +1,39 @@
+{
+  "strategy": "Reuse the already-localized chart region and gather sharper frame evidence around the crossover so the refiner can justify the multiple-choice mapping explicitly from the chart, rather than relying on a loose approximation. A tiny local timestamp sweep plus a targeted chart query is the cheapest way to test whether the crossover is visibly before, at, or after the 2000 tick.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "<video_path>",
+        "query": null,
+        "timestamps": [
+          435.5,
+          436.0,
+          436.5,
+          437.0,
+          437.5,
+          438.0,
+          438.5
+        ],
+        "num_frames": 7
+      },
+      "purpose": "Sample a tight chronological neighborhood around the already-grounded chart moment so the downstream analysis can compare nearby renderings/zoom states and determine whether the China–U.S. crossover is visibly before or near the 2000 tick.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "chart_analyzer",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null,
+        "query": "In the line chart showing share of world manufacturing exports, determine where the China line crosses above the United States line relative to the labeled x-axis ticks, especially whether the crossover is before, at, or after 2000, and identify which answer choice year is best supported by the chart."
+      },
+      "purpose": "Interrogate the same chart more precisely for the answer-critical relation to the 2000 tick and obtain explicit support for the best multiple-choice year.",
+      "depends_on": [
+        1
+      ]
+    }
+  ],
+  "refinement_instructions": "Keep the earlier grounded facts that the chart is titled about world manufacturing exports and that China overtakes the United States near the late 1990s/around 2000. Replace step 4 with a narrower statement tied to the new chart_analyzer output: cite the frame-level chart evidence about whether the crossover is visibly before, at, or just after the 2000 tick, and then explain the option mapping explicitly. If the analyzer still gives an approximate crossover (for example late 1990s / around 1999) rather than an exact labeled year, the rewritten trace must say that the chart does not mark an exact labeled crossover year and that 2000 is chosen as the closest available option because it is the nearest listed year to the visually estimated crossover, while 2005, 2010, 2012, and 2020 are clearly too late. Use the frame-level results from the sampled bundle if one frame is clearer than others; do not claim exactness unless the tool explicitly supports it. Preserve tool provenance in the rewritten trace by attributing the conclusion to chart_analyzer on the sampled chart frames. Update the final answer only if the new evidence directly contradicts the current choice."
+}

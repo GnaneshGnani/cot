@@ -1,0 +1,30 @@
+{
+  "strategy": "Ground the first stem-and-leaf plot directly from the video by retrieving the original question-state frame(s) that show the first stemplot, then use OCR on those candidate frames to transcribe the stems and leaves. This is the minimum evidence needed to support or correct the dataset extraction and resulting median.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "<video_path>",
+        "query": "first stem-and-leaf plot in the problem statement, before any worked-solution annotations or highlighting are added",
+        "timestamps": null,
+        "num_frames": 3
+      },
+      "purpose": "Find candidate frames showing the original first stemplot in its unsolved/question state rather than a later explanation frame.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "ocr",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null
+      },
+      "purpose": "Read the stems and leaves from the retrieved stemplot frames so the trace can support the dataset extraction from actual on-screen evidence.",
+      "depends_on": [
+        1
+      ]
+    }
+  ],
+  "refinement_instructions": "Rewrite the trace so the dataset extraction is explicitly grounded in the OCR output from the retrieved first-stemplot frame(s), not assumed. Inspect the OCR results across the candidate frames and use the frame whose text most clearly shows the full first stemplot in the original question state; do not assume the top-ranked retrieved frame is automatically correct. Replace unsupported step 2 with a tool-attributed transcription of the stems/leaves, then recompute the total count, remove every leaf 3 from stem 13, and recompute the median from the OCR-grounded data. Preserve the existing arithmetic logic only if it still matches the OCR transcription; if the OCR-grounded leaves differ, update both the trace and final answer accordingly. If OCR is imperfect on some leaves, use only clearly readable digits and state any residual uncertainty rather than keeping unsupported numbers."
+}

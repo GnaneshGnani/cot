@@ -1,0 +1,43 @@
+{
+  "strategy": "Ground the actual geometry diagram first, then read the exact angle relationships from the question-state frame rather than relying on the unsupported triangle decomposition in the trace. Use a phase-aware retrieval query to avoid explanation/annotation frames if the video includes worked-solution overlays.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "<VIDEO_PATH>",
+        "query": "original geometry problem diagram with a blue-marked angle, before explanatory arrows, traced lines, or worked-solution annotations are added",
+        "timestamps": null,
+        "num_frames": 3
+      },
+      "purpose": "Retrieve candidate frames showing the actual question diagram so the refiner can ground which lines and angles are present and avoid unsupported assumptions about the figure.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "spatial_grounder",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null,
+        "query": "the blue-marked angle and the line segments that form that angle in the geometry diagram"
+      },
+      "purpose": "Identify, per candidate frame, the exact blue angle and its bounding rays so the refiner can anchor all later geometric claims to the correct angle in the correct frame.",
+      "depends_on": [
+        1
+      ]
+    },
+    {
+      "step": 3,
+      "tool": "ocr",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null
+      },
+      "purpose": "Read any visible labels, degree markings, point names, or textual annotations on the diagram that may explicitly determine the needed angle or clarify which square/diagonal relationships are given.",
+      "depends_on": [
+        1
+      ]
+    }
+  ],
+  "refinement_instructions": "Rewrite the trace around the actual visual evidence from the retrieved question-state frame, not the current ungrounded triangle narrative. First inspect the frame-level results from step 2 to determine which retrieved frame truly contains the blue angle in the original problem state; do not assume the top-ranked retrieval is correct without checking the returned frame-level grounding. Use step 3 to capture any explicit labels or degree values visible in that same frame. In the repaired trace, explicitly describe which lines form the blue angle and which nearby square sides/diagonals/intersections are visually present. Remove or narrow unsupported claims such as the step-4 assertion that a 30° angle and another acute angle partition a 45° corner unless the selected frame and OCR evidence actually show that partition. If the diagram directly supports a different angle relation than the original trace, update the reasoning and final answer accordingly. Preserve only claims that can be tied to the grounded frame; any unstated geometric relation that is not visible or textually labeled should not be asserted as fact."
+}

@@ -1,0 +1,40 @@
+{
+  "strategy": "Ground the original problem diagram directly from the video, then verify from the diagram that the orange fourth triangle is one of four interior triangles that exactly partition the 6×6 square. Use the same grounded frame to read the given area labels and confirm whether the subtraction-based solution structure is visually justified.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "<VIDEO_PATH>",
+        "query": "question screen showing the original square partitioned into four triangles, with one triangle shaded orange and side length or labels visible, before any worked-solution annotations are added",
+        "timestamps": null,
+        "num_frames": 3
+      },
+      "purpose": "Retrieve candidate frames of the unsolved geometry diagram rather than later explanation-state frames.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "ocr",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null
+      },
+      "purpose": "Read visible numbers and labels on the candidate diagram frames, including the square side length and any triangle area labels, to identify the correct problem frame.",
+      "depends_on": [1]
+    },
+    {
+      "step": 3,
+      "tool": "dense_captioner",
+      "arguments": {
+        "video_path": "<VIDEO_PATH>",
+        "start_time": 0,
+        "end_time": 20,
+        "granularity": "frame"
+      },
+      "purpose": "Provide concise visual descriptions around the likely problem-introduction interval so the refiner can verify the geometric arrangement: a square subdivided into four triangles with one shaded orange.",
+      "depends_on": []
+    }
+  ],
+  "refinement_instructions": "Use step 1 plus step 2 to select the candidate frame that is clearly the original question-state diagram: it should show the square, the four triangular regions, the orange-shaded target triangle, and the given numeric labels. Do not assume the first retrieved frame is correct; compare the OCR results and timestamps. Then use the chosen frame's visual structure, supplemented by step 3's caption descriptions if needed, to rewrite the trace so it explicitly states how the four triangles are arranged inside the square and that they form a complete partition of the 6×6 square with no extra regions. Replace the unsupported claim in steps 8–9 with a media-grounded justification tied to the diagram. Preserve the arithmetic only if the diagram evidence supports that the three known-area triangles and the orange triangle are exactly the four regions of the square. If the grounded diagram contradicts the assumed partition or the visible labels differ from the trace, update both the reasoning and the final answer accordingly. Cite frame-level evidence, not just a top-level retrieval summary."
+}

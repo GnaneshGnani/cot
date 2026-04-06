@@ -1,0 +1,30 @@
+{
+  "strategy": "Ground the geometry from the actual diagram rather than the unsupported text-only counting. First retrieve the problem diagram frame, then use chart/diagram interpretation to extract the structural area relationship between the two congruent hexagons and the orange region so the refiner can justify the ratio and the final numeric answer.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "<VIDEO_PATH>",
+        "query": "question screen showing the original geometry diagram with two congruent hexagons and an orange shaded region inside a rectangle, before any explanatory annotations or solution markings are added",
+        "timestamps": null,
+        "num_frames": 3
+      },
+      "purpose": "Retrieve candidate frames containing the original problem diagram in its unsolved state so downstream analysis reads the correct geometry image.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "chart_analyzer",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null,
+        "query": "interpret the geometry diagram by identifying how the rectangle is partitioned into repeating triangular cells and determine the area relationship between one hexagon and the orange shaded region"
+      },
+      "purpose": "Obtain tool-grounded structural evidence for the key geometric counting claim: how many equal subcells make up one hexagon versus the orange region, or an equivalent area ratio directly from the diagram.",
+      "depends_on": [
+        1
+      ]
+    }
+  ],
+  "refinement_instructions": "Rewrite the trace around the diagram evidence from the retrieved frame(s), not around unsupported hand-counting assertions. Inspect the frame-level results from Step 1 and use the Step 2 output only for the frame that clearly shows the original unsolved diagram. Replace the unsupported claims about '12 full triangles' and '6 full triangles plus 6 right triangles' unless Step 2 explicitly supports them; do not preserve those exact counts if the analyzer gives a different partition or ratio. Make the one-hexagon versus orange-region relationship explicit: because the two hexagons are congruent, if Step 2 reports a total area ratio involving both hexagons, divide that total evenly only if the diagram evidence clearly supports congruence/symmetry. Then compute the orange area from the verified ratio and update the final answer if the tool-grounded ratio contradicts the original answer. Cite the provenance in the repaired trace, e.g. that the diagram analysis indicates the relevant area ratio."}

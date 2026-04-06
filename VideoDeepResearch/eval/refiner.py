@@ -1,3 +1,4 @@
+import argparse
 import base64
 import fcntl
 import hashlib
@@ -88,6 +89,19 @@ def _norm_api_list(val, default_if_none):
     return [str(x).strip() for x in val if str(x).strip()]
 
 
+def _load_annotations(annotation_path: Path):
+    raw = annotation_path.read_text(encoding="utf-8").strip()
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        data = [json.loads(line) for line in raw.splitlines() if line.strip()]
+    if not isinstance(data, list):
+        raise ValueError(f"Expected a JSON array or JSONL file: {annotation_path}")
+    return data
+
+
 class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
     def __init__(self,
                  video_path: str,
@@ -95,7 +109,7 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
                  answer: str = None,
                  options: list = None,
                  dataset_folder: str = "./data",
-                 clip_duration: int = 5,
+                 clip_duration: int = 10,
                  use_subtitle: bool = True,
                  vlm_model_name: str = "Qwen/Qwen3-VL-8B-Instruct",
                  vlm_tensor_parallel_size: int = 1,
@@ -138,6 +152,10 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         self._setup_environment()
 
         self.vlm_model_name = vlm_model_name
+        self.local_vlm_model_name = (
+            str(os.environ.get("LOCAL_VLM_MODEL_NAME", "Qwen/Qwen3-VL-8B-Instruct")).strip()
+            or "Qwen/Qwen3-VL-8B-Instruct"
+        )
         self.vlm_tensor_parallel_size = int(vlm_tensor_parallel_size)
         self.planner_model_name = planner_model_name
         self.chart_model_name = chart_model_name
@@ -186,6 +204,8 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
 
         self._chart_model = None
         self._chart_tokenizer = None
+        self._dense_captioner_vlm_server = None
+        self._dense_captioner_processor = None
 
         self.refinement_debug_root = refiner_debug.resolve_debug_root(refinement_debug_root)
         self._refinement_debug_session_base = None
@@ -197,13 +217,18 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
 
         self.duration = self._get_video_duration()
         self._video_fps = self._get_video_fps()
+        self._dense_frame_fps_override = (
+            None if dense_frame_fps is None else float(dense_frame_fps)
+        )
         self.dense_frame_fps = (
-            float(dense_frame_fps) if dense_frame_fps is not None else float(self._video_fps)
+            self._dense_frame_fps_override
+            if self._dense_frame_fps_override is not None
+            else float(self._video_fps)
         )
 
-        self.retriever = self._initialize_retriever()
-
-        self._ensure_video_clip_embeddings()
+        self.retriever = None
+        self._retriever_init_error = None
+        self._ensure_retriever_ready()
 
         self.subtitles = self._extract_subtitles()
 
@@ -221,6 +246,27 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         self.answer = answer
         self.options = list(options or [])
         self.messages = []
+
+    def load_sample(self, video_path: str, question: str, answer: str = None, options: list = None):
+        self.video_path = str(video_path)
+        self.set_task(question, answer=answer, options=options)
+        self.duration = self._get_video_duration()
+        self._video_fps = self._get_video_fps()
+        self.dense_frame_fps = (
+            self._dense_frame_fps_override
+            if self._dense_frame_fps_override is not None
+            else float(self._video_fps)
+        )
+        self._ensure_retriever_ready()
+        self._ensure_video_clip_embeddings()
+        self.subtitles = self._extract_subtitles()
+
+        print("✓ Sample loaded")
+        print(f"  Video: {video_path}")
+        print(f"  Duration: {self.duration}s")
+        print(f"  Question: {question}")
+        if self.subtitles:
+            print(f"  Subtitles: {len(self.subtitles)} characters")
     
     def _setup_environment(self):
         os.environ["TOKENIZERS_PARALLELISM"] = "true"
@@ -231,21 +277,99 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         b = self.vlm_api_base
         return bool(b) and bool((b[0] or "").strip())
 
-    def _initialize_models(self):
-        if self._use_vlm_remote_api():
-            self.vlm_server = None
-            self.processor = None
-            print(f"✓ VLM tools use remote API (model={self.vlm_model_name})")
-            return
+    def _resolve_local_vlm_model_path(self, model_name: str) -> str:
+        raw_name = str(model_name or "").strip()
+        if not raw_name:
+            raise RuntimeError("LOCAL_VLM_MODEL_NAME is empty.")
 
-        print("Initializing VLM model...")
+        direct_path = Path(raw_name).expanduser()
+        if direct_path.exists():
+            return str(direct_path.resolve())
+
+        if "/" not in raw_name:
+            raise RuntimeError(
+                f"Local VLM model {raw_name!r} is neither an existing path nor a Hugging Face repo id."
+            )
+
+        hf_home = str(os.environ.get("HF_HOME", "")).strip()
+        if not hf_home:
+            raise RuntimeError(
+                f"HF_HOME is unset, so the local cache for {raw_name!r} cannot be resolved."
+            )
+
+        repo_dir = Path(hf_home) / "hub" / f"models--{raw_name.replace('/', '--')}"
+        snapshots_dir = repo_dir / "snapshots"
+        ref_main = repo_dir / "refs" / "main"
+        if ref_main.is_file():
+            snapshot_id = ref_main.read_text(encoding="utf-8").strip()
+            if snapshot_id:
+                snapshot_path = snapshots_dir / snapshot_id
+                if snapshot_path.is_dir():
+                    return str(snapshot_path.resolve())
+
+        if snapshots_dir.is_dir():
+            snapshot_dirs = sorted(p for p in snapshots_dir.iterdir() if p.is_dir())
+            if snapshot_dirs:
+                return str(snapshot_dirs[-1].resolve())
+
+        raise RuntimeError(
+            f"No local snapshot found for {raw_name!r} under {repo_dir}. "
+            "Download the model locally or set LOCAL_VLM_MODEL_NAME to a complete local path."
+        )
+
+    def _validate_local_vlm_model_path(self, resolved_path: str, requested_name: str) -> None:
+        model_dir = Path(resolved_path)
+
+        if not (model_dir / "config.json").is_file():
+            raise RuntimeError(
+                f"Local VLM model {requested_name!r} at {resolved_path} is missing config.json."
+            )
+
+        processor_files = ("processor_config.json", "preprocessor_config.json")
+        if not any((model_dir / name).is_file() for name in processor_files):
+            raise RuntimeError(
+                f"Local VLM model {requested_name!r} at {resolved_path} is missing processor files "
+                f"({', '.join(processor_files)})."
+            )
+
+        tokenizer_files = (
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "tokenizer.model",
+            "spiece.model",
+            "vocab.json",
+            "vocab.txt",
+            "merges.txt",
+        )
+        if not any((model_dir / name).is_file() for name in tokenizer_files):
+            raise RuntimeError(
+                f"Local VLM model {requested_name!r} at {resolved_path} is missing tokenizer assets "
+                f"({', '.join(tokenizer_files)})."
+            )
+
+        weight_globs = (
+            "*.safetensors",
+            "*.bin",
+            "*.pt",
+            "*.pth",
+            "*.gguf",
+        )
+        has_weights = any(any(model_dir.glob(pattern)) for pattern in weight_globs)
+        if not has_weights:
+            raise RuntimeError(
+                f"Local VLM model {requested_name!r} at {resolved_path} is missing model weights."
+            )
+
+    def _load_local_vlm_runtime(self, requested_model_name: str):
+        resolved_local_model = self._resolve_local_vlm_model_path(requested_model_name)
+        self._validate_local_vlm_model_path(resolved_local_model, requested_model_name)
 
         _mm_kw = {
             "min_pixels": 4 * 28 * 28,
             "max_pixels": 768 * 28 * 28,
         }
-        self.vlm_server = LLM(
-            model=self.vlm_model_name,
+        vlm_server = LLM(
+            model=resolved_local_model,
             gpu_memory_utilization=0.85,
             tensor_parallel_size=self.vlm_tensor_parallel_size,
             max_model_len=32768,
@@ -254,13 +378,119 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
             mm_processor_kwargs=_mm_kw,
         )
 
-        self.processor = AutoProcessor.from_pretrained(
-            self.vlm_model_name,
+        processor = AutoProcessor.from_pretrained(
+            resolved_local_model,
             use_fast=True,
+            local_files_only=True,
+            trust_remote_code=True,
         )
-        self.processor.tokenizer.padding_side = "left"
+        processor.tokenizer.padding_side = "left"
+        return vlm_server, processor, resolved_local_model
 
-        print(f"✓ VLM model loaded: {self.vlm_model_name}")
+    def _local_vlm_sampling_params(self) -> SamplingParams:
+        max_tokens_raw = str(os.environ.get("REFINER_VLM_MAX_TOKENS", "512")).strip()
+        try:
+            max_tokens = max(64, int(max_tokens_raw))
+        except Exception:
+            max_tokens = 512
+        return SamplingParams(temperature=0.0, max_tokens=max_tokens)
+
+    def _max_vlm_sequence_images(self) -> int:
+        raw = str(os.environ.get("REFINER_VLM_MAX_IMAGES", "32")).strip()
+        try:
+            value = int(raw)
+        except Exception:
+            value = 32
+        return max(1, value)
+
+    def _uniform_subsample_sequence(self, image_paths: list, timestamps: list, max_items: int):
+        image_paths = list(image_paths or [])
+        timestamps = list(timestamps or [])
+        total = len(image_paths)
+        if total <= max_items:
+            return image_paths, timestamps
+
+        if len(timestamps) < total:
+            timestamps = timestamps + [None] * (total - len(timestamps))
+
+        if max_items <= 1:
+            indices = [total // 2]
+        else:
+            indices = []
+            for i in range(max_items):
+                raw_idx = int(round(i * (total - 1) / float(max_items - 1)))
+                min_idx = indices[-1] + 1 if indices else 0
+                max_idx = total - (max_items - i)
+                idx = min(max(raw_idx, min_idx), max_idx)
+                indices.append(idx)
+
+        return [image_paths[i] for i in indices], [timestamps[i] for i in indices]
+
+    def _load_vlm_images(self, image_paths: list, timestamps: list):
+        valid_paths = []
+        valid_timestamps = []
+        image_data = []
+
+        for idx, img_path in enumerate(image_paths):
+            if not os.path.exists(img_path):
+                continue
+            try:
+                image = Image.open(img_path)
+                image.verify()
+                image = Image.open(img_path)
+
+                width, height = image.size
+                if max(width, height) > 768:
+                    if width > height:
+                        new_width = 768
+                        new_height = int(height * (768 / width))
+                    else:
+                        new_height = 768
+                        new_width = int(width * (768 / height))
+                    image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+                image_data.append(image)
+                valid_paths.append(img_path)
+                valid_timestamps.append(timestamps[idx] if idx < len(timestamps) else None)
+            except Exception as e:
+                print(f"Error loading image {img_path}: {e}")
+
+        return valid_paths, valid_timestamps, image_data
+
+    def _ensure_dense_captioner_local_runtime(self):
+        if self._dense_captioner_vlm_server is not None and self._dense_captioner_processor is not None:
+            return
+        if (
+            not self._use_vlm_remote_api()
+            and self.vlm_server is not None
+            and self.processor is not None
+            and self.vlm_model_name == self.local_vlm_model_name
+        ):
+            self._dense_captioner_vlm_server = self.vlm_server
+            self._dense_captioner_processor = self.processor
+            return
+
+        print(f"Initializing local dense-captioner VLM model: {self.local_vlm_model_name}")
+        server, processor, resolved_local_model = self._load_local_vlm_runtime(self.local_vlm_model_name)
+        self._dense_captioner_vlm_server = server
+        self._dense_captioner_processor = processor
+        print(
+            f"✓ Dense-captioner local VLM loaded: {self.local_vlm_model_name} "
+            f"({resolved_local_model})"
+        )
+
+    def _initialize_models(self):
+        if self._use_vlm_remote_api():
+            self.vlm_server = None
+            self.processor = None
+            print(f"✓ VLM tools use remote API (model={self.vlm_model_name})")
+            return
+
+        print(f"Initializing local VLM model: {self.vlm_model_name}")
+        self.vlm_server, self.processor, resolved_local_model = self._load_local_vlm_runtime(
+            self.vlm_model_name
+        )
+        print(f"✓ VLM model loaded locally: {self.vlm_model_name} ({resolved_local_model})")
 
     def _vlm_vision_api_call(self, prompt: str, image_paths: list) -> str:
         content = []
@@ -335,7 +565,7 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
             dataset = "demo"
             clip_duration = self.clip_duration
             retriever_type = "large"
-            clip_fps=2.0
+            clip_fps=1.0
         
         args = Args()
         clip_save_folder = f'{self.dataset_folder}/clips/{self.clip_duration}/'
@@ -347,8 +577,27 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         
         print(f"✓ Retriever initialized")
         return retriever
-    
+
+    def _ensure_retriever_ready(self) -> bool:
+        if self.retriever is not None:
+            return True
+        if self._retriever_init_error is not None:
+            return False
+
+        try:
+            self.retriever = self._initialize_retriever()
+            self._ensure_video_clip_embeddings()
+            self._retriever_init_error = None
+            return True
+        except Exception as e:
+            self.retriever = None
+            self._retriever_init_error = str(e)
+            print(f"Warning: Retriever unavailable: {e}")
+            return False
+
     def _ensure_video_clip_embeddings(self):
+        if self.retriever is None:
+            return
         folder_path = f'{self.dataset_folder}/embeddings/{self.clip_duration}/large'
         video_clip_paths, _ = self.retriever.calculate_video_clip_embedding(
             self.video_path, folder_path, total_duration=self.duration, pre_calculate=False
@@ -433,7 +682,9 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
 
         if self._use_openai_http(api_base):
             normalized_messages = []
-            for m in message:
+            for m in (message or []):
+                if not isinstance(m, dict):
+                    continue
                 content = m.get("content", "")
                 if isinstance(content, list):
                     content = "\n".join(
@@ -443,7 +694,13 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
                     )
                 if not isinstance(content, str):
                     content = str(content)
-                normalized_messages.append({"role": m["role"], "content": content})
+                normalized_messages.append(
+                    {"role": str(m.get("role", "user") or "user"), "content": content}
+                )
+
+            if not normalized_messages:
+                print(f"[TEXT2TEXT] ERROR: empty normalized messages for model {model_name}")
+                return ""
 
             pairs = list(zip(api_base, api_keys))
             if not pairs:
@@ -453,10 +710,17 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
             for base, key in pairs:
                 try:
                     client = OpenAI(base_url=base.strip(), api_key=key.strip())
-                    completion = client.chat.completions.create(
-                        model=model_name,
-                        messages=normalized_messages,
-                    )
+                    request_kwargs = {
+                        "model": model_name,
+                        "messages": normalized_messages,
+                    }
+                    try:
+                        completion = client.chat.completions.create(
+                            response_format={"type": "json_object"},
+                            **request_kwargs,
+                        )
+                    except Exception:
+                        completion = client.chat.completions.create(**request_kwargs)
                     out = completion.choices[0].message.content
                     return out if isinstance(out, str) else (out or "")
                 except Exception as e:
@@ -494,58 +758,88 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         return ''
     
     
-    def _batch_video2text(self, tasks: list):
+    def _batch_video2text(self, tasks: list, force_local: bool = False):
         results = []
 
         for prompt, image_paths, timestamps in tasks:
-            if self._use_vlm_remote_api():
+            if not force_local and self._use_vlm_remote_api():
                 result = self._vlm_vision_api_call(prompt, image_paths)
                 results.append(result)
                 continue
 
-            image_data = []
-            for img_path in image_paths:
-                if os.path.exists(img_path):
-                    try:
-                        image = Image.open(img_path)
-                        image.verify()
-                        image = Image.open(img_path)
+            if force_local:
+                self._ensure_dense_captioner_local_runtime()
+                active_server = self._dense_captioner_vlm_server
+                active_processor = self._dense_captioner_processor
+                active_model_name = self.local_vlm_model_name
+            else:
+                active_server = self.vlm_server
+                active_processor = self.processor
+                active_model_name = self.vlm_model_name
 
-                        width, height = image.size
-                        if max(width, height) > 768:
-                            if width > height:
-                                new_width = 768
-                                new_height = int(height * (768 / width))
-                            else:
-                                new_height = 768
-                                new_width = int(width * (768 / height))
-                            image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
-                        
-                        image_data.append(image)
-                    except Exception as e:
-                        print(f"Error loading image {img_path}: {e}")
-                        continue
-            
+            selected_paths = list(image_paths or [])
+            selected_timestamps = list(timestamps or [])
+            original_count = len(selected_paths)
+            max_sequence_images = self._max_vlm_sequence_images()
+            if len(selected_paths) > max_sequence_images:
+                print(
+                    f"Reducing multi-frame VLM request from {len(selected_paths)} to "
+                    f"{max_sequence_images} evenly spaced frames before generation."
+                )
+                selected_paths, selected_timestamps = self._uniform_subsample_sequence(
+                    selected_paths, selected_timestamps, max_sequence_images
+                )
+
+            valid_paths, valid_timestamps, image_data = self._load_vlm_images(
+                selected_paths, selected_timestamps
+            )
             if not image_data:
                 results.append("Error: No valid frames")
                 continue
 
-            content = [
-                {"type": "video", "video": image_paths},
-                {"type": "text", "text": prompt}
-            ]
+            sampling_params = self._local_vlm_sampling_params()
+            if len(image_data) > 1:
+                token_budget = max(1, 32768 - int(getattr(sampling_params, "max_tokens", 512) or 512) - 1024)
+                max_image_tokens = max(
+                    max(1, ((img.size[0] + 27) // 28) * ((img.size[1] + 27) // 28))
+                    for img in image_data
+                )
+                allowed_images = max(1, min(max_sequence_images, token_budget // max_image_tokens))
+                if len(valid_paths) > allowed_images:
+                    print(
+                        f"Reducing multi-frame VLM request from {len(valid_paths)} to "
+                        f"{allowed_images} evenly spaced frames to fit model context."
+                    )
+                    valid_paths, valid_timestamps = self._uniform_subsample_sequence(
+                        valid_paths, valid_timestamps, allowed_images
+                    )
+                    valid_paths, valid_timestamps, image_data = self._load_vlm_images(
+                        valid_paths, valid_timestamps
+                    )
+                    if not image_data:
+                        results.append("Error: No valid frames")
+                        continue
+
+            single_frame = len(image_data) == 1
+            content = []
+            if single_frame:
+                content.append({"type": "image", "image": valid_paths[0]})
+            else:
+                # Local Qwen3-VL expects real video metadata for `video` inputs.
+                # Our tool pipeline provides pre-extracted frames, so send them as
+                # an image sequence instead of a synthetic video payload.
+                for img_path in valid_paths:
+                    content.append({"type": "image", "image": img_path})
+            content.append({"type": "text", "text": prompt})
             messages = [{"role": "user", "content": content}]
 
-            formatted_prompt = self.processor.apply_chat_template(
+            formatted_prompt = active_processor.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True
             )
 
-            fps = timestamps[1] - timestamps[0] if len(timestamps) > 1 else 2.0
-            
             mm_kwargs = {
                 "min_pixels": 4 * 28 * 28,
                 "max_pixels": 768 * 28 * 28,
-                "fps": fps,
             }
             vlm_out = getattr(self, "_refinement_debug_vlm_outputs_dir", None)
             if vlm_out:
@@ -554,25 +848,29 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
                     vlm_out,
                     fname,
                     {
+                        "model": active_model_name,
                         "formatted_prompt": formatted_prompt,
-                        "video_frame_paths": list(image_paths),
-                        "timestamps": list(timestamps),
+                        "video_frame_paths": list(valid_paths),
+                        "timestamps": list(valid_timestamps),
+                        "input_mode": "image" if single_frame else "image_sequence",
                         "mm_processor_kwargs": dict(mm_kwargs),
                         "messages": messages,
+                        "original_image_count": original_count,
+                        "used_image_count": len(valid_paths),
                     },
                 )
 
-            outputs = self.vlm_server.generate(
+            outputs = active_server.generate(
                 {
                     "prompt": formatted_prompt,
-                    "multi_modal_data": {"video": image_data},
+                    "multi_modal_data": {"image": image_data[0]} if single_frame else {"image": image_data},
                     "mm_processor_kwargs": mm_kwargs,
                 },
-                SamplingParams(max_tokens=2048, temperature=0.01),
+                sampling_params=sampling_params,
                 use_tqdm=False,
             )
 
-            result = outputs[0].outputs[0].text.strip()
+            result = ((outputs[0].outputs[0].text or "") if outputs and outputs[0].outputs else "").strip()
             if vlm_out:
                 refiner_debug.write_text(vlm_out, "vlm_raw_output.txt", result)
             results.append(result)
@@ -585,6 +883,7 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         print("=" * 70 + "\n")
 
         trace_answer = (trace_answer or self._extract_trace_answer(trace_steps) or "").strip()
+        question_text = self._format_question_with_options()
         initial_trace = list(trace_steps)
         initial_answer = trace_answer
         current_trace = list(trace_steps)
@@ -598,7 +897,6 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
 
         final_verifier_raw = None
         final_verifier_output = None
-        verifier_passed = False
 
         debug_resolved = None
         if self.refinement_debug_root:
@@ -631,6 +929,7 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
             verifier_raw, verifier_output = self._call_verifier(
                 current_trace,
                 current_answer,
+                question_text=question_text,
                 iteration=iteration,
                 history=iteration_history,
                 max_iterations=max_iterations,
@@ -640,7 +939,6 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
 
             if isinstance(verifier_output, dict) and verifier_output.get("verdict") == "PASS":
                 print("[Verifier] PASS — stopping refinement loop.")
-                verifier_passed = True
                 break
 
             print("[Planner] Generating plan...")
@@ -694,17 +992,6 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
                 }
             )
 
-        if not verifier_passed and all_iterations and len(all_iterations) >= max_iterations:
-            print("[Verifier] Final post-refinement diagnosis...")
-            final_verifier_raw, final_verifier_output = self._call_verifier(
-                current_trace,
-                current_answer,
-                iteration=max_iterations,
-                history=iteration_history,
-                max_iterations=max_iterations,
-            )
-            print(f"\n[Final Verifier Output]\n{final_verifier_raw}\n")
-
         self._refinement_debug_iter_dir = None
 
         return {
@@ -725,86 +1012,141 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
 
 
 def main():
-    VIDEO_PATH = "/share/users/ghazi/cot/VideoDeepResearch/videos/5Jrv1h4AztM.mp4"
-    QUESTION = (
-        "How many fish would need to be added to the bucket on top of the container reading \"SSL\" at the time of the ice packing process to equal the numerical value of the weight of the gift of fishes that the narrator received?"
+    default_annotation_file = "/nfs-stor/ghazi.ahmad/videos/annotations.json"
+
+    def _env_list(name: str, fallback: str = ""):
+        raw = (os.environ.get(name, fallback) or "").strip()
+        if not raw:
+            return None
+        return [item.strip() for item in raw.split(",") if item.strip()]
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    OPTIONS = [
-        "A. 3",
-        "B. 4",
-        "C. 5",
-        "D. 1",
-        "E. 2",
-    ]
-    INITIAL_TRACE_STEPS = [
-        "I found that the ice packing process began at 04:55, when the man in the blue shirt used a tool to fill a bucket with ice, according to the audio at the same timestamp.",
-        "The bucket on top of the container reading \"SSL\" is visible in the background.",
-        "There is a single fish in the bucket.",
-        "I continued watching and listening to the video to find out the weight of the gift the narrator received.",
-        "I found that from 05:54 to 05:59, the narrator said that \"they gifted us a few fishes which was around 2 kilograms.\"",
-        "To reach the numerical value of the weight, 2 kilograms, and not the weight itself, 1 fish would need to be added to the bucket, since there is 1 fish in the bucket.",
-        "Therefore, 2 fishes would equal the numerical value of the weight, 2.",
-    ]
-    MAX_ITERATIONS = 1
-
-    if not os.path.exists(VIDEO_PATH):
-        print(f"Error: Video file not found: {VIDEO_PATH}")
-        print("Please update VIDEO_PATH in the script to point to a valid video file.")
-        return
-
-    demo = VideoQADemo(
-        video_path=VIDEO_PATH,
-        question=QUESTION,
-        options=OPTIONS,
-        dataset_folder="./data",
-        use_subtitle=False,
-        refinement_debug_root="./debug",
-        dense_frame_fps=1.0,
-        use_clip_retrieval=False,
-        dense_segment_half_width=0.5,
-        retrieval_top_k=10,
-        dense_frame_embed_batch=8,
-        vlm_model_name="Qwen/Qwen2.5-VL-7B-Instruct",
-        planner_model_name="gpt-5.4",
-        planner_api_base=["https://api.openai.com/v1"],
-        planner_api_keys=[os.environ["OPENAI_API_KEY"]],
-        chart_mode="vlm",
-        chart_model_name="Qwen/Qwen3-VL-8B-Instruct",
+    parser.add_argument(
+        "annotation_file",
+        nargs="?",
+        default=default_annotation_file,
+        help="Path to annotations.json (or JSONL)",
     )
+    parser.add_argument("--output", type=str, default=None, help="Output JSON path")
+    parser.add_argument("--max-iterations", type=int, default=2, help="Max refinement iterations per sample")
+    args = parser.parse_args()
 
-    result = demo.run_refinement_pipeline(INITIAL_TRACE_STEPS, max_iterations=MAX_ITERATIONS)
+    annotation_path = Path(args.annotation_file).expanduser().resolve()
+    if not annotation_path.exists():
+        raise SystemExit(f"Error: annotation file not found: {annotation_path}")
 
-    output_path = "refiner_demo_result.json"
-    record = {
-        "video_path": VIDEO_PATH,
-        "question": QUESTION,
-        "options": OPTIONS,
-        "initial_trace_steps": INITIAL_TRACE_STEPS,
-        "initial_trace_answer": result["initial_answer"],
-        "final_trace_steps": result["final_trace"]["steps"],
-        "final_answer": result["final_answer"],
-        "verifier_raw": result["verifier_raw"],
-        "verifier_output": result["verifier_output"],
-        "iteration_history": result["iteration_history"],
-        "all_iterations": result["all_iterations"],
-        "max_iterations": result["max_iterations"],
-    }
-    with open(output_path, 'w', encoding='utf-8') as f:
-        json.dump(record, f, ensure_ascii=False, indent=2)
+    output_path = (
+        Path(args.output).expanduser().resolve()
+        if args.output
+        else annotation_path.with_name("refiner_results.json")
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    data = _load_annotations(annotation_path)
+    if not data:
+        raise SystemExit(f"Error: no samples found in {annotation_path}")
+
+    openai_api_key = (os.environ.get("OPENAI_API_KEY") or os.environ.get("API_KEY") or "").strip()
+    planner_api_base = _env_list(
+        "PLANNER_API_BASE", os.environ.get("API_BASE_URL", "https://api.openai.com/v1")
+    )
+    planner_api_keys = _env_list("PLANNER_API_KEY", os.environ.get("API_KEY", openai_api_key))
+    if not planner_api_keys:
+        raise SystemExit("Error: set PLANNER_API_KEY, API_KEY, or OPENAI_API_KEY before running.")
+
+    vlm_api_base = _env_list("VLM_API_BASE")
+    vlm_api_keys = _env_list("VLM_API_KEY", openai_api_key) if vlm_api_base else None
+    if vlm_api_base and not vlm_api_keys:
+        raise SystemExit("Error: set VLM_API_KEY, API_KEY, or OPENAI_API_KEY before running.")
+    local_vlm_model_name = os.environ.get("LOCAL_VLM_MODEL_NAME", "Qwen/Qwen3-VL-8B-Instruct")
+    default_remote_vlm_model = os.environ.get("API_MODEL_NAME", "gpt-5.4")
+    if vlm_api_base:
+        vlm_model_name = os.environ.get("VLM_MODEL_NAME", default_remote_vlm_model)
+    else:
+        vlm_model_name = os.environ.get("VLM_MODEL_NAME", local_vlm_model_name)
+
+    chart_mode = os.environ.get("CHART_MODE", "vlm")
+    chart_model_name = os.environ.get("CHART_MODEL_NAME", vlm_model_name)
+    planner_model_name = os.environ.get("PLANNER_MODEL_NAME", os.environ.get("API_MODEL_NAME", "gpt-5.4"))
+
+    if vlm_api_base:
+        print(f"Using remote VLM API: model={vlm_model_name} base={vlm_api_base[0]}")
+    else:
+        print(f"Using local VLM model: {vlm_model_name}")
+
+    demo = None
+    results = []
+    dataset_folder = str((Path(_eval_dir) / "data").resolve())
+    debug_root = str((Path(_eval_dir) / "debug").resolve())
+
+    def _save_results():
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(results, f, ensure_ascii=False, indent=2)
+
+    for index, item in enumerate(data[9:], start=1):
+        record = dict(item)
+        video_path = str(item.get("video_path", "")).strip()
+        question = str(item.get("question", "")).strip()
+        options = list(item.get("options") or [])
+        trace_steps = item.get("initial_trace_steps") or []
+
+        print(f"\n[{index}/{len(data)}] {Path(video_path).name or '<missing video>'}")
+
+        if not video_path or not os.path.exists(video_path):
+            record["refiner_error"] = f"Video file not found: {video_path}"
+            results.append(record)
+            _save_results()
+            continue
+
+        if not isinstance(trace_steps, list) or not trace_steps:
+            record["refiner_error"] = "Missing initial_trace_steps"
+            results.append(record)
+            _save_results()
+            continue
+
+        try:
+            if demo is None:
+                demo = VideoQADemo(
+                    video_path=video_path,
+                    question=question,
+                    answer=item.get("answer"),
+                    options=options,
+                    dataset_folder=dataset_folder,
+                    use_subtitle=False,
+                    refinement_debug_root=debug_root,
+                    dense_frame_fps=1.0,
+                    use_clip_retrieval=False,
+                    dense_segment_half_width=0.5,
+                    retrieval_top_k=10,
+                    dense_frame_embed_batch=8,
+                    vlm_model_name=vlm_model_name,
+                    vlm_api_base=vlm_api_base,
+                    vlm_api_keys=vlm_api_keys,
+                    planner_model_name=planner_model_name,
+                    planner_api_base=planner_api_base,
+                    planner_api_keys=planner_api_keys,
+                    chart_mode=chart_mode,
+                    chart_model_name=chart_model_name,
+                )
+            else:
+                demo.load_sample(
+                    video_path=video_path,
+                    question=question,
+                    answer=item.get("answer"),
+                    options=options,
+                )
+
+            record["refiner_result"] = demo.run_refinement_pipeline(
+                trace_steps,
+                max_iterations=args.max_iterations,
+            )
+        except Exception as e:
+            record["refiner_error"] = str(e)
+
+        results.append(record)
+        _save_results()
 
     print(f"\n✓ Results saved to: {output_path}")
-
-    print("\n" + "="*70)
-    print("Summary")
-    print("="*70)
-    print(f"Question: {QUESTION}")
-    verifier_verdict = None if not isinstance(result["verifier_output"], dict) else result["verifier_output"].get("verdict")
-    n_iters = len(result.get("all_iterations") or [])
-    n_tools = sum(len(it.get("executed_tools") or []) for it in (result.get("all_iterations") or []))
-    print(f"Verifier Verdict: {verifier_verdict}")
-    print(f"Refinement iterations run: {n_iters}")
-    print(f"Total executed tool calls: {n_tools}")
-    print("="*70 + "\n")
 
 
 if __name__ == "__main__":

@@ -1,9 +1,10 @@
 import os
 
 # Default scratch layout (override with VDR_RUNTIME_ROOT or NEXUS_RUNTIME_ROOT).
-NEXUS_RUNTIME_ROOT_DEFAULT = "/share/data/drive_1/.cache"
-NEXUS_HF_HOME = os.path.join(NEXUS_RUNTIME_ROOT_DEFAULT, "huggingface")
-SHARED_HF_HOME_DEFAULT = "/share/data/drive_1/huggingface_cache"
+NEXUS_RUNTIME_ROOT_DEFAULT = "/nfs-stor/ghazi.ahmad/.cache"
+NEXUS_HF_HOME = os.path.join(NEXUS_RUNTIME_ROOT_DEFAULT, "HF_HOME")
+SHARED_HF_HOME_DEFAULT = "/nfs-stor/ghazi.ahmad/HF_HOME"
+
 
 
 def _runtime_root() -> str:
@@ -31,6 +32,10 @@ def ensure_hf_cache_env():
     hub = os.path.join(root, "hub")
     os.makedirs(hub, exist_ok=True)
     os.environ.setdefault("HF_HUB_CACHE", hub)
+    os.environ.setdefault("HUGGINGFACE_HUB_CACHE", hub)
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+    os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
 
     paddle = os.path.join(rr, "paddlex")
     os.environ.setdefault("PADDLE_PDX_CACHE_HOME", paddle)
