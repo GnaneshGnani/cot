@@ -1,0 +1,52 @@
+{
+  "strategy": "First establish the actual interval by locating the repeated on-screen place name through a chronological frame sweep plus OCR, then transcribe only that bounded interval and compare the transcript against all four answer options.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "<VIDEO_PATH>",
+        "query": null,
+        "timestamps": [
+          0,
+          5,
+          10,
+          15,
+          20,
+          25,
+          30
+        ],
+        "num_frames": 7
+      },
+      "purpose": "Sample frames in chronological order to find candidate moments where the same place name appears on screen, without relying on the unverified token from the trace or on relevance-ranked retrieval.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "ocr",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null
+      },
+      "purpose": "Read the on-screen text in the sampled frames to identify the repeated place name and determine the first and second occurrences by timestamp.",
+      "depends_on": [
+        1
+      ]
+    },
+    {
+      "step": 3,
+      "tool": "asr",
+      "arguments": {
+        "video_path": "<VIDEO_PATH>",
+        "start_time": "<STEP_1:frames[0].timestamp>",
+        "end_time": "<STEP_1:frames[5].timestamp>"
+      },
+      "purpose": "Get the speech transcript across the broad sampled interval that contains the first two place-name occurrences, so the refiner can select the exact sub-interval after inspecting OCR results and check which answer-choice phrases are mentioned.",
+      "depends_on": [
+        1,
+        2
+      ]
+    }
+  ],
+  "refinement_instructions": "Use Step 2, not the original trace, to identify which sampled timestamps contain the same place name and which are the first and second occurrences in chronological order. Do not keep the unsupported claims that the place name is specifically 'Alasa' or that the occurrences are at 0:00 and 0:25 unless Step 2 directly shows that. Then use Step 3 transcript only for the speech that falls between those two OCR-verified occurrence times; compare all four options explicitly against the transcript rather than asserting only one missing phrase. Remove the unsupported claim that there are 5 dialogue segments unless the ASR output directly supports that count. In the rewritten trace, attribute observations to tools explicitly, e.g. OCR shows the repeated place name at certain sampled timestamps, and ASR shows which option texts are or are not spoken in the interval. If the exact option wording appears only approximately, explain the closest paraphrase match before choosing the final answer. Update the final answer if the verified transcript contradicts the original answer."
+}

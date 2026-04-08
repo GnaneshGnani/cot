@@ -59,6 +59,9 @@ class LanguageBind(nn.Module):
         self.modality_proj = {}
         self.modality_scale = {}
         self.modality_config = {}
+        self.text_encoder = {}
+        self.text_proj = {}
+        self.default_text_modality = None
         for k, v in clip_type.items():
             if not os.path.exists(v): 
                 pretrained_ckpt = v
@@ -70,8 +73,15 @@ class LanguageBind(nn.Module):
             self.modality_proj[k] = model.visual_projection
             self.modality_scale[k] = model.logit_scale
             self.modality_config[k] = model.config
-        self.modality_encoder['language'] = model.text_model
-        self.modality_proj['language'] = model.text_projection
+            self.text_encoder[k] = model.text_model
+            self.text_proj[k] = model.text_projection
+            if self.default_text_modality is None:
+                self.default_text_modality = k
+
+        self.text_encoder = nn.ModuleDict(self.text_encoder)
+        self.text_proj = nn.ModuleDict(self.text_proj)
+        self.modality_encoder['language'] = self.text_encoder[self.default_text_modality]
+        self.modality_proj['language'] = self.text_proj[self.default_text_modality]
 
         self.modality_encoder = nn.ModuleDict(self.modality_encoder)
         self.modality_proj = nn.ModuleDict(self.modality_proj)
@@ -79,11 +89,22 @@ class LanguageBind(nn.Module):
     def forward(self, inputs):
         outputs = {}
         for key, value in inputs.items():
-            value = self.modality_encoder[key](**value)[1]
-            value = self.modality_proj[key](value)
+            if key == 'language':
+                text_key = self.default_text_modality
+            elif key.startswith('language:'):
+                text_key = key.split(':', 1)[1]
+            else:
+                text_key = None
+
+            if text_key is not None:
+                value = self.text_encoder[text_key](**value)[1]
+                value = self.text_proj[text_key](value)
+            else:
+                value = self.modality_encoder[key](**value)[1]
+                value = self.modality_proj[key](value)
             value = value / value.norm(p=2, dim=-1, keepdim=True)
             if self.use_temp:
-                if key != 'language':
+                if text_key is None:
                     value = value * self.modality_scale[key].exp()
             outputs[key] = value
         return outputs
@@ -92,4 +113,3 @@ def to_device(x, device):
     # print(x) 
     out_dict = {k: v.to(device) for k, v in x.items()}
     return out_dict
-

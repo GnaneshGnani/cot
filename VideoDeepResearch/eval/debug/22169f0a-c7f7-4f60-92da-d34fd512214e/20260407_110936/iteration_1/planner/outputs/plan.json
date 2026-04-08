@@ -1,0 +1,31 @@
+{
+  "strategy": "Ground the solution directly from the problem diagram: first retrieve the frame showing the original geometry question, then use a chart/diagram-reading tool to extract the structural area relationship between the orange region and the hexagons. This avoids relying on the trace’s unsupported triangle counts unless the diagram analysis explicitly supports them.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "<VIDEO_PATH>",
+        "query": "original geometry problem diagram with two hexagons and an orange shaded region inside a rectangle, before any worked-solution annotations are added",
+        "timestamps": null,
+        "num_frames": 3
+      },
+      "purpose": "Retrieve candidate frames of the actual question diagram in its unsolved state so downstream analysis reads the correct figure rather than a later explanation frame.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "chart_analyzer",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null,
+        "query": "geometry diagram showing two hexagons and an orange shaded region inside a rectangle; determine the area relationship or area ratio between one hexagon and the orange shaded region"
+      },
+      "purpose": "Interpret the diagram structure and extract the ratio needed to compute the orange area from the given hexagon area.",
+      "depends_on": [
+        1
+      ]
+    }
+  ],
+  "refinement_instructions": "Rewrite the trace so the decisive geometric claim is attributed to the diagram evidence from the retrieved question-state frame and the chart_analyzer output. Replace or narrow the unsupported 'counting the grid cells shows ... 12 triangles ... 9 triangles' claim unless chart_analyzer explicitly supports that exact decomposition. The repaired trace should state the verified area relationship between one hexagon and the orange region, then compute the orange area from the given hexagon area of 24. If the analyzed ratio differs from the original trace, update both the reasoning and the final answer accordingly. When using the frame retrieval output, inspect the returned candidate frames and rely on the frame-level result corresponding to the original unsolved diagram, not an arbitrary ranked frame."
+}

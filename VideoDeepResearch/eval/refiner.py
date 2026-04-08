@@ -148,6 +148,58 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         self.dense_segment_half_width = float(dense_segment_half_width)
         self.retrieval_top_k = int(retrieval_top_k)
         self.dense_frame_embed_batch = max(1, int(dense_frame_embed_batch))
+        self.temporal_grounder_backend = (
+            str(os.getenv("TEMPORAL_GROUNDER_BACKEND", "qwen")).strip().lower() or "qwen"
+        )
+        self.temporal_grounder_model_name = (
+            str(
+                os.getenv(
+                    "TEMPORAL_GROUNDER_MODEL_NAME",
+                    "Qwen/Qwen3-VL-Embedding-2B",
+                )
+            ).strip()
+            or "Qwen/Qwen3-VL-Embedding-2B"
+        )
+        self.temporal_grounder_reranker_model_name = (
+            str(
+                os.getenv(
+                    "TEMPORAL_GROUNDER_RERANKER_MODEL_NAME",
+                    "Qwen/Qwen3-VL-Reranker-2B",
+                )
+            ).strip()
+            or "Qwen/Qwen3-VL-Reranker-2B"
+        )
+        self.temporal_grounder_sample_fps = max(
+            0.1,
+            float(os.getenv("TEMPORAL_GROUNDER_SAMPLE_FPS", "1.0") or 1.0),
+        )
+        self.temporal_grounder_max_frames = max(
+            1,
+            int(os.getenv("TEMPORAL_GROUNDER_MAX_FRAMES", "32") or 32),
+        )
+        self.temporal_grounder_batch_size = max(
+            1,
+            int(
+                os.getenv(
+                    "TEMPORAL_GROUNDER_BATCH_SIZE",
+                    "4",
+                )
+                or 4
+            ),
+        )
+        self.temporal_grounder_stride_seconds = max(
+            0.1,
+            float(
+                os.getenv(
+                    "TEMPORAL_GROUNDER_STRIDE_SECONDS",
+                    str(max(1.0, float(self.clip_duration) / 2.0)),
+                )
+                or max(1.0, float(self.clip_duration) / 2.0)
+            ),
+        )
+        self._temporal_grounder_video_info_cache = None
+        self._temporal_grounder_embedder_class = None
+        self._temporal_grounder_reranker_class = None
 
         self._setup_environment()
 
@@ -250,6 +302,7 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
     def load_sample(self, video_path: str, question: str, answer: str = None, options: list = None):
         self.video_path = str(video_path)
         self.set_task(question, answer=answer, options=options)
+        self._temporal_grounder_video_info_cache = None
         self.duration = self._get_video_duration()
         self._video_fps = self._get_video_fps()
         self.dense_frame_fps = (
@@ -1083,7 +1136,7 @@ def main():
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(results, f, ensure_ascii=False, indent=2)
 
-    for index, item in enumerate(data[9:], start=1):
+    for index, item in enumerate(data[:1], start=1):
         record = dict(item)
         video_path = str(item.get("video_path", "")).strip()
         question = str(item.get("question", "")).strip()

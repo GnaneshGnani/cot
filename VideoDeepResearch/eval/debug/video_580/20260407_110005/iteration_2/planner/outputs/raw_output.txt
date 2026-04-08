@@ -1,0 +1,29 @@
+{
+  "strategy": "Reuse the already-localized rabbit-introduction frames and add one spatial grounding step that explicitly identifies the rabbit and the nameplate on the rabbit's right side. This resolves which of the two OCR-read labels belongs to the asked position, allowing the trace to determine whether any answer option matches.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "video",
+        "timestamps": [66.0, 68.0, 80.0],
+        "query": null,
+        "num_frames": 3
+      },
+      "purpose": "Re-anchor the exact candidate frames already identified for the rabbit introduction scene so downstream spatial grounding can operate on the full frame bundle without assuming which frame is decisive.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "spatial_grounder",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null,
+        "query": "the rabbit and the printed animal nameplate on the rabbit's right-hand side"
+      },
+      "purpose": "Directly ground the rabbit and the asked right-side nameplate in each candidate frame, so the refiner can map the grounded right-side sign to the previously OCR-read text by position/bbox instead of guessing between adjacent labels.",
+      "depends_on": [1]
+    }
+  ],
+  "refinement_instructions": "Keep the earlier OCR-backed fact that the visible adjacent nameplates read 'ZEBRAXTON' and 'ZEBROWSKI'; do not discard that evidence. Use the new spatial_grounder frame-level outputs to determine, in the relevant frame(s), which detected nameplate is spatially on the rabbit's right side, reconciling by relative position/bbox with the earlier OCR detections. Replace the unsupported claim that the right-side plate is 'ZEBROWSKI' unless the new grounding specifically supports it. If the grounded right-side nameplate corresponds to one OCR label, state that exact text and then compare it to the options A-D. If neither OCR text matches any option, the repaired trace should explicitly say that the provided options are not supported by the visual evidence rather than forcing an answer. Cite frame-level grounding results, not a top-level summary, because the relevant frame among 66s/68s/80s must be selected based on where both the rabbit and the sign are clearly grounded."
+}

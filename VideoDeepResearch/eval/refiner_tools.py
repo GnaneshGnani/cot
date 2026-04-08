@@ -1,5 +1,7 @@
 import base64
+import gc
 import io
+import importlib.util
 import json
 import os
 import re
@@ -8,7 +10,7 @@ import subprocess
 import sys
 import tempfile
 import wave
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 _eval_dir = os.path.dirname(os.path.abspath(__file__))
@@ -22,6 +24,7 @@ hf_cache.ensure_hf_cache_env()
 import numpy as np
 import torch
 import torchvision.transforms as T
+import cv2
 try:
     import whisperx
 except Exception:
@@ -51,6 +54,7 @@ import pytesseract
 from PIL import Image
 from torchvision.transforms.functional import InterpolationMode
 from transformers import AutoModel, AutoTokenizer
+from huggingface_hub import snapshot_download
 
 import refiner_debug
 from refiner_utils import openai_chat_completion_limit_kwargs, openai_chat_temperature_kwargs
@@ -2061,6 +2065,370 @@ class RefinerToolsMixin:
             total_duration=self.duration,
         )
 
+    def _temporal_grounder_inference_context(self):
+        use_bf16 = (
+            torch.cuda.is_available()
+            and hasattr(torch.cuda, "is_bf16_supported")
+            and torch.cuda.is_bf16_supported()
+        )
+        return torch.autocast(device_type="cuda", dtype=torch.bfloat16) if use_bf16 else nullcontext()
+
+    def _temporal_grounder_model_kwargs(self):
+        use_bf16 = (
+            torch.cuda.is_available()
+            and hasattr(torch.cuda, "is_bf16_supported")
+            and torch.cuda.is_bf16_supported()
+        )
+        return {"torch_dtype": torch.bfloat16} if use_bf16 else {}
+
+    def _release_temporal_grounder_runtime(self, runtime):
+        if runtime is None:
+            return
+        model = getattr(runtime, "model", None)
+        if isinstance(model, torch.nn.Module):
+            try:
+                model.cpu()
+            except Exception:
+                pass
+        for attr in ("model", "processor", "tokenizer"):
+            if hasattr(runtime, attr):
+                try:
+                    setattr(runtime, attr, None)
+                except Exception:
+                    pass
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    def _resolve_temporal_grounder_model_dir(self, model_name: str) -> str:
+        raw = str(model_name or "").strip()
+        if not raw:
+            raise RuntimeError("temporal grounder model name is empty")
+
+        path = Path(raw).expanduser()
+        if path.exists():
+            return str(path.resolve())
+
+        cached = self._resolve_hf_snapshot(raw)
+        if cached:
+            return cached
+
+        return snapshot_download(repo_id=raw)
+
+    def _load_temporal_grounder_helper_class(
+        self,
+        model_dir: str,
+        script_name: str,
+        class_name: str,
+        cache_attr: str,
+        patch_sample_frames: bool = False,
+    ):
+        cached = getattr(self, cache_attr, None)
+        if cached is not None:
+            return cached
+
+        module_path = Path(model_dir) / "scripts" / script_name
+        if not module_path.exists():
+            raise RuntimeError(f"Missing helper script: {module_path}")
+
+        spec = importlib.util.spec_from_file_location(
+            f"refiner_{class_name.lower()}_{abs(hash(str(module_path)))}",
+            str(module_path),
+        )
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"Could not load helper script: {module_path}")
+
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        klass = getattr(module, class_name)
+        if patch_sample_frames and not hasattr(klass, "_sample_frames"):
+            klass._sample_frames = staticmethod(module.sample_frames)
+        setattr(self, cache_attr, klass)
+        return klass
+
+    def _temporal_grounder_video_info(self) -> dict:
+        cached = getattr(self, "_temporal_grounder_video_info_cache", None)
+        if isinstance(cached, dict) and cached.get("video_path") == self.video_path:
+            return cached
+
+        cap = cv2.VideoCapture(str(self.video_path))
+        if not cap.isOpened():
+            raise RuntimeError(f"Could not open video: {self.video_path}")
+
+        video_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        cap.release()
+
+        if video_fps <= 0:
+            video_fps = max(1.0, float(getattr(self, "_video_fps", 24.0) or 24.0))
+        if frame_count <= 0:
+            frame_count = max(1, int(round(float(self.duration) * video_fps)))
+
+        info = {
+            "video_path": self.video_path,
+            "video_fps": video_fps,
+            "frame_count": frame_count,
+            "duration": float(frame_count) / float(video_fps),
+        }
+        self._temporal_grounder_video_info_cache = info
+        return info
+
+    def _temporal_grounder_windows(self) -> list:
+        info = self._temporal_grounder_video_info()
+        duration = float(info["duration"])
+        clip_seconds = max(0.1, float(self.clip_duration))
+        stride_seconds = max(0.1, float(getattr(self, "temporal_grounder_stride_seconds", clip_seconds / 2.0)))
+
+        starts = []
+        t = 0.0
+        while t < duration:
+            starts.append(round(t, 3))
+            t += stride_seconds
+        last = max(0.0, duration - clip_seconds)
+        if not starts or abs(starts[-1] - last) > 1e-3:
+            starts.append(round(last, 3))
+
+        windows = []
+        for start in sorted(set(starts)):
+            end = min(start + clip_seconds, duration)
+            if end - start > 0.05:
+                windows.append({"start": start, "end": end})
+        return windows
+
+    def _temporal_grounder_frames_per_window(self) -> int:
+        sample_fps = max(0.1, float(getattr(self, "temporal_grounder_sample_fps", 1.0) or 1.0))
+        max_frames = max(1, int(getattr(self, "temporal_grounder_max_frames", 64) or 64))
+        return min(max_frames, max(1, int(round(float(self.clip_duration) * sample_fps))))
+
+    def _temporal_grounder_sample_window_frames(
+        self,
+        start: float,
+        end: float,
+        num_frames: int,
+    ) -> list:
+        info = self._temporal_grounder_video_info()
+        cap = cv2.VideoCapture(str(self.video_path))
+        if not cap.isOpened():
+            raise RuntimeError(f"Could not open video: {self.video_path}")
+
+        span = max(float(end) - float(start), 1e-3)
+        times = [float(start) + (i + 0.5) * span / float(num_frames) for i in range(num_frames)]
+        frames = []
+        last_frame = None
+
+        for t in times:
+            frame_idx = max(
+                0,
+                min(
+                    int(info["frame_count"]) - 1,
+                    int(round(float(t) * float(info["video_fps"]))),
+                ),
+            )
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            ok, frame = cap.read()
+            if ok:
+                last_frame = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            if last_frame is not None:
+                frames.append(last_frame.copy())
+
+        cap.release()
+
+        if not frames:
+            raise RuntimeError(f"Could not decode frames for window {start:.2f}-{end:.2f}s")
+        while len(frames) < num_frames:
+            frames.append(frames[-1].copy())
+        return frames
+
+    def _temporal_grounder_cache_paths(self):
+        video_id = Path(self.video_path).stem
+        cache_dir = Path(self.dataset_folder) / "temporal_grounder_cache" / video_id
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        return cache_dir / "clip_embeddings.pt", cache_dir / "clips.json"
+
+    def _run_clip_temporal_grounder(self, query: str, top_k: int, warning: str | None = None) -> dict:
+        segments = []
+        clip_warning = warning
+
+        if query:
+            try:
+                matches = self._informative_clip_retrieval(query, top_k)
+                for clip_path, score in matches:
+                    segment = self._clip_path_to_segment(clip_path, score)
+                    if segment is not None:
+                        segments.append(segment)
+            except Exception as e:
+                print(f"  clip temporal grounder error: {e}")
+                clip_warning = str(e)
+
+        retriever_error = getattr(self, "_retriever_init_error", None)
+        if clip_warning is None and retriever_error and not segments:
+            clip_warning = f"clip retriever unavailable: {retriever_error}"
+
+        result = {
+            "query": query,
+            "segments": sorted(
+                segments,
+                key=lambda x: (-float(x.get("confidence", 0.0) or 0.0), float(x.get("start", 0.0))),
+            ),
+            "video_duration": float(self.duration),
+            "retrieval_backend": "clip",
+        }
+        if clip_warning:
+            result["warning"] = clip_warning
+        return result
+
+    def _run_qwen_temporal_grounder(self, query: str, top_k: int) -> dict:
+        def _as_tensor(x):
+            if isinstance(x, torch.Tensor):
+                return x.detach().cpu().float()
+            return torch.tensor(x, dtype=torch.float32)
+
+        model_dir = self._resolve_temporal_grounder_model_dir(
+            getattr(self, "temporal_grounder_model_name", "Qwen/Qwen3-VL-Embedding-2B")
+        )
+        reranker_dir = self._resolve_temporal_grounder_model_dir(
+            getattr(self, "temporal_grounder_reranker_model_name", "Qwen/Qwen3-VL-Reranker-2B")
+        )
+        Embedder = self._load_temporal_grounder_helper_class(
+            model_dir,
+            "qwen3_vl_embedding.py",
+            "Qwen3VLEmbedder",
+            "_temporal_grounder_embedder_class",
+        )
+        Reranker = self._load_temporal_grounder_helper_class(
+            reranker_dir,
+            "qwen3_vl_reranker.py",
+            "Qwen3VLReranker",
+            "_temporal_grounder_reranker_class",
+            patch_sample_frames=True,
+        )
+
+        windows = self._temporal_grounder_windows()
+        if not windows:
+            return {
+                "query": query,
+                "segments": [],
+                "initial_segments": [],
+                "reranked_segments": [],
+                "video_duration": float(self.duration),
+                "retrieval_backend": "qwen_embed_rerank",
+                "warning": "no temporal windows were created",
+            }
+
+        frames_per_window = self._temporal_grounder_frames_per_window()
+        batch_size = max(1, int(getattr(self, "temporal_grounder_batch_size", 8) or 8))
+        model_kwargs = self._temporal_grounder_model_kwargs()
+        embeddings_path, clips_path = self._temporal_grounder_cache_paths()
+        cache_meta = {
+            "video_path": str(self.video_path),
+            "model_dir": str(model_dir),
+            "clip_seconds": float(self.clip_duration),
+            "stride_seconds": float(getattr(self, "temporal_grounder_stride_seconds", max(1.0, float(self.clip_duration) / 2.0))),
+            "sample_fps": float(getattr(self, "temporal_grounder_sample_fps", 1.0)),
+            "frames_per_window": int(frames_per_window),
+            "dtype": "bfloat16" if bool(model_kwargs) else "float32",
+        }
+
+        clip_embeddings = None
+        if embeddings_path.exists() and clips_path.exists():
+            cached = json.loads(clips_path.read_text(encoding="utf-8"))
+            if all(cached.get(k) == v for k, v in cache_meta.items()):
+                windows = cached.get("clips") or windows
+                clip_embeddings = torch.load(embeddings_path, map_location="cpu")
+
+        embedder = Embedder(
+            model_name_or_path=str(model_dir),
+            num_frames=frames_per_window,
+            max_frames=frames_per_window,
+            **model_kwargs,
+        )
+        if clip_embeddings is None:
+            embs = []
+            for i in range(0, len(windows), batch_size):
+                batch_windows = windows[i:i + batch_size]
+                batch = [
+                    {"video": self._temporal_grounder_sample_window_frames(seg["start"], seg["end"], frames_per_window)}
+                    for seg in batch_windows
+                ]
+                with self._temporal_grounder_inference_context():
+                    embs.append(_as_tensor(embedder.process(batch)))
+            clip_embeddings = torch.cat(embs, dim=0)
+            torch.save(clip_embeddings, embeddings_path)
+            clips_path.write_text(json.dumps({**cache_meta, "clips": windows}, indent=2), encoding="utf-8")
+
+        with self._temporal_grounder_inference_context():
+            query_embedding = _as_tensor(embedder.process([{"text": query, "instruction": "Retrieve video clips relevant to the user's query."}]))
+
+        scores = (query_embedding @ clip_embeddings.T).squeeze(0)
+        top_k = min(int(top_k), len(windows))
+        top_scores, top_indices = torch.topk(scores, k=top_k)
+        initial_segments = [
+            {
+                "start": float(windows[idx]["start"]),
+                "end": float(windows[idx]["end"]),
+                "confidence": float(score),
+                "embed_score": float(score),
+            }
+            for score, idx in zip(top_scores.tolist(), top_indices.tolist())
+        ]
+
+        self._release_temporal_grounder_runtime(embedder)
+        embedder = None
+
+        reranker = Reranker(
+            model_name_or_path=str(reranker_dir),
+            num_frames=frames_per_window,
+            max_frames=frames_per_window,
+            **model_kwargs,
+        )
+        candidates = []
+        for embed_score, idx in zip(top_scores.tolist(), top_indices.tolist()):
+            seg = dict(windows[idx])
+            seg["embed_score"] = float(embed_score)
+            seg["video"] = self._temporal_grounder_sample_window_frames(
+                float(seg["start"]),
+                float(seg["end"]),
+                frames_per_window,
+            )
+            candidates.append(seg)
+
+        with self._temporal_grounder_inference_context():
+            rerank_scores = reranker.process(
+                {
+                    "instruction": "Retrieve video clips relevant to the user's query.",
+                    "query": {"text": query},
+                    "documents": [{"video": seg["video"]} for seg in candidates],
+                }
+            )
+
+        self._release_temporal_grounder_runtime(reranker)
+        reranker = None
+
+        reranked_segments = []
+        for seg, rerank_score in zip(candidates, rerank_scores):
+            reranked_segments.append(
+                {
+                    "start": float(seg["start"]),
+                    "end": float(seg["end"]),
+                    "confidence": float(rerank_score),
+                    "embed_score": float(seg["embed_score"]),
+                    "rerank_score": float(rerank_score),
+                }
+            )
+        reranked_segments.sort(
+            key=lambda x: (-float(x.get("confidence", 0.0) or 0.0), float(x.get("start", 0.0))),
+        )
+
+        return {
+            "query": query,
+            "segments": reranked_segments,
+            "initial_segments": initial_segments,
+            "reranked_segments": reranked_segments,
+            "video_duration": float(self.duration),
+            "retrieval_backend": "qwen_embed_rerank",
+        }
+
     def _execute_refine_tool_call(self, tool_name: str, arguments: dict) -> str:
         handlers = {
             "temporal_grounder": self._process_temporal_grounder,
@@ -2346,37 +2714,22 @@ class RefinerToolsMixin:
         print("\n[Tool] Temporal Grounder")
         results = []
         topk = int(getattr(self, "retrieval_top_k", 5))
+        backend = str(getattr(self, "temporal_grounder_backend", "qwen") or "qwen").strip().lower()
 
         for arguments in calls:
             query = str(arguments.get("query", "")).strip()
-            segments = []
+            result = None
             warning = None
-            if query:
+            if query and backend in {"qwen", "qwen_embed_rerank"}:
                 try:
-                    matches = self._informative_clip_retrieval(query, topk)
-                    for clip_path, score in matches:
-                        segment = self._clip_path_to_segment(clip_path, score)
-                        if segment is not None:
-                            segments.append(segment)
+                    result = self._run_qwen_temporal_grounder(query, topk)
                 except Exception as e:
-                    print(f"  Error: {e}")
-                    warning = str(e)
+                    print(f"  qwen temporal grounder error: {e}")
+                    warning = f"qwen temporal grounder error: {e}"
 
-            retriever_error = getattr(self, "_retriever_init_error", None)
-            if warning is None and retriever_error and not segments:
-                warning = f"clip retriever unavailable: {retriever_error}"
+            if result is None:
+                result = self._run_clip_temporal_grounder(query, topk, warning=warning)
 
-            result = {
-                "query": query,
-                "segments": sorted(
-                    segments,
-                    key=lambda x: (-float(x.get("confidence", 0.0) or 0.0), float(x.get("start", 0.0))),
-                ),
-                "video_duration": float(self.duration),
-                "retrieval_backend": "clip",
-            }
-            if warning:
-                result["warning"] = warning
             results.append(self._format_refine_tool_result("temporal_grounder", arguments, result))
 
         return "".join(results)

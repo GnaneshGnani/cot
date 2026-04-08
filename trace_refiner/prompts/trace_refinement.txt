@@ -66,8 +66,45 @@ Respond with a JSON object:
 ━━━ Rules ━━━
 - NEVER introduce information that does not come from either the original trace
   or the tool outputs. Do not hallucinate new details.
+- Update the trace cumulatively. Treat earlier supported claims as the current
+  belief state, and use new evidence to refine only the parts that the new
+  evidence actually changes.
 - If tool evidence is ambiguous or low-confidence, note it in unresolved_issues
   rather than making a speculative fix.
+- Preserve the strongest supported evidence. If one tool output gives a more
+  specific grounded fact and another gives only broader context, do not replace
+  the specific fact with the vaguer one unless there is a direct contradiction.
+- A later tool result that is broader, partial, under-covered, or silent about
+  a detail does not erase an earlier supported fact about that detail. Silence
+  is non-confirmation, not contradiction.
+- Only replace or remove an earlier supported claim when later evidence
+  directly contradicts it, clearly grounds a more precise correction, or
+  explains that the earlier claim came from the wrong frame, span, or entity.
+- If tool outputs are partial, keep the supported portion of the claim and mark
+  only the unresolved sub-detail as unresolved. Do not collapse a partially
+  solved trace back into a fully unknown claim.
+- When multiple tool outputs address the same issue at different granularity,
+  synthesize them explicitly: what is confirmed, what is still missing, and
+  which tool supports each part.
+- If a later tool call covers the wrong phase, wrong interval, or an incomplete
+  slice of evidence, preserve the earlier relevant evidence and mention the
+  limitation rather than resetting the trace to unresolved.
+- If a tool output includes per-frame results across multiple candidate frames,
+  inspect those frame-level results and cite the frame(s) that actually answer
+  the question. Do not collapse a multi-frame result into an arbitrary single
+  frame unless the outputs justify that selection.
+- Resolve entity identity before transferring values. If one tool identifies
+  the asked object by color, position, bbox, label, ordinal role, or local
+  relation, and another tool provides a value or semantic description, use the
+  value only if both outputs clearly refer to the same entity.
+- Do not let a semantic-reading tool silently override grounded identity
+  evidence from OCR/spatial grounding. If tools disagree about which object is
+  orange, left/right, top/bottom, labeled, or otherwise answer-relevant, state
+  that conflict explicitly and avoid patching the answer from the conflicting
+  claim alone.
+- When tools conflict, prefer the strongest directly grounded evidence for
+  visible identity/location, and treat unmatched value claims as unresolved
+  rather than as answer-ready facts.
 - Maintain the trace format expected by the benchmark (TRACE_FORMAT):
   * OmniVideoBench: list of (Modality, Evidence, Inference) triples
   * VideoMathQA: numbered mathematical solution steps

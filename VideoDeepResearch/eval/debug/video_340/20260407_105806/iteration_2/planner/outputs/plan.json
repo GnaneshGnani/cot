@@ -1,0 +1,54 @@
+{
+  "strategy": "Use the already-localized candidate metallic-bang intervals and inspect the remaining higher-confidence intervals directly with timestamped frames, then use a short bounded caption pass only on the interval where a man on the bridge is actually visible to determine whether he is walking, drinking, leaning, or standing.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "video",
+        "query": null,
+        "timestamps": [
+          10.0,
+          12.0,
+          14.0,
+          17.0,
+          19.0,
+          22.0,
+          23.5,
+          25.0,
+          39.0,
+          40.5,
+          42.0
+        ],
+        "num_frames": 11
+      },
+      "purpose": "Check the remaining candidate metallic-bang intervals from the prior audio grounding and identify which interval(s) actually show a man on the bridge, avoiding unsupported assumptions from the already-rejected 4.0–6.0s interval.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "dense_captioner",
+      "arguments": {
+        "video_path": "video",
+        "start_time": 22.0,
+        "end_time": 25.0,
+        "granularity": "frame"
+      },
+      "purpose": "Describe the man's action during the highest-confidence metallic-bang interval, which is the main unresolved candidate after the prior iteration.",
+      "depends_on": []
+    },
+    {
+      "step": 3,
+      "tool": "dense_captioner",
+      "arguments": {
+        "video_path": "video",
+        "start_time": 39.0,
+        "end_time": 42.0,
+        "granularity": "frame"
+      },
+      "purpose": "Provide a fallback action description for another strong late candidate metallic-bang interval in case the 22.0–25.0s interval does not show the relevant man on the bridge.",
+      "depends_on": []
+    }
+  ],
+  "refinement_instructions": "Keep the earlier supported fact that the 4.0–6.0s candidate interval does not support the original 'leaning' claim. Use step 1 frame timestamps to determine whether a man on the bridge is visible in any of the remaining candidate bang intervals; do not infer from absent or unrelated frames. Prioritize the 22.0–25.0s interval because it had the highest audio-grounder confidence; use step 2 captions to state the man's action only if the caption explicitly shows the man on the bridge during that span. If step 2 does not show the relevant man, consult step 1 to see whether 39.0–42.0s is the next plausible bridge-man interval and then use step 3 for the action. Replace the old global claim 'the action choice cannot be verified' only if one of these later candidate intervals clearly shows the man and his action. If the captioned action is broader than the answer choices, map it conservatively to the closest option and explain the mapping briefly; if no remaining candidate interval shows the man on the bridge, state that the evidence remains insufficient rather than forcing an answer. Do not retain 'leaning' unless one of the new tool outputs explicitly supports leaning posture at the actual bang interval."
+}

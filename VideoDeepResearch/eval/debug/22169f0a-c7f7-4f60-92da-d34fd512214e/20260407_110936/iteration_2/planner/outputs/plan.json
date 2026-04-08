@@ -1,0 +1,43 @@
+{
+  "strategy": "Reuse the already localized unsolved-diagram moment, but gather stronger visual evidence that identifies the exact geometry and any on-screen text/value labels. First retrieve a slightly broader candidate set around the question frame, then use OCR to verify the given area text and chart_analyzer with a sharper geometry-specific query to extract the area relationship needed to choose among A–E.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "video",
+        "query": "question screen showing the original geometry diagram with two regular hexagons inside a rectangle and an orange shaded region, before any worked-solution annotations or decomposition markings are added",
+        "timestamps": null,
+        "num_frames": 3
+      },
+      "purpose": "Get a clean candidate bundle of the original unsolved problem diagram for precise reading, avoiding later explanation-state frames.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "ocr",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null
+      },
+      "purpose": "Verify the exact prompt text and confirm that each hexagon is labeled as having area 24 square units, correcting the prior mismatch with 6.",
+      "depends_on": [
+        1
+      ]
+    },
+    {
+      "step": 3,
+      "tool": "chart_analyzer",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null,
+        "query": "original geometry diagram with two regular hexagons inside a rectangle and an orange shaded region; determine the geometric area relationship between one hexagon and the orange region by reading the diagram structure, including any partition into congruent equilateral triangles or other repeated subregions"
+      },
+      "purpose": "Extract a grounded area ratio from the diagram itself so the orange area can be computed from the verified hexagon area and matched to an answer choice.",
+      "depends_on": [
+        1
+      ]
+    }
+  ],
+  "refinement_instructions": "In the rewritten trace, preserve only the earlier supported fact that the target is the unsolved original diagram and that two identical hexagons plus one orange region are shown. Replace the unsupported claim that the area cannot be determined if step 3 now identifies a concrete area relationship. Use step 2 to explicitly cite the verified text giving each hexagon area as 24 square units; do not repeat the earlier incorrect '6 square units' reading. For step 3, inspect the frame-level result(s) across the retrieved bundle and cite the frame that most clearly shows the original question-state geometry. If chart_analyzer reports a partition/ratio, use that exact relationship to compute the orange area numerically and then map it to the closest exact option among A–E, explaining the arithmetic. If step 3 still does not yield a grounded ratio, the trace should state that the remaining evidence is insufficient, but only after citing the failed geometry-reading attempt from chart_analyzer and the verified OCR text. Do not rely on the prior ungrounded 6:9 triangle decomposition unless the new chart_analyzer output explicitly supports it."
+}

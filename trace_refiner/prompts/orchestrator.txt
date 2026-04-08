@@ -19,21 +19,29 @@ evidence needed to fix those errors.
    Transcribes speech with word-level timestamps.
    USE WHEN: trace references spoken content; need to verify dialogue or narration.
 
-4. audio_grounder(video_path: str, query: str) -> list[{event: str, start: float, end: float, confidence: float}]
-   Localizes non-speech audio events (music, sounds, effects).
-   USE WHEN: trace references music, sound effects, or environmental sounds.
+4. audio_grounder(video_path: str, query: str, start_time: float | null, end_time: float | null)
+   -> {query: str, events: list[{event_label: str, start: float, end: float, confidence: float}], distinct_event_groups?: list[...]}
+   Localizes non-speech audio events (music, sounds, effects) within an optional bounded window.
+   USE WHEN: trace references music, sound effects, environmental sounds, or the
+   number of distinct non-speech sounds in a localized interval.
+   For broad count/inventory questions, first bound the interval, then use a
+   query that asks for distinct non-speech sounds during that interval.
 
 5. ocr(frame_path: str | video_path: str, timestamp: float | null) -> list[{text: str, bbox: list[float], confidence: float}]
    Extracts visible text from frames (scoreboards, signs, equations, subtitles).
    USE WHEN: trace references on-screen text, numbers, labels, or scores.
 
-6. spatial_grounder(frame_path: str, query: str) -> list[{label: str, bbox: list[float], mask_path: str | null, confidence: float}]
+6. spatial_grounder(frame_path: str | list[str] | list[dict] | null, timestamp: float | list[float] | null, query: str) -> list[{label: str, bbox: list[float], mask_path: str | null, confidence: float}]
    Detects and segments objects given a text description.
    USE WHEN: trace references specific objects, their positions, or spatial relationships.
+   If given multiple frames, expect per-frame grounding outputs and use them to
+   choose the relevant candidate frame for the question.
 
-7. counter(frame_path: str, query: str, exemplar_paths: list[str] | null) -> {count: int, detections: list[{bbox: list[float]}]}
+7. counter(frame_path: str | list[str] | list[dict] | null, timestamp: float | list[float] | null, query: str, exemplar_paths: list[str] | null) -> {count: int, detections: list[{bbox: list[float]}]}
    Counts objects matching a description in a frame.
    USE WHEN: trace makes counting claims that need verification.
+   If given multiple frames, compare the per-frame counts rather than assuming
+   the first candidate frame is the right one.
 
 8. dense_captioner(video_path: str, start_time: float | null, end_time: float | null, granularity: "frame" | "segment") -> list[{timestamp: float, caption: str}]
    Generates detailed descriptions of video content segment by segment.
@@ -77,6 +85,76 @@ Respond with a JSON plan and NOTHING else:
 
 ━━━ Planning Rules ━━━
 - Minimize tool calls. Only call tools that address diagnosed errors.
+- Treat prior successful tool outputs and PREVIOUS_ITERATIONS_SUMMARY as a
+  cumulative evidence state, not as disposable history. Start planning from the
+  strongest currently grounded beliefs about the relevant frame, span, entity,
+  speaker, text, or value.
+- Treat partial tool outputs as useful anchors. If a prior result grounds the
+  scene, frame, span, object, or topic but not the exact answer-critical
+  attribute, plan the narrowest follow-up on that same anchor rather than
+  restarting with a broader search.
+- A new tool call should usually refine one unresolved sub-detail while keeping
+  earlier supported facts live. Do not restart the search from scratch unless
+  the earlier anchor is contradicted, unreliable, or clearly from the wrong
+  phase, span, or entity.
+- For frame retrieval, target the correct video phase, not just the correct
+  object category. If the same visual target can appear as a raw question frame,
+  worked example, solved diagram, annotated overlay, or recap slide, encode the
+  needed phase in the query (for example: original / unsolved / before labels /
+  before highlighting / question screen).
+- If the question refers to an ordinal item such as first, second, last, final,
+  earliest, or latest, include that role in the frame_retriever query itself.
+  Do not reduce "the last shape" or "the first stemplot" to a broad object-only
+  query that may retrieve later explanatory variants.
+- If frame_retriever returns a small candidate set and the correct frame is not
+  yet justified, pass the whole bundle to the next frame-based tool and compare
+  the returned per-frame results.
+- If retrieved frames show explanation-state cues rather than question-state
+  cues (for example: traced solution path, highlighted region, start/end labels,
+  counted values, worked arithmetic, rule text, arrows/callouts, or a hand/pen
+  modifying the diagram), do NOT trust that cluster as the target just because
+  the broad scene matches. Use it as a temporal anchor and run a local
+  timestamp sweep, usually slightly earlier first, to recover the original
+  unsolved question frame.
+- Do not pass mixed-phase candidate frames directly into a structure-reading
+  tool when the answer depends on a single scene state. First isolate the
+  correct phase, then analyze it.
+- If ASR is used for localization, do not assume the first returned transcript
+  segment is the question-relevant utterance. ASR segment arrays are
+  chronological, not relevance-ranked.
+- Do not chain `<STEP_N:segments[0].start>` (or any hard-coded ASR segment
+  index) into a downstream timestamped call unless the ASR step is already
+  bounded tightly enough that only one relevant utterance should exist, or a
+  previous iteration already identified the matching segment by content.
+- When the relevant spoken segment cannot be uniquely chosen at planning time,
+  use ASR to gather transcript evidence first and defer segment-specific
+  timestamp chaining until the matching utterance is semantically identified.
+- Do not infer a fine-grained relation from a coarse result. For example, do
+  not convert broad position or scene-level context into handedness, speaker
+  identity, exact count, or earliest/latest order without a targeted follow-up.
+- If a tool nearly answers the question but leaves one sub-detail unresolved,
+  refine the query for that sub-detail and choose the tool that can test it
+  most directly.
+- When the question names a specific visual entity by color, position, label,
+  ordinal role, or local relation, separate "which entity is the target?" from
+  "what value or property does it have?" in your plan. Prefer pairing an
+  identity-grounding tool (for example spatial_grounder or OCR) with a
+  value/structure-reading tool when one tool alone may conflate nearby objects.
+- If multiple tools will read the same structured visual, require the
+  downstream reasoning to reconcile them by stable attributes such as color,
+  relative position, bbox, label text, or frame-specific role before attaching
+  a value to the asked object.
+- If prior results disagree on which visible object is the asked target, do not
+  force the refiner to pick the most specific-sounding claim. Either add a
+  disambiguating grounding step or instruct the refiner to preserve the
+  conflict and avoid a forced answer.
+- If a later tool is broader, under-covered, or fails to mention a previously
+  grounded detail, do not treat that silence as disproof. Keep the earlier
+  supported anchor live and use the new call only for the sub-detail it
+  actually resolves.
+- If later evidence is meant to replace an earlier belief, make the dispute
+  explicit in the plan: which prior fact is being tested, what stronger
+  evidence would supersede it, and why that override would be justified.
 - Order matters: if tool B needs output from tool A, set depends_on correctly.
   Independent calls (no dependency) can run in parallel.
 - Prefer using PREPROCESSED_ARTIFACTS before calling tools (e.g., check the
@@ -85,5 +163,18 @@ Respond with a JSON plan and NOTHING else:
 - If the diagnosis contains TIMESTAMP_ERROR, ALWAYS include temporal_grounder.
 - For INCOMPLETE_TRACE, typically start with dense_captioner on the relevant
   time range, then follow up with specialized tools.
+- If a relevant moment is already roughly localized, prefer a local timestamp
+  sweep plus a specialized tool over an additional broad dense_captioner call.
+- If a prior grounding result is broad but the missing detail is relational,
+  laterality-based, or contact-based, write the next query to ask for that
+  relation directly rather than for the broad object again.
 - Never call more than 6 tools in a single plan. If more are needed, prioritize
   HIGH severity errors first.
+
+In `refinement_instructions`, explicitly tell the Trace Refiner:
+- which earlier supported facts remain valid and must be carried forward into
+  the repaired trace
+- which earlier beliefs, if any, are actually superseded by the new evidence,
+  and what contradiction or stronger grounding justifies that update
+- that a later tool's silence, under-coverage, or coarse summary should be
+  treated as non-confirmation rather than erasure of earlier grounded evidence

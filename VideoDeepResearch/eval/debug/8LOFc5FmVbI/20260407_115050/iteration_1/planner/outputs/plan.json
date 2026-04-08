@@ -1,0 +1,50 @@
+{
+  "strategy": "Localize the earliest frame sequence that shows actors on the set, then count the naked gray bodies lying on the set within that earliest actor-containing image cluster. Use a small timestamp sweep around the retrieved earliest candidate to avoid relying on query-ranking alone for the 'first images' condition.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "<VIDEO_PATH>",
+        "query": "earliest images showing actors on a set with many gray human-like bodies lying on the ground",
+        "timestamps": null,
+        "num_frames": 3
+      },
+      "purpose": "Find candidate early moments where actors first appear on the set among many gray bodies, giving an anchor for the relevant scene.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "<VIDEO_PATH>",
+        "query": null,
+        "timestamps": [
+          "<STEP_1:frames[0].timestamp>",
+          "<STEP_1:frames[1].timestamp>",
+          "<STEP_1:frames[2].timestamp>"
+        ],
+        "num_frames": 3
+      },
+      "purpose": "Convert the candidate retrieval hits into timestamp-anchored evidence and identify which returned frame is actually earliest among the actor-containing candidates, rather than assuming retrieval rank gives chronology.",
+      "depends_on": [
+        1
+      ]
+    },
+    {
+      "step": 3,
+      "tool": "counter",
+      "arguments": {
+        "frame_path": "<STEP_2:frames>",
+        "timestamp": null,
+        "query": "naked gray human bodies lying on the set floor",
+        "exemplar_paths": null
+      },
+      "purpose": "Count the relevant bodies across the candidate earliest frames so the refiner can select the count from the truly earliest actor-containing image.",
+      "depends_on": [
+        2
+      ]
+    }
+  ],
+  "refinement_instructions": "Rewrite the trace so it no longer claims unsupported direct viewing. Cite the frame_retriever evidence for the earliest actor-containing scene and the counter evidence for the number of naked gray bodies lying on the set. Do not assume retrieval order is temporal order: inspect the timestamps from steps 1 and 2 and use the earliest frame among the candidate actor-containing images. In step 3, use the per-frame count results (if returned under `frames`) for that earliest frame rather than a top-level merged summary. Replace the contradictory '22 then 21' reasoning with the verified count only. If the verified count maps to one of the answer choices approximately or exactly, explicitly state that mapping and update the final answer accordingly."
+}

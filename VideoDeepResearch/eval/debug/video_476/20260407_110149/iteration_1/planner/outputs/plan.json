@@ -1,0 +1,67 @@
+{
+  "strategy": "Ground the answer with the smallest multimodal evidence chain: verify the spoken kinship cue in the relevant late segment, then visually confirm who is holding the first dog versus the pug named Magnolia/Manolia around those moments. This will let the refiner support or revise the relation without relying on unsupported identity assumptions.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "asr",
+      "arguments": {
+        "video_path": "VIDEO_PATH",
+        "start_time": 35.0,
+        "end_time": 55.0
+      },
+      "purpose": "Transcribe the likely interval where the trace claims dialogue about 'mom' and the pug's introduction occurs, so the kinship cue and dog-name mention can be verified from speech rather than assumed.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "VIDEO_PATH",
+        "query": "person holding the first dog shown in the video, early appearance before later dog introductions",
+        "timestamps": null,
+        "num_frames": 3
+      },
+      "purpose": "Retrieve candidate early frames showing the first dog-holder so the trace can ground who holds the first dog instead of asserting it from memory.",
+      "depends_on": []
+    },
+    {
+      "step": 3,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "VIDEO_PATH",
+        "query": "person holding a pug during the later introduction, showing the dog associated with the spoken name Magnolia or Manolia",
+        "timestamps": null,
+        "num_frames": 3
+      },
+      "purpose": "Retrieve candidate later frames showing the pug-holder associated with the named dog, to ground the visual referent of the person holding Magnolia/Manolia.",
+      "depends_on": [
+        1
+      ]
+    },
+    {
+      "step": 4,
+      "tool": "ocr",
+      "arguments": {
+        "frame_path": "<STEP_3:frames>",
+        "timestamp": null
+      },
+      "purpose": "Check whether any on-screen text or subtitles in the retrieved pug-introduction frames corroborate the dog's name or spoken kinship cue.",
+      "depends_on": [
+        3
+      ]
+    },
+    {
+      "step": 5,
+      "tool": "dense_captioner",
+      "arguments": {
+        "video_path": "VIDEO_PATH",
+        "start_time": 40.0,
+        "end_time": 50.0,
+        "granularity": "segment"
+      },
+      "purpose": "Describe the bounded late segment to clarify who is speaking, who enters, and who is holding the pug, since the diagnosis specifically flags unsupported reference resolution from dialogue alone.",
+      "depends_on": []
+    }
+  ],
+  "refinement_instructions": "Use step 1 as the primary source for any quoted dialogue; remove the current invented quotes unless the ASR transcript explicitly supports them. Use step 2 only to support the claim about the first dog-holder, and cite the relevant retrieved frame by timestamp rather than assuming a person’s name. Use step 3 plus step 5 to support who is holding the later pug/Magnolia dog; do not assume the top-ranked frame is correct without checking timestamps and visual consistency across the returned frames. Step 4 is only supplementary for visible text/subtitles; if OCR does not show the dog name, do not claim the name from vision alone. Most importantly, do not infer 'mom and daughter' merely because someone says 'mom' unless step 1 and step 5 together clearly show the speaker is addressing the pug-holder as her mother. If the evidence only supports that one person calls the other 'mom,' rewrite the trace conservatively around that addressed relationship and update the final answer if the verified evidence contradicts the original answer."
+}

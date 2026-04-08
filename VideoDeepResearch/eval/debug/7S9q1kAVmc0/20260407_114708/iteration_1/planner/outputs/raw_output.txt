@@ -1,0 +1,57 @@
+{
+  "strategy": "Directly verify the two answer-critical visual counts with narrowly bounded visual tools: count the distinct bok choy stalks that are actually blowtorched in the 04:00–09:30 window, and count the tucked receipts on the fryer-facing side in the 20:00–21:00 window. Then update the arithmetic and final answer to match the verified counts.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "<VIDEO_PATH>",
+        "query": "chef using a blowtorch to sear sliced bok choy stalks on the cooktop in a commercial kitchen",
+        "timestamps": null,
+        "num_frames": 3
+      },
+      "purpose": "Retrieve candidate frames showing the blowtorch-on-bok-choy event so the bok choy pieces being seared can be counted from actual frames rather than unsupported observation.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "counter",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null,
+        "query": "distinct bok choy stalks being seared with the blowtorch on the cooktop",
+        "exemplar_paths": null
+      },
+      "purpose": "Count the number of distinct bok choy stalks visible in the candidate blowtorch frames; use frame-level results to identify the relevant frame(s) where the searing is clearest.",
+      "depends_on": [
+        1
+      ]
+    },
+    {
+      "step": 3,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "<VIDEO_PATH>",
+        "query": "kitchen island or station side facing the fryers with paper receipts tucked into the side between 20 and 21 minutes",
+        "timestamps": null,
+        "num_frames": 3
+      },
+      "purpose": "Retrieve candidate frames around the receipts scene on the fryer-facing side so the tucked receipts can be counted from image evidence.",
+      "depends_on": []
+    },
+    {
+      "step": 4,
+      "tool": "counter",
+      "arguments": {
+        "frame_path": "<STEP_3:frames>",
+        "timestamp": null,
+        "query": "paper receipts tucked into the side of the kitchen station facing the fryers",
+        "exemplar_paths": null
+      },
+      "purpose": "Count the tucked receipts in the retrieved candidate frames; compare per-frame counts to choose the frame that actually matches the fryer-side view referenced by the question.",
+      "depends_on": [
+        3
+      ]
+    }
+  ],
+  "refinement_instructions": "Rewrite the trace so that the key counting claims are explicitly grounded in tool outputs, not unsupported direct viewing. For the bok choy claim, cite the relevant frame-level result(s) from step 2 rather than the top-level summary if different candidate frames produce different counts; keep only the count for the frame(s) that actually show bok choy being blowtorched. For the receipts claim, use the frame-level results from step 4 and choose the candidate frame that shows the fryer-facing side with tucked receipts; do not count loose receipts or receipts on another side. Remove unsupported temporal narration unless it is directly evidenced by the retrieved frame timestamps. Then compute the product from the verified bok choy count and verified tucked-receipt count. Because the original trace already states 3*4=12, correct the final answer inconsistency: if the new tool-backed counts confirm 3 and 4, the answer must be updated to 12 (option C); if either count differs, update both the multiplication step and the final option accordingly."}

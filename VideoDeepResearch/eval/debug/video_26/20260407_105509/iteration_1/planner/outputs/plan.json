@@ -1,0 +1,42 @@
+{
+  "strategy": "First verify whether the word/name \"panda\" is actually spoken and localize that utterance with ASR. Then inspect the corresponding visual moment with targeted frame retrieval and spatial grounding to determine the character's distinguishing attribute among the answer choices.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "asr",
+      "arguments": {
+        "video_path": "<VIDEO_PATH>",
+        "start_time": null,
+        "end_time": null
+      },
+      "purpose": "Check whether any dialogue mentions \"panda\" or otherwise identifies the relevant character, and obtain grounded timestamps for that spoken reference instead of relying on the unsupported 1:26 claim.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "<VIDEO_PATH>",
+        "query": "character identified as panda near a computer or desk, showing the character's face and clothing clearly",
+        "timestamps": null,
+        "num_frames": 3
+      },
+      "purpose": "Retrieve candidate frames of the character likely referred to as Panda so the visual attribute can be checked directly.",
+      "depends_on": []
+    },
+    {
+      "step": 3,
+      "tool": "spatial_grounder",
+      "arguments": {
+        "frame_path": "<STEP_2:frames>",
+        "timestamp": null,
+        "query": "the character identified as panda, including visible face, eyewear, neckwear, and nearby computer if present"
+      },
+      "purpose": "Ground the relevant character across the candidate frames and describe whether the character is wearing glasses, a bow tie, or instead appears to be a broom or Einstein-like figure.",
+      "depends_on": [
+        2
+      ]
+    }
+  ],
+  "refinement_instructions": "Rewrite the trace so that any claim about a spoken mention of Panda is attributed to ASR only if the transcript actually contains that evidence; otherwise remove the unsupported timestamp/name claim. Use the frame-level results from the frame retrieval and spatial grounding steps to identify the correct candidate frame(s) showing the relevant character, and cite only observed attributes that are directly supported there. Do not preserve the original claim that Panda wears glasses unless the grounded visual evidence explicitly shows eyewear on the character. If the visual evidence instead supports bow tie, broom, or Einstein, update both the reasoning trace and final answer accordingly. If ASR does not confirm the word \"panda,\" the repaired trace should avoid inventing that identification and should rely on the visually grounded character evidence only, with explicit uncertainty if identity remains partial."
+}

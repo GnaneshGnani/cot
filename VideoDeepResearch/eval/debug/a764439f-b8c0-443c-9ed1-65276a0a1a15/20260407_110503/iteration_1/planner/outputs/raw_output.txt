@@ -1,0 +1,43 @@
+{
+  "strategy": "Directly inspect the original geometry diagram/question frame to verify the square’s partition structure and the placement of the given area labels. Use frame retrieval to isolate the unsolved problem diagram, then use spatial grounding on that frame to confirm that the orange region is one of four triangles that exactly fill the square.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "<video_path>",
+        "query": "original geometry problem diagram showing a square divided into four triangles with one orange shaded triangle, before any solution annotations are added",
+        "timestamps": null,
+        "num_frames": 3
+      },
+      "purpose": "Retrieve candidate frames containing the raw question-state diagram rather than an explanation-state or annotated frame.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "spatial_grounder",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null,
+        "query": "square partitioned into exactly four triangles with one orange shaded triangle"
+      },
+      "purpose": "Verify from the actual diagram whether the square is fully decomposed into four triangles and identify the frame-level result that supports or refutes the subtraction argument.",
+      "depends_on": [
+        1
+      ]
+    },
+    {
+      "step": 3,
+      "tool": "ocr",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null
+      },
+      "purpose": "Read visible numeric labels such as the square side length and the three given triangle areas from the same candidate frames, so the repaired trace can ground both the diagram structure and the provided values.",
+      "depends_on": [
+        1
+      ]
+    }
+  ],
+  "refinement_instructions": "Rewrite the trace around what the diagram actually shows. Use step 1 to choose the raw problem frame, then inspect the frame-level outputs from step 2 rather than relying on any top-level summary. If step 2 confirms that the square is partitioned into exactly four interior triangles with no extra regions, explicitly add that missing geometric premise before using area subtraction. Use step 3 to cite the on-screen labels for the side length 6 and the given triangle areas, and preserve only those values that are visually supported. Remove or narrow unsupported claims such as the height-based justification if the diagram itself already provides the needed partition evidence and the old argument does not establish it. If the frame evidence shows the four triangles do not exactly tile the square as assumed, update the final answer and trace accordingly; otherwise, state that the area of the orange triangle is the square’s area minus the three labeled triangle areas because the diagram shows a complete four-triangle decomposition of the 6×6 square."
+}

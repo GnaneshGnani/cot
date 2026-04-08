@@ -1,0 +1,85 @@
+{
+  "strategy": "Localize the two survey charts, then analyze each chart directly to extract the four stores' percentages needed for a complete discrepancy comparison. Use the chart outputs to recompute differences across Walmart, Target, Whole Foods, and Albertsons and update the answer only if the verified values support it.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "temporal_grounder",
+      "arguments": {
+        "video_path": "<VIDEO_PATH>",
+        "query": "customer survey chart comparing grocery stores on store cleanliness"
+      },
+      "purpose": "Find the time window where the Store Cleanliness chart appears before retrieving frames for chart reading.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "<VIDEO_PATH>",
+        "query": null,
+        "timestamps": [
+          "<STEP_1:segments[0].start>",
+          "<STEP_1:segments[0].end>"
+        ],
+        "num_frames": 3
+      },
+      "purpose": "Sample frames within the localized cleanliness-chart interval to capture the actual chart frame(s) for analysis.",
+      "depends_on": [
+        1
+      ]
+    },
+    {
+      "step": 3,
+      "tool": "chart_analyzer",
+      "arguments": {
+        "frame_path": "<STEP_2:frames>",
+        "timestamp": null,
+        "query": "bar chart showing customer-rated Store Cleanliness for grocery chains; extract the approximate percentages for Walmart, Target, Whole Foods, and Albertsons"
+      },
+      "purpose": "Read the Store Cleanliness chart and obtain the four relevant percentages from the chart itself.",
+      "depends_on": [
+        2
+      ]
+    },
+    {
+      "step": 4,
+      "tool": "temporal_grounder",
+      "arguments": {
+        "video_path": "<VIDEO_PATH>",
+        "query": "customer survey chart comparing grocery stores on value for dollar"
+      },
+      "purpose": "Find the time window where the Value for Dollar chart appears before retrieving frames for chart reading.",
+      "depends_on": []
+    },
+    {
+      "step": 5,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "<VIDEO_PATH>",
+        "query": null,
+        "timestamps": [
+          "<STEP_4:segments[0].start>",
+          "<STEP_4:segments[0].end>"
+        ],
+        "num_frames": 3
+      },
+      "purpose": "Sample frames within the localized value-for-dollar chart interval to capture the actual chart frame(s) for analysis.",
+      "depends_on": [
+        4
+      ]
+    },
+    {
+      "step": 6,
+      "tool": "chart_analyzer",
+      "arguments": {
+        "frame_path": "<STEP_5:frames>",
+        "timestamp": null,
+        "query": "bar chart showing customer-rated Value for Dollar for grocery chains; extract the approximate percentages for Walmart, Target, Whole Foods, and Albertsons"
+      },
+      "purpose": "Read the Value for Dollar chart and obtain the four relevant percentages from the chart itself.",
+      "depends_on": [
+        5
+      ]
+    }
+  ],
+  "refinement_instructions": "Rewrite the trace so that every chart-derived percentage is explicitly attributed to chart_analyzer output rather than asserted from memory. Use Step 3 for Store Cleanliness values and Step 6 for Value for Dollar values, and compute discrepancies for all four required stores: Walmart, Target, Whole Foods, and Albertsons. Do not preserve the old unsupported values or midpoint timestamps unless they are directly corroborated by the new tool outputs. When using the frame-based chart results, inspect the returned frame-level evidence and select the frame(s) that most clearly show the chart and labels; do not assume the first retrieved frame is best just because of array position. The repaired trace should show the per-store calculations, identify the maximum discrepancy from those verified values, and update the final answer if the recomputed winner or magnitude differs from the original answer. If chart values are approximate, state them as approximate and explain the closest-option mapping."}

@@ -1,0 +1,80 @@
+{
+  "strategy": "Localize the two relevant chart moments, retrieve a small set of candidate frames for each chart, then use chart analysis to read the values for Walmart, Target, Whole Foods, and Albertsons directly from the charts. This will both ground the previously unsupported chart claims and complete the missing four-store comparison needed to determine the maximum discrepancy.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "temporal_grounder",
+      "arguments": {
+        "video_path": "VIDEO_PATH",
+        "query": "bar chart comparing grocery stores on store cleanliness and availability of items"
+      },
+      "purpose": "Find the interval where the first chart with Store Cleanliness appears so later frame retrieval is narrowly targeted.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "temporal_grounder",
+      "arguments": {
+        "video_path": "VIDEO_PATH",
+        "query": "bar chart comparing grocery stores on value for dollar from a customer survey"
+      },
+      "purpose": "Find the interval where the Value for Dollar chart appears so later frame retrieval is narrowly targeted.",
+      "depends_on": []
+    },
+    {
+      "step": 3,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "VIDEO_PATH",
+        "query": "chart screen showing grocery store ratings for store cleanliness, with store names and percentage bars visible",
+        "timestamps": null,
+        "num_frames": 3
+      },
+      "purpose": "Retrieve candidate frames of the Store Cleanliness chart for direct reading.",
+      "depends_on": [
+        1
+      ]
+    },
+    {
+      "step": 4,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "VIDEO_PATH",
+        "query": "chart screen showing grocery store ratings for value for dollar, with store names and percentage bars visible",
+        "timestamps": null,
+        "num_frames": 3
+      },
+      "purpose": "Retrieve candidate frames of the Value for Dollar chart for direct reading.",
+      "depends_on": [
+        2
+      ]
+    },
+    {
+      "step": 5,
+      "tool": "chart_analyzer",
+      "arguments": {
+        "frame_path": "<STEP_3:frames>",
+        "timestamp": null,
+        "query": "read the store cleanliness values for Walmart, Target, Whole Foods, and Albertsons"
+      },
+      "purpose": "Extract or estimate the Store Cleanliness percentages for all four stores from the first chart.",
+      "depends_on": [
+        3
+      ]
+    },
+    {
+      "step": 6,
+      "tool": "chart_analyzer",
+      "arguments": {
+        "frame_path": "<STEP_4:frames>",
+        "timestamp": null,
+        "query": "read the value for dollar values for Walmart, Target, Whole Foods, and Albertsons"
+      },
+      "purpose": "Extract or estimate the Value for Dollar percentages for all four stores from the second chart.",
+      "depends_on": [
+        4
+      ]
+    }
+  ],
+  "refinement_instructions": "Rewrite the trace so that all chart claims are explicitly attributed to the chart_analyzer outputs rather than asserted as unsupported direct observations. Use the frame-level/candidate-frame evidence from steps 3-6 to identify the clearest chart frame for each chart; do not assume the first retrieved frame is correct without checking timestamps and analyzer output. Replace the old unsupported claims about chart timestamps and percentages unless they are directly corroborated by the new tool outputs. Most importantly, compute discrepancies for all four required stores—Walmart, Target, Whole Foods, and Albertsons—using the Store Cleanliness values from step 5 and the Value for Dollar values from step 6, then compare those four differences to determine the true maximum. If the verified values contradict the original answer, update the final answer accordingly and cite the approximate magnitude from the chart reading."
+}

@@ -1,0 +1,67 @@
+{
+  "strategy": "Ground the actual geometry from the problem frame, then read any on-screen worked algebra if present. The goal is to replace unsupported geometric assumptions with visually verified structure and recover the explicit equation or nearest computable relations needed to justify the correct radius choice.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "<VIDEO_PATH>",
+        "query": "original geometry problem diagram showing a square of side 1, two semicircles on adjacent sides, and a larger circle around the heart-like shape, before any solution annotations are added",
+        "timestamps": null,
+        "num_frames": 3
+      },
+      "purpose": "Retrieve candidate frames containing the unsolved diagram so the actual configuration, labels, and circle placement can be verified.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "ocr",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null
+      },
+      "purpose": "Read visible labels such as side length 1, any radius markings, and any on-screen equations or answer choices present on the retrieved diagram frames.",
+      "depends_on": [
+        1
+      ]
+    },
+    {
+      "step": 3,
+      "tool": "spatial_grounder",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null,
+        "query": "the large outer circle, the square, and the two semicircles on adjacent sides of the square"
+      },
+      "purpose": "Verify the relative placement of the square, semicircles, and outer circle, so unsupported claims about centers, tangency, and diagonal alignment can be corrected or removed.",
+      "depends_on": [
+        1
+      ]
+    },
+    {
+      "step": 4,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "<VIDEO_PATH>",
+        "query": "worked solution frame for the same geometry problem showing equations, algebra steps, or the computed radius of the large circle",
+        "timestamps": null,
+        "num_frames": 3
+      },
+      "purpose": "Find any later explanatory frame that explicitly shows the equation in R or the computed final value, since the current trace omits the derivation.",
+      "depends_on": []
+    },
+    {
+      "step": 5,
+      "tool": "ocr",
+      "arguments": {
+        "frame_path": "<STEP_4:frames>",
+        "timestamp": null
+      },
+      "purpose": "Extract the written derivation, formula, or final numeric result from the solution frames to support the missing algebraic steps.",
+      "depends_on": [
+        4
+      ]
+    }
+  ],
+  "refinement_instructions": "Use Step 1 plus Step 3 to rewrite the geometric setup only with relations that are visually supported by the actual diagram. Remove or soften unsupported claims such as the large circle's diameter passing through the square's diagonal unless that is explicitly visible or labeled. From Step 2, preserve any directly readable givens such as side length 1 and answer choices. Then use Step 4 and Step 5 to recover the missing derivation: if OCR reveals an explicit equation or final computed radius, cite that text-based evidence in the trace instead of inventing omitted law-of-cosines algebra. Prefer the frame-level OCR result that clearly belongs to the same problem instance. If the solution frame contradicts the original answer 0.89, update the final answer accordingly. If the diagram confirms only the setup but the algebra text is partial, state that only the visually/ocr-supported steps are justified and avoid claiming a closed-form expression not shown on screen."
+}

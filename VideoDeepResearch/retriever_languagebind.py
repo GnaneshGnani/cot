@@ -30,11 +30,14 @@ import argparse
 
 class Retrieval_Manager():
     def __init__(self, args=None, batch_size=1, clip_save_folder=None, clip_duration=30):
-        
-        
+        video_model_path = os.getenv("LANGUAGEBIND_VIDEO_MODEL_PATH", "").strip() or "LanguageBind/LanguageBind_Video_FT"
+        image_model_path = os.getenv("LANGUAGEBIND_IMAGE_MODEL_PATH", "").strip() or "LanguageBind/LanguageBind_Image"
+        video_tokenizer_path = os.getenv("LANGUAGEBIND_VIDEO_TOKENIZER_PATH", "").strip() or video_model_path
+        self.video_model_tag = Path(video_model_path.rstrip("/")).name or "video_model"
+
         clip_type = {
-            'video': 'LanguageBind/LanguageBind_Video_FT',
-            'image': 'LanguageBind/LanguageBind_Image'
+            'video': video_model_path,
+            'image': image_model_path,
         }
 
         self.model = LanguageBind(clip_type=clip_type, cache_dir='./model_cache')
@@ -56,8 +59,10 @@ class Retrieval_Manager():
 
         self.model.eval()
 
-        tokenizer_path =  'LanguageBind/LanguageBind_Video_FT'
-        self.tokenizer = LanguageBindVideoTokenizer.from_pretrained(tokenizer_path, cache_dir='./model_cache')
+        self.tokenizer = LanguageBindVideoTokenizer.from_pretrained(
+            video_tokenizer_path,
+            cache_dir='./model_cache',
+        )
         self.modality_transform = {c: transform_dict[c](self.model.modality_config[c]) for c in clip_type.keys()}
 
         self.clip_embs_cache = {}
@@ -66,6 +71,9 @@ class Retrieval_Manager():
         self.batch_size = 1
         self.clip_save_folder = clip_save_folder
         self.args=args
+
+    def _clip_embedding_folder(self):
+        return f'{self.args.dataset_folder}/embeddings/{self.args.clip_duration}/{self.args.retriever_type}/{self.video_model_tag}'
 
 
     def load_model_to_device(self, device):
@@ -191,15 +199,13 @@ class Retrieval_Manager():
                 clip_video_paths.append(clip_save_folder+'/'+output_filename) 
             return clip_frames_li, clip_video_paths
         
-        
-
     
     @ torch.no_grad()
     def calculate_video_clip_embedding(self, video_path, folder_path, total_duration=None, pre_calculate=False):
         total_embeddings = []
         video_name = video_path.split('/')[-1].split('.')[0]
 
-        folder_path = f'{self.args.dataset_folder}/embeddings/{self.args.clip_duration}/{self.args.retriever_type}/'
+        folder_path = self._clip_embedding_folder()
         os.makedirs(folder_path,exist_ok=True)
 
         embedding_path = os.path.join(folder_path,video_name+'.pkl')
@@ -370,7 +376,7 @@ class Retrieval_Manager():
 
 
     @ torch.no_grad()
-    def calculate_text_embedding(self,text,video_path=None,flag_save_embedding=True):
+    def calculate_text_embedding(self,text,video_path=None,flag_save_embedding=True, modality='video'):
         if flag_save_embedding:
             video_name = video_path.split('/')[-1].split('.')[0]
             os.makedirs(f'{self.args.dataset_folder}/embeddings/subtitle/{self.args.retriever_type}',exist_ok=True)
@@ -381,14 +387,20 @@ class Retrieval_Manager():
             except:
                 pass
 
-        inputs = {'language':to_device(self.tokenizer(text, max_length=77, padding='max_length',truncation=True, return_tensors='pt'), self.device)}
+        language_key = 'language' if modality == getattr(self.model, 'default_text_modality', 'video') else f'language:{modality}'
+        inputs = {
+            language_key: to_device(
+                self.tokenizer(text, max_length=77, padding='max_length',truncation=True, return_tensors='pt'),
+                self.device,
+            )
+        }
 
         with torch.no_grad():
             embeddings = self.model(inputs)
         if flag_save_embedding:
-            pickle.dump(embeddings['language'],open(embedding_path,'wb'))
+            pickle.dump(embeddings[language_key],open(embedding_path,'wb'))
         torch.cuda.empty_cache()
-        return embeddings['language'].cpu()
+        return embeddings[language_key].cpu()
 
 
     @ torch.no_grad()
@@ -447,7 +459,7 @@ class Retrieval_Manager():
         if similarity_threshold!=-100 or topk_similarity!=0:
             top_k=100
 
-        text_emb = self.calculate_text_embedding(query,flag_save_embedding=False).cpu()
+        text_emb = self.calculate_text_embedding(query,flag_save_embedding=False, modality='video').cpu()
         text_emb = text_emb / text_emb.norm(p=2, dim=1, keepdim=True)
 
         inputs = {'video': to_device(self.modality_transform['video'](query_video_path), self.device)}
@@ -461,7 +473,7 @@ class Retrieval_Manager():
             if len(self.clip_embs_cache) > 1:
                 self.clip_embs_cache = {}
             video_name = video_path.split('/')[-1].split('.')[0]
-            folder_path = f'{self.args.dataset_folder}/embeddings/{self.args.clip_duration}/{self.args.retriever_type}'
+            folder_path = self._clip_embedding_folder()
             video_clip_paths, clip_embs = self.calculate_video_clip_embedding(video_path, folder_path, total_duration)
             if type(clip_embs)==dict:
                 clip_embs = clip_embs['video']
@@ -499,14 +511,14 @@ class Retrieval_Manager():
         if similarity_threshold!=-100 or topk_similarity!=0:
             top_k=100
 
-        q_emb = self.calculate_text_embedding(query,flag_save_embedding=False).cpu()
+        q_emb = self.calculate_text_embedding(query,flag_save_embedding=False, modality='video').cpu()
         q_emb = q_emb / q_emb.norm(p=2, dim=1, keepdim=True)
 
         if video_path not in self.clip_embs_cache:
             if len(self.clip_embs_cache) > 1:
                 self.clip_embs_cache = {}
             video_name = video_path.split('/')[-1].split('.')[0]
-            folder_path = f'{self.args.dataset_folder}/embeddings/{self.args.clip_duration}/{self.args.retriever_type}'
+            folder_path = self._clip_embedding_folder()
             video_clip_paths, clip_embs = self.calculate_video_clip_embedding(video_path, folder_path, total_duration)
             if type(clip_embs)==dict:
                 clip_embs = clip_embs['video']
@@ -599,7 +611,7 @@ class Retrieval_Manager():
         emb_path = os.path.join(folder_path, f"{video_name}.pkl")
         paths_path = os.path.join(folder_path, f"{video_name}_frame_paths.pkl")
 
-        q_emb = self.calculate_text_embedding(query, flag_save_embedding=False).cpu()
+        q_emb = self.calculate_text_embedding(query, flag_save_embedding=False, modality='image').cpu()
         q_emb = q_emb / q_emb.norm(p=2, dim=1, keepdim=True)
 
         cache_key = os.path.abspath(video_path)

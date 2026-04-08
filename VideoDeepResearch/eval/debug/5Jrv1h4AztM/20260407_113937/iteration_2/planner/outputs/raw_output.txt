@@ -1,0 +1,44 @@
+{
+  "strategy": "Resolve the remaining gap by re-localizing the ice-packing moment with a more direct visual query for the bucket placed on top of a labeled container, then read any visible label text and count fish on the same candidate frame bundle. Reuse the already-supported ASR evidence for the gifted-fish weight instead of repeating audio work.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "video_path",
+        "query": "ice packing process with a bucket placed on top of a large container or tank, showing the container's printed label text and any fish inside the bucket",
+        "timestamps": null,
+        "num_frames": 3
+      },
+      "purpose": "Get a tighter candidate frame bundle for the exact asked scene state: the bucket on top of a labeled container during ice packing.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "ocr",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null
+      },
+      "purpose": "Read the visible printed text in each retrieved candidate frame to determine whether any container label matches or plausibly corresponds to the questioned \"SSL\" reference.",
+      "depends_on": [
+        1
+      ]
+    },
+    {
+      "step": 3,
+      "tool": "counter",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null,
+        "query": "fish inside the bucket placed on top of the container",
+        "exemplar_paths": null
+      },
+      "purpose": "Count fish in the bucket for each candidate frame so the refiner can use the frame-level count from the frame whose OCR/text context best matches the asked object-state.",
+      "depends_on": [
+        1
+      ]
+    }
+  ],
+  "refinement_instructions": "Keep the prior ASR-backed fact that the narrator says the gift was around 2 kilograms; that spoken numerical value 2 remains supported. Replace the earlier unsupported claim that the SSL-labeled container was not found near the ice-packing moment only if the new OCR on the new candidate bundle actually shows matching or clearly corresponding label text; otherwise explicitly state that the exact \"SSL\" label remains unverified. Use the frame-level OCR and frame-level counter outputs together on the same retrieved frame bundle: choose the candidate frame that best matches the question's scene state (bucket on top of the labeled container during ice packing), and cite that specific frame's fish count rather than any convenience top-level summary. If none of the retrieved frames verifies the SSL label or the bucket-on-container state, the rewritten trace must say the visual premise remains ungrounded and should not force a definitive arithmetic answer from unrelated nearby frames. If a matching frame is found, compute fish-to-add as 2 minus that verified frame's fish count, then update the final answer accordingly. Non-confirmation of the label must be treated as unresolved evidence, not silently replaced by earlier nearby-frame counts."
+}

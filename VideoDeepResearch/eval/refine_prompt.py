@@ -345,7 +345,18 @@ clearest set of tool calls that will collect the missing evidence.
 
 ━━━ Available Tools ━━━
 
-1. frame_retriever(video_path: str, query: str | null, timestamps: list[float] | null, num_frames: int)
+1. temporal_grounder(video_path: str, query: str)
+   -> {query: str, segments: list[{start: float, end: float, confidence: float, embed_score?: float, rerank_score?: float}], video_duration: float, retrieval_backend: str}
+   Localizes candidate time windows for an event using overlapping clip retrieval
+   plus reranking.
+   USE WHEN: need a bounded interval for an event, action, scene phase, chart
+   appearance, text appearance, or any answer-critical moment before calling a
+   more specialized tool.
+   IMPORTANT: `segments` are ranked by confidence, not by chronological order.
+   Do not assume `segments[0]` is the earliest occurrence. Use the timestamps
+   themselves when chronology matters.
+
+2. frame_retriever(video_path: str, query: str | null, timestamps: list[float] | null, num_frames: int)
    -> {mode: str, frames: list[{frame_path: str, timestamp: float, relevance_score?: float}]}
    Extracts keyframes by query relevance or at specific timestamps.
    USE WHEN: need visual evidence for a specific moment, object, event, scene state,
@@ -356,13 +367,13 @@ clearest set of tool calls that will collect the missing evidence.
    semantic ordering. Do not assume `frames[1]` or `frames[2]` is the "middle"
    or "best aligned" frame unless the timestamp itself justifies that choice.
 
-2. asr(video_path: str, start_time: float | null, end_time: float | null)
+3. asr(video_path: str, start_time: float | null, end_time: float | null)
    -> {transcript: str, segments: list[{text: str, start: float, end: float}]}
    Transcribes speech with word-level timestamps.
    USE WHEN: trace references spoken content; need to verify dialogue, narration,
    or verbal claims.
 
-3. audio_grounder(video_path: str, query: str, start_time: float | null, end_time: float | null)
+4. audio_grounder(video_path: str, query: str, start_time: float | null, end_time: float | null)
    -> {query: str, events: list[{event_label: str, start: float, end: float, confidence: float}], distinct_event_groups?: list[...]}
    Localizes non-speech audio events (music, sounds, effects) within an optional
    bounded window.
@@ -370,14 +381,14 @@ clearest set of tool calls that will collect the missing evidence.
    crowd noise, engine sounds, or the number of distinct non-speech sounds in a
    localized interval.
 
-4. ocr(frame_path: str | list[str] | list[dict] | null, timestamp: float | list[float] | null)
+5. ocr(frame_path: str | list[str] | list[dict] | null, timestamp: float | list[float] | null)
    -> {source: str | list, detections: list[{text: str, bbox: list[float], confidence: float}], full_text: str, ocr_backend: str}
    Extracts visible text from frames (scoreboards, signs, equations, subtitles,
    labels, UI text).
    USE WHEN: trace references on-screen text, numbers, labels, names, subtitles,
    scores, or readable symbols.
 
-5. spatial_grounder(frame_path: str | list[str] | list[dict] | null, timestamp: float | list[float] | null, query: str)
+6. spatial_grounder(frame_path: str | list[str] | list[dict] | null, timestamp: float | list[float] | null, query: str)
    -> {query: str, detections: list[{label: str, bbox: list[float], mask_path: str | null, confidence: float}], spatial_description: str, ...}
    Detects and segments objects given a text description.
    USE WHEN: trace references specific objects, their positions, or spatial
@@ -387,7 +398,7 @@ clearest set of tool calls that will collect the missing evidence.
    question answering, inspect `frames` rather than assuming the top-level
    summary alone answers which frame is relevant.
 
-6. counter(frame_path: str | list[str] | list[dict] | null, timestamp: float | list[float] | null, query: str, exemplar_paths: list[str] | null)
+7. counter(frame_path: str | list[str] | list[dict] | null, timestamp: float | list[float] | null, query: str, exemplar_paths: list[str] | null)
    -> {query: str, count: int, confidence: float, detections: list[{bbox: list[float]}], notes: str, ...}
    Counts objects matching a description in a frame.
    USE WHEN: trace makes counting claims that need verification.
@@ -395,7 +406,7 @@ clearest set of tool calls that will collect the missing evidence.
    per-frame counts plus a convenience top-level summary. Use the frame-level
    results when the question depends on choosing the correct candidate frame.
 
-7. dense_captioner(video_path: str, start_time: float | null, end_time: float | null, granularity: "frame" | "segment")
+8. dense_captioner(video_path: str, start_time: float | null, end_time: float | null, granularity: "frame" | "segment")
    -> {video_duration: float, captioned_range: {start: float, end: float}, captions: list[{start: float, end: float, visual: str, audio: str, on_screen_text: str, actions: list[str], objects: list[str]}]}
    Generates detailed descriptions of video content segment by segment.
    USE WHEN: need comprehensive understanding of what happens in a bounded segment;
@@ -416,12 +427,12 @@ clearest set of tool calls that will collect the missing evidence.
      dense_captioner result as a bounded interval first, then add a local
      timestamp/frame localization step inside that interval.
 
-8. action_recognizer(video_path: str, start_time: float, end_time: float)
+9. action_recognizer(video_path: str, start_time: float, end_time: float)
    -> list[{action: str, confidence: float, start: float, end: float}]
    Classifies human actions/activities in a video segment.
    USE WHEN: trace describes actions incorrectly or action verification is needed.
 
-9. chart_analyzer(frame_path: str | list[str] | list[dict] | null, timestamp: float | list[float] | null, query: str | null)
+10. chart_analyzer(frame_path: str | list[str] | list[dict] | null, timestamp: float | list[float] | null, query: str | null)
    -> {chart_type: str, title: str, axes: dict, series: list, key_observations: list, relationships: list, query_response: str | null}
    Interprets charts, graphs, plots, flowcharts, and diagrams — reads axis labels
    and ranges, data series values, trends, and structural node/edge relationships.
@@ -714,7 +725,26 @@ IMPORTANT for occurrence-order tasks:
 - If the occurrence target is text and the exact string is not already verified,
   start with timestamped sampling instead of a raw quoted-string query from the trace.
 
-When using query mode:
+T) temporal_grounder
+Use temporal_grounder to produce candidate event windows before asking for
+frames, OCR, ASR follow-ups, or dense captioning.
+
+Good uses:
+- localize when a chart first appears before reading values
+- localize the interval where a person performs an action before retrieving frames
+- localize candidate moments where a sign/title/object appears before OCR or spatial grounding
+
+Important semantics:
+- `segments` are confidence-ranked candidate windows, not a chronological list.
+- Do not use `segments[0]` to mean "earliest" or "first"; it means "highest-confidence candidate".
+- If the question is about first/second/earliest/latest occurrence, use
+  temporal_grounder to narrow candidates, then add timestamped frame/OCR/ASR
+  steps to establish order.
+- Use `segments[*].start/end` as real interval bounds for downstream tools.
+- Prefer the top-confidence segment when the goal is simply to localize the
+  most likely moment, not when chronology itself is the question.
+
+For frame_retriever query mode:
 - choose `num_frames` just large enough to capture alternatives
 - prefer `num_frames: 3` for OCR/chart follow-up
 - prefer `num_frames: 1` when a later tool needs a single precise frame
@@ -1711,14 +1741,20 @@ OUTPUT FORMAT (JSON):
       "start": <float, seconds from video start>,
       "end": <float, seconds from video start>,
       "confidence": <float, 0.0-1.0>,
-      "description": "<brief description of what happens in this segment>"
+      "embed_score": <float, optional>,
+      "rerank_score": <float, optional>
     }
   ],
+  "initial_segments": "<optional list of pre-rerank candidate segments with the same shape>",
+  "reranked_segments": "<optional list of post-rerank candidate segments with the same shape>",
   "video_duration": <float, total video length in seconds>
 }
 
 RULES:
-- Return segments sorted by start time.
+- `segments` should be the final ranked candidate list that downstream tools use.
+- Sort `segments` by descending confidence, then by start time.
+- If `initial_segments` / `reranked_segments` are present, treat them as
+  diagnostic detail; `segments` remains the authoritative downstream field.
 - Merge overlapping segments for the same event.
 - confidence >= 0.8 means high confidence; 0.5-0.8 is moderate; < 0.5 is low.
 - If unsure, return candidates with lower confidence rather than omitting them.

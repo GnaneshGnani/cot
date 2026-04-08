@@ -1,0 +1,46 @@
+{
+  "strategy": "Ground the answer using the spoken dialogue first, then visually identify which clothed person corresponds to the speaker/wanter at that moment. Use a narrow visual follow-up around the speech evidence rather than relying on the unsupported 4:24 claim.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "asr",
+      "arguments": {
+        "video_path": "<video_path>",
+        "start_time": null,
+        "end_time": null
+      },
+      "purpose": "Find the transcript segment where someone expresses wanting to send the body into the water slide, since the current trace makes an unsupported speech claim.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "<video_path>",
+        "query": null,
+        "timestamps": [
+          262.0,
+          264.0,
+          266.0
+        ],
+        "num_frames": 3
+      },
+      "purpose": "Sample frames around the trace's claimed 4:24 moment to visually identify who is speaking/wanting at that point and whether the relevant person is wearing black, red, or is a child.",
+      "depends_on": []
+    },
+    {
+      "step": 3,
+      "tool": "spatial_grounder",
+      "arguments": {
+        "frame_path": "<STEP_2:frames>",
+        "timestamp": null,
+        "query": "person wearing black clothing and person wearing red clothing near the water slide scene"
+      },
+      "purpose": "Ground the black-clothed and red-clothed candidates across the sampled frames so the refiner can determine which visible person is active at the relevant moment instead of assuming it is the person in black.",
+      "depends_on": [
+        2
+      ]
+    }
+  ],
+  "refinement_instructions": "Rewrite the trace to cite ASR for the spoken evidence rather than asserting an unsupported quote. Use the ASR transcript to identify the actual utterance about wanting to send the body into the water slide; if the transcript contradicts the original claim, update the reasoning and final answer accordingly. Use the sampled frames and the frame-level spatial grounding results to identify whether the relevant speaker/participant is the person in black, the person in red, children, or nobody. Do not keep the unsupported leap from 'someone said he will do it' to 'the person in black' unless the visual evidence at the same moment supports that identification. If ASR clearly names or disambiguates the wanter, prioritize that; if ASR is ambiguous about speaker identity, use the visual evidence near that moment and state any remaining uncertainty explicitly rather than forcing the original answer."
+}

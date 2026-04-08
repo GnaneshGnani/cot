@@ -1,0 +1,29 @@
+{
+  "strategy": "Ground the actual last question-state shape visually, then count the line-degree at each vertex from that frame and update the Euler-trail conclusion accordingly. Use a phase-aware retrieval query so the refiner reasons from the original unsolved final shape rather than any later explanation overlay.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "VIDEO_PATH",
+        "query": "question screen showing the last of several line-tracing shapes before any path, highlighting, or solution annotations are added",
+        "timestamps": null,
+        "num_frames": 3
+      },
+      "purpose": "Retrieve candidate frames for the final asked shape in its original unsolved state.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "chart_analyzer",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null,
+        "query": "for the last line-tracing shape, identify each vertex/junction and determine whether the shape has 0, 2, or more than 2 odd-degree points"
+      },
+      "purpose": "Interpret the line diagram structurally and extract the answer-critical odd/even vertex-degree evidence from the candidate frames.",
+      "depends_on": [1]
+    }
+  ],
+  "refinement_instructions": "Rewrite the trace so the decisive media-grounded step is attributed to the tool evidence, not asserted as an unsupported fact. From step 1, inspect the retrieved candidate frames by timestamp and select the frame that clearly shows the last unsolved shape; do not assume retrieval rank alone identifies the right one. From step 2, use the frame-level chart/diagram interpretation to state how many odd-degree vertices the last shape actually has. Preserve the general Euler-trail rule already stated in the original trace, but replace step 5 with a tool-backed claim about the specific last shape. Then update the final answer to the option matching the verified odd-degree count: 0 odd points implies option C, exactly 2 odd points implies option B, and more than 2 odd points implies option A. If the retrieved bundle mixes question-state and explanation-state frames, cite only the unsolved question-state frame's analysis in the repaired trace."
+}

@@ -1,0 +1,34 @@
+{
+  "strategy": "Resolve only the remaining ambiguity in the receipts scene by directly grounding which in-window frame actually shows the kitchen side closest to the fryer. Reuse the already localized candidate moments (1169s and 1176s) and add a spatial disambiguation step instead of re-running broad retrieval.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "video",
+        "query": null,
+        "timestamps": [
+          1169.0,
+          1176.0
+        ],
+        "num_frames": 2
+      },
+      "purpose": "Retrieve the two already-known in-window candidate frames so the fryer-side orientation can be compared directly from image evidence rather than inferred from prior trace text.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "spatial_grounder",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null,
+        "query": "deep fryer area and the side of the kitchen station closest to the fryer, including any paper receipts tucked into that side"
+      },
+      "purpose": "Determine which candidate frame actually shows the kitchen side adjacent to the fryer and therefore which receipt count is relevant to the question.",
+      "depends_on": [
+        1
+      ]
+    }
+  ],
+  "refinement_instructions": "Keep the bok choy evidence unchanged: the earlier counter-backed count of 3 stalks at 460.0s remains supported. Use the new spatial grounding only to repair the receipts-selection logic. In the rewritten trace, compare the frame-level grounding outputs for 1169.0s and 1176.0s and cite whichever frame explicitly shows the fryer and the station side closest to it; then pair that frame with the already obtained counter result for the same timestamp (6 at 1169.0s or 4 at 1176.0s). Do not justify the frame choice by planner intent or the old trace; justify it only from the new spatial evidence. If spatial_grounder clearly favors one frame, update the product and final answer accordingly. If it does not clearly distinguish the frames, state that the receipts evidence remains ambiguous and avoid preserving the unsupported 4-receipt selection."
+}

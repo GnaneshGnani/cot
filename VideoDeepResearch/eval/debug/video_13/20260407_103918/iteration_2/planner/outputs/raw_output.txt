@@ -1,0 +1,30 @@
+{
+  "strategy": "Reuse the already-grounded ASR interval (129.485s–131.647s) and do a small timestamp sweep within that spoken moment to obtain candidate frames of the table scene, then run a bottle counter across the full frame bundle so the refiner can choose the count from the frame(s) aligned to the utterance.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "video",
+        "query": null,
+        "timestamps": [129.6, 130.5, 131.4],
+        "num_frames": 3
+      },
+      "purpose": "Retrieve frames during the already-identified utterance window for the phrase closest to 'come to bill's ammunition' so the table and bottles can be visually inspected at that moment.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "counter",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null,
+        "query": "empty beer bottles on the table",
+        "exemplar_paths": null
+      },
+      "purpose": "Count empty beer bottles visible on the table in each candidate frame from the utterance window.",
+      "depends_on": [1]
+    }
+  ],
+  "refinement_instructions": "Keep the earlier ASR-supported fact that the target spoken phrase is localized to 129.485s–131.647s. Replace the prior failure-only reasoning with visual evidence from Step 1 and Step 2. Use the frame-level results from the counter output (not just any top-level summary) to identify how many empty beer bottles are present in the candidate frame(s) at the spoken moment. If all three sampled frames show the same count, use that directly; if counts differ, prefer the frame whose timestamp is most representative of the utterance moment and visibly shows the table scene clearly, and state that this is the count at the time the phrase is spoken. Then map the verified count to the correct answer option A/B/C/D and update the final answer accordingly."
+}

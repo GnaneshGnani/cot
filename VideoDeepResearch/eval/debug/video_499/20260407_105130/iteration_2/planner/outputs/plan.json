@@ -1,0 +1,55 @@
+{
+  "strategy": "Reuse the partial anchors from the previous iteration but sharpen each unresolved subproblem: do a tiny timestamp sweep around the binocular-view cluster to isolate a frame where the pot and hand are actually visible, and extend ASR slightly around the already relevant dialogue to capture the explicit premature-baby statement.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "video.mp4",
+        "query": null,
+        "timestamps": [
+          149.0,
+          150.0,
+          151.0,
+          152.0,
+          153.0,
+          154.0,
+          155.0,
+          160.0,
+          161.0,
+          162.0,
+          163.0,
+          164.0
+        ],
+        "num_frames": 12
+      },
+      "purpose": "Sample a narrow chronological neighborhood around the previously retrieved binocular-view candidates to find the exact frame where Dr. Sturgis is visible holding the pot, instead of relying on the earlier weak query-ranked retrieval.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "spatial_grounder",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null,
+        "query": "Dr. Sturgis's left hand holding the pot and Dr. Sturgis's right hand holding the pot"
+      },
+      "purpose": "Directly test the answer-critical relation on the sampled frame bundle: which of Dr. Sturgis's hands is holding the pot during the binocular-view sequence.",
+      "depends_on": [
+        1
+      ]
+    },
+    {
+      "step": 3,
+      "tool": "asr",
+      "arguments": {
+        "video_path": "video.mp4",
+        "start_time": 100.0,
+        "end_time": 145.0
+      },
+      "purpose": "Capture a slightly wider dialogue window around the already relevant Georgie/Mary exchange so the trace can ground whether Georgie is explicitly described as a premature baby or not.",
+      "depends_on": []
+    }
+  ],
+  "refinement_instructions": "For the hand subquestion, use STEP 2 frame-level outputs rather than any top-level summary. Identify the specific sampled timestamp where the pot is actually grounded with either the left-hand or right-hand relation, and rewrite the trace to cite that frame and relation explicitly. If none of the sampled frames grounds a pot-hand relation, state that the hand remains unresolved rather than inferring from body orientation. For the premature-baby subquestion, inspect STEP 3 transcript text for explicit wording about Georgie being early, premature, overdue, full term, or being sent home normally; use the spoken evidence directly and do not rely on the previous iteration's weaker paraphrase alone. Preserve the already supported fact that the relevant dialogue is in this Georgie/Mary exchange, but replace the old 'insufficient' conclusion if STEP 3 now makes the yes/no answer explicit. Update the final answer only if both subclaims are grounded by the new outputs; otherwise the trace should explicitly mark whichever subclaim still lacks direct evidence instead of forcing an option."
+}
