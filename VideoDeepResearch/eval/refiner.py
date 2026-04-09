@@ -118,6 +118,9 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
                  planner_model_name: str = "deepseek-ai/DeepSeek-V3",
                  planner_api_base=None,
                  planner_api_keys=None,
+                 verifier_model_name: str = None,
+                 verifier_api_base=None,
+                 verifier_api_keys=None,
                  chart_mode: str = "api",
                  chart_model_name: str = "gpt-5",
                  chart_device: str = "cuda:0",
@@ -136,7 +139,8 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
                  use_clip_retrieval: bool = False,
                  dense_segment_half_width: float = 0.5,
                  retrieval_top_k: int = 5,
-                 dense_frame_embed_batch: int = 8):
+                 dense_frame_embed_batch: int = 8,
+                 temporal_grounder_device_index: int = None):
         self.video_path = video_path
         self.question = question
         self.answer = answer
@@ -155,19 +159,19 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
             str(
                 os.getenv(
                     "TEMPORAL_GROUNDER_MODEL_NAME",
-                    "Qwen/Qwen3-VL-Embedding-2B",
+                    "Qwen/Qwen3-VL-Embedding-8B",
                 )
             ).strip()
-            or "Qwen/Qwen3-VL-Embedding-2B"
+            or "Qwen/Qwen3-VL-Embedding-8B"
         )
         self.temporal_grounder_reranker_model_name = (
             str(
                 os.getenv(
                     "TEMPORAL_GROUNDER_RERANKER_MODEL_NAME",
-                    "Qwen/Qwen3-VL-Reranker-2B",
+                    "Qwen/Qwen3-VL-Reranker-8B",
                 )
             ).strip()
-            or "Qwen/Qwen3-VL-Reranker-2B"
+            or "Qwen/Qwen3-VL-Reranker-8B"
         )
         self.temporal_grounder_sample_fps = max(
             0.1,
@@ -200,6 +204,13 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         self._temporal_grounder_video_info_cache = None
         self._temporal_grounder_embedder_class = None
         self._temporal_grounder_reranker_class = None
+        # GPU index for tool models (temporal grounder); kept off vLLM's GPU 0
+        _tg_dev_env = str(os.environ.get("TEMPORAL_GROUNDER_DEVICE_INDEX", "") or "").strip()
+        if temporal_grounder_device_index is not None:
+            self.temporal_grounder_device_index = int(temporal_grounder_device_index)
+        elif _tg_dev_env.isdigit():
+            self.temporal_grounder_device_index = int(_tg_dev_env)
+        # else: not set → _temporal_grounder_device_index() auto-selects GPU 1 if available
 
         self._setup_environment()
 
@@ -239,6 +250,17 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         self.planner_api_base = _norm_api_list(planner_api_base, ["http://localhost:8000/v1"])
         self.planner_api_keys = _norm_api_list(planner_api_keys, ["EMPTY"])
 
+        # Verifier model — defaults to planner when not explicitly set
+        self.verifier_model_name = (verifier_model_name or planner_model_name)
+        self.verifier_api_base = (
+            _norm_api_list(verifier_api_base, None) if verifier_api_base is not None
+            else list(self.planner_api_base)
+        )
+        self.verifier_api_keys = (
+            _norm_api_list(verifier_api_keys, ["EMPTY"]) if verifier_api_keys is not None
+            else list(self.planner_api_keys)
+        )
+
         self.vlm_api_base = _norm_api_list(vlm_api_base, None)
         self.vlm_api_keys = (
             _norm_api_list(vlm_api_keys, ["EMPTY"])
@@ -275,7 +297,7 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         self.dense_frame_fps = (
             self._dense_frame_fps_override
             if self._dense_frame_fps_override is not None
-            else float(self._video_fps)
+            else 1.0
         )
 
         self.retriever = None
@@ -300,6 +322,9 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         self.messages = []
 
     def load_sample(self, video_path: str, question: str, answer: str = None, options: list = None):
+        # Release the resident frame embedder so the new video's frames are
+        # re-embedded with a fresh cache on first frame_retriever call.
+        self._release_frame_embedder()
         self.video_path = str(video_path)
         self.set_task(question, answer=answer, options=options)
         self._temporal_grounder_video_info_cache = None
@@ -308,7 +333,7 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         self.dense_frame_fps = (
             self._dense_frame_fps_override
             if self._dense_frame_fps_override is not None
-            else float(self._video_fps)
+            else 1.0
         )
         self._ensure_retriever_ready()
         self._ensure_video_clip_embeddings()
@@ -660,6 +685,53 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
             self.retriever.calculate_video_clip_embedding(
                 self.video_path, folder_path, total_duration=self.duration, pre_calculate=True
             )
+        self._ensure_dense_frames()
+
+    def _ensure_dense_frames(self):
+        """Pre-extract dense frames at dense_frame_fps so frame_retriever has them ready."""
+        from video_utils import timestamp_to_clip_path
+        video_id = Path(self.video_path).stem
+        dense_dir = Path(self.dataset_folder) / "dense_frames" / video_id
+        # Check if already populated
+        existing = list(dense_dir.glob("frame_*.png")) if dense_dir.is_dir() else []
+        if not existing:
+            fps = float(getattr(self, "dense_frame_fps", 1.0))
+            print(f"  Extracting dense frames at {fps} fps → {dense_dir} ...")
+            try:
+                timestamp_to_clip_path(
+                    self.dataset_folder,
+                    0.0,
+                    float(self.duration),
+                    self.video_path,
+                    fps=fps,
+                )
+            except Exception as e:
+                print(f"  Warning: dense frame extraction failed: {e}")
+
+        # Pre-build Qwen3 frame embedding cache so frame_retriever calls only
+        # need 1 forward pass (query) instead of re-embedding all frames each time.
+        frame_paths = sorted(
+            (dense_dir.glob("frame_*.png") if dense_dir.is_dir() else []),
+            key=lambda p: p.name,
+        )
+        if frame_paths:
+            frame_items = []
+            for fp in frame_paths:
+                try:
+                    ts = float(fp.stem.replace("frame_", ""))
+                except ValueError:
+                    ts = 0.0
+                frame_items.append({"frame_path": str(fp), "timestamp": ts})
+            try:
+                self._precompute_frame_embeddings_cache(frame_items)
+            except Exception as e:
+                print(f"  Warning: frame embedding precompute failed: {e}")
+            # Ensure the embedder is warm in GPU memory now (cache hit path skips
+            # embedding but we still need the model resident before tool calls).
+            try:
+                self._get_or_load_frame_embedder()
+            except Exception as e:
+                print(f"  Warning: frame embedder warm-up failed: {e}")
     
     def _get_video_duration(self):
         try:
@@ -1047,6 +1119,15 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
 
         self._refinement_debug_iter_dir = None
 
+        # Release the persistent frame embedder now that the pipeline is done.
+        # This frees the ~16 GB it occupies on GPU 1.
+        self._release_frame_embedder()
+
+        # Resolve bare MCQ letters (e.g. "A") to full option text so that
+        # downstream comparisons work correctly for MCQ questions.
+        resolved_answer = self._resolve_mcq_answer(current_answer)
+        is_correct = self._answers_match(resolved_answer, self.answer or "") if self.answer else None
+
         return {
             "question": self.question,
             "options": self.options,
@@ -1054,7 +1135,9 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
             "initial_trace": {"steps": initial_trace},
             "initial_answer": initial_answer,
             "final_trace": {"steps": current_trace},
-            "final_answer": current_answer,
+            "final_answer": resolved_answer,
+            "final_answer_raw": current_answer,
+            "is_correct": is_correct,
             "verifier_raw": final_verifier_raw,
             "verifier_output": final_verifier_output,
             "iteration_history": iteration_history,
@@ -1065,7 +1148,8 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
 
 
 def main():
-    default_annotation_file = "/nfs-stor/ghazi.ahmad/videos/annotations.json"
+    # default_annotation_file = "/nfs-stor/ghazi.ahmad/videos/annotations.json"
+    default_annotation_file = os.path.join(_eval_dir, "refiner_inputs.json")
 
     def _env_list(name: str, fallback: str = ""):
         raw = (os.environ.get(name, fallback) or "").strip()
@@ -1081,23 +1165,28 @@ def main():
         default=default_annotation_file,
         help="Path to annotations.json (or JSONL)",
     )
-    parser.add_argument("--output", type=str, default=None, help="Output JSON path")
+    parser.add_argument("--output", type=str, default=None, help="Output directory path")
     parser.add_argument("--max-iterations", type=int, default=2, help="Max refinement iterations per sample")
+    parser.add_argument("--index", type=int, default=None, help="Index of a single entry to process (0-based); omit to process all entries")
     args = parser.parse_args()
 
     annotation_path = Path(args.annotation_file).expanduser().resolve()
     if not annotation_path.exists():
         raise SystemExit(f"Error: annotation file not found: {annotation_path}")
 
-    output_path = (
+    results_dir = (
         Path(args.output).expanduser().resolve()
         if args.output
-        else annotation_path.with_name("refiner_results.json")
+        else Path(_eval_dir) / "results_final"
     )
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    results_dir.mkdir(parents=True, exist_ok=True)
     data = _load_annotations(annotation_path)
     if not data:
         raise SystemExit(f"Error: no samples found in {annotation_path}")
+    if args.index is not None:
+        if args.index < 0 or args.index >= len(data):
+            raise SystemExit(f"Error: --index {args.index} out of range (0..{len(data) - 1})")
+        data = [data[args.index]]
 
     openai_api_key = (os.environ.get("OPENAI_API_KEY") or os.environ.get("API_KEY") or "").strip()
     planner_api_base = _env_list(
@@ -1122,21 +1211,30 @@ def main():
     chart_model_name = os.environ.get("CHART_MODEL_NAME", vlm_model_name)
     planner_model_name = os.environ.get("PLANNER_MODEL_NAME", os.environ.get("API_MODEL_NAME", "gpt-5.4"))
 
+    verifier_model_name = os.environ.get("VERIFIER_MODEL_NAME") or None
+    verifier_api_base = _env_list("VERIFIER_API_BASE") or None
+    verifier_api_keys = _env_list("VERIFIER_API_KEY") or None
+
+    _tg_dev_env = os.environ.get("TEMPORAL_GROUNDER_DEVICE_INDEX", "").strip()
+    temporal_grounder_device_index = int(_tg_dev_env) if _tg_dev_env.isdigit() else None
+
     if vlm_api_base:
         print(f"Using remote VLM API: model={vlm_model_name} base={vlm_api_base[0]}")
     else:
         print(f"Using local VLM model: {vlm_model_name}")
 
     demo = None
-    results = []
     dataset_folder = str((Path(_eval_dir) / "data").resolve())
     debug_root = str((Path(_eval_dir) / "debug").resolve())
 
-    def _save_results():
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(results, f, ensure_ascii=False, indent=2)
+    def _save_result(record, video_path):
+        video_stem = Path(video_path).stem if video_path else "unknown"
+        out_file = results_dir / f"{video_stem}.json"
+        with open(out_file, "w", encoding="utf-8") as f:
+            json.dump(record, f, ensure_ascii=False, indent=2)
+        return out_file
 
-    for index, item in enumerate(data[:1], start=1):
+    for index, item in enumerate(data, start=1):
         record = dict(item)
         video_path = str(item.get("video_path", "")).strip()
         question = str(item.get("question", "")).strip()
@@ -1147,14 +1245,12 @@ def main():
 
         if not video_path or not os.path.exists(video_path):
             record["refiner_error"] = f"Video file not found: {video_path}"
-            results.append(record)
-            _save_results()
+            _save_result(record, video_path)
             continue
 
         if not isinstance(trace_steps, list) or not trace_steps:
             record["refiner_error"] = "Missing initial_trace_steps"
-            results.append(record)
-            _save_results()
+            _save_result(record, video_path)
             continue
 
         try:
@@ -1178,8 +1274,12 @@ def main():
                     planner_model_name=planner_model_name,
                     planner_api_base=planner_api_base,
                     planner_api_keys=planner_api_keys,
+                    verifier_model_name=verifier_model_name,
+                    verifier_api_base=verifier_api_base,
+                    verifier_api_keys=verifier_api_keys,
                     chart_mode=chart_mode,
                     chart_model_name=chart_model_name,
+                    temporal_grounder_device_index=temporal_grounder_device_index,
                 )
             else:
                 demo.load_sample(
@@ -1194,12 +1294,14 @@ def main():
                 max_iterations=args.max_iterations,
             )
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             record["refiner_error"] = str(e)
 
-        results.append(record)
-        _save_results()
+        out_file = _save_result(record, video_path)
+        print(f"  ✓ Saved: {out_file}")
 
-    print(f"\n✓ Results saved to: {output_path}")
+    print(f"\n✓ Results saved to: {results_dir}")
 
 
 if __name__ == "__main__":

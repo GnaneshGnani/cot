@@ -1362,31 +1362,29 @@ class RefinerToolsMixin:
         ranked_segments.sort(key=lambda seg: seg["confidence"], reverse=True)
         tol = max(0.0, float(getattr(self, "dense_segment_half_width", 0.5)))
 
-        for seg in ranked_segments:
-            aligned = [
-                frame for frame in normalized_frames
-                if seg["start"] - tol <= frame["timestamp"] <= seg["end"] + tol
-            ]
-            if aligned:
-                return sorted(
-                    aligned,
-                    key=lambda frame: (
-                        -frame["relevance_score"],
-                        abs(frame["timestamp"] - seg["mid"]),
-                        frame["timestamp"],
-                    ),
-                )
+        # Only consider the top-1 reranked segment (highest confidence).
+        top_seg = ranked_segments[0]
+        aligned = [
+            frame for frame in normalized_frames
+            if top_seg["start"] - tol <= frame["timestamp"] <= top_seg["end"] + tol
+        ]
+        if aligned:
+            return sorted(
+                aligned,
+                key=lambda frame: (
+                    -frame["relevance_score"],
+                    abs(frame["timestamp"] - top_seg["mid"]),
+                    frame["timestamp"],
+                ),
+            )
 
-        best_seg = ranked_segments[0]
-        nearest = sorted(
+        # No frames fell within the top segment window — return all retrieved
+        # frames rather than discarding all but the nearest one.  The downstream tool
+        # (chart_analyzer, OCR, etc.) will evaluate every candidate and pick the best.
+        return sorted(
             normalized_frames,
-            key=lambda frame: (
-                abs(frame["timestamp"] - best_seg["mid"]),
-                -frame["relevance_score"],
-                frame["timestamp"],
-            ),
+            key=lambda frame: (-frame["relevance_score"], frame["timestamp"]),
         )
-        return nearest[:1]
 
     def _extract_retrieved_frames(self, frame_result: dict) -> list:
         frames = frame_result.get("frames") or []
@@ -1424,6 +1422,13 @@ class RefinerToolsMixin:
             for dep in depends_on:
                 if step_tools.get(dep) == "temporal_grounder" and isinstance(step_results.get(dep), dict):
                     temporal_step = dep
+            # Fall back to the most recent prior temporal_grounder step even when
+            # the planner didn't set depends_on — so we always scope frame search
+            # to the already-grounded window instead of searching all dense frames.
+            if temporal_step is None:
+                temporal_step = self._latest_prior_step_of_type(current_step, step_tools, "temporal_grounder")
+                if temporal_step is not None and not isinstance(step_results.get(temporal_step), dict):
+                    temporal_step = None
             if temporal_step is None:
                 return arguments
 
@@ -1442,18 +1447,39 @@ class RefinerToolsMixin:
                 key=lambda seg: float(seg.get("confidence", 0.0) or 0.0),
                 reverse=True,
             )
+            # Snap generated timestamps to the nearest dense-frame grid so they
+            # hit the pre-built embedding cache instead of triggering fresh
+            # per-frame forward passes.  dense_frame_fps is typically 1.0, so
+            # the grid is integer seconds; at higher fps it's finer.
+            dense_fps = max(0.1, float(getattr(self, "dense_frame_fps", 1.0)))
+            snap_interval = 1.0 / dense_fps
+
+            def _snap(t: float) -> float:
+                return round(round(t / snap_interval) * snap_interval, 2)
+
             timestamps = []
             for seg in ranked_segments:
                 start = float(seg["start"])
                 end = float(seg["end"])
                 if end <= start:
-                    timestamps.append(start)
+                    timestamps.append(_snap(start))
                     continue
                 step = (end - start) / 4.0
-                timestamps.extend([start + step, start + 2.0 * step, start + 3.0 * step])
+                timestamps.extend([
+                    _snap(start + step),
+                    _snap(start + 2.0 * step),
+                    _snap(start + 3.0 * step),
+                ])
+
+            # Also record the bounding time_range across ALL grounded segments so
+            # the query-only retrieval path (_informative_retrieval) is similarly scoped.
+            all_starts = [float(seg["start"]) for seg in segments]
+            all_ends = [float(seg["end"]) for seg in segments]
+            time_range = (min(all_starts), max(all_ends))
 
             updated = dict(arguments)
             updated["timestamps"] = timestamps
+            updated["time_range"] = time_range
             return updated
 
         if tool_name not in {"spatial_grounder", "counter", "chart_analyzer", "ocr"}:
@@ -1486,6 +1512,9 @@ class RefinerToolsMixin:
             )
             if not aligned_frames:
                 aligned_frames = retrieved_frames
+            else:
+                # Cap to 10 frames from the top-ranked clip
+                aligned_frames = aligned_frames[:10]
         else:
             aligned_frames = retrieved_frames
 
@@ -1523,33 +1552,36 @@ class RefinerToolsMixin:
         )
         print(f"  ✓ Chart VLM loaded: {model_name}")
 
-    def _call_chart_vision_api(self, prompt_text: str, frame_path: str) -> str:
-        img = Image.open(frame_path).convert("RGB")
-        width, height = img.size
-        if max(width, height) > 768:
-            if width > height:
-                nw, nh = 768, int(height * (768 / width))
-            else:
-                nh, nw = 768, int(width * (768 / height))
-            img = img.resize((nw, nh), Image.Resampling.LANCZOS)
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=85)
-        b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                    {"type": "text", "text": prompt_text},
-                ],
-            }
-        ]
+    def _call_chart_vision_api(self, prompt_text: str, frame_paths) -> str:
+        """Call the chart vision API with one or more frame images."""
+        if isinstance(frame_paths, str):
+            frame_paths = [frame_paths]
+
+        def _encode(frame_path: str) -> str:
+            img = Image.open(frame_path).convert("RGB")
+            width, height = img.size
+            if max(width, height) > 768:
+                if width > height:
+                    nw, nh = 768, int(height * (768 / width))
+                else:
+                    nh, nw = 768, int(width * (768 / height))
+                img = img.resize((nw, nh), Image.Resampling.LANCZOS)
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=85)
+            return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+        content = []
+        for fp in frame_paths:
+            content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{_encode(fp)}"}})
+        content.append({"type": "text", "text": prompt_text})
+        messages = [{"role": "user", "content": content}]
+
         vlm_out = getattr(self, "_refinement_debug_vlm_outputs_dir", None)
         if vlm_out:
             refiner_debug.write_json(
                 vlm_out,
                 "model_input.json",
-                {"model": self.chart_model_name, "messages": messages, "frame_path": frame_path},
+                {"model": self.chart_model_name, "messages": messages, "frame_paths": frame_paths},
             )
         bases = self._chart_effective_api_bases()
         keys = self._chart_effective_api_keys()
@@ -1895,8 +1927,10 @@ class RefinerToolsMixin:
             )
         return result, None
 
-    def _informative_retrieval(self, query: str, top_k: int):
-        """Dense-frame text–image retrieval by default; optional clip-level search."""
+    def _informative_retrieval(self, query: str, top_k: int, time_range: tuple = None):
+        """Dense-frame text–image retrieval by default; optional clip-level search.
+        time_range: optional (start_sec, end_sec) to restrict search to a temporal window.
+        """
         ensure_retriever = getattr(self, "_ensure_retriever_ready", None)
         if callable(ensure_retriever) and not ensure_retriever():
             return "dense", []
@@ -1908,16 +1942,277 @@ class RefinerToolsMixin:
                 top_k=top_k,
                 total_duration=self.duration,
             )
-        return "dense", self.retriever.get_informative_dense_frames(
-            query,
-            self.video_path,
-            self.dataset_folder,
-            
-            top_k=top_k,
-            total_duration=float(self.duration),
-            dense_sample_fps=float(getattr(self, "dense_frame_fps", 24.0)),
-            embed_batch=int(getattr(self, "dense_frame_embed_batch", 8)),
+        frame_paths, _ = self.retriever._list_dense_frame_paths(self.dataset_folder, self.video_path)
+        if not frame_paths and self.duration is not None and float(self.duration) > 0:
+            try:
+                from video_utils import timestamp_to_clip_path
+                timestamp_to_clip_path(
+                    self.dataset_folder, 0.0, float(self.duration), self.video_path,
+                    fps=float(getattr(self, "dense_frame_fps", 24.0)),
+                )
+            except Exception as e:
+                print(f"  dense frame materialize skipped: {e}")
+            frame_paths, _ = self.retriever._list_dense_frame_paths(self.dataset_folder, self.video_path)
+        if not frame_paths:
+            return "dense", []
+        frame_items = [
+            {
+                "frame_path": fp,
+                "timestamp": self.retriever._timestamp_from_dense_frame_path(fp),
+            }
+            for fp in frame_paths
+        ]
+        if time_range is not None:
+            t_start, t_end = float(time_range[0]), float(time_range[1])
+            frame_items = [f for f in frame_items if t_start <= f["timestamp"] <= t_end]
+            if not frame_items:
+                # If the filter removed everything (rounding edge), fall back to full set
+                frame_items = [
+                    {"frame_path": fp, "timestamp": self.retriever._timestamp_from_dense_frame_path(fp)}
+                    for fp in frame_paths
+                ]
+        try:
+            scored = self._qwen_score_frames(query, frame_items, top_k)
+            return "dense", [(item["frame_path"], item["relevance_score"]) for item in scored]
+        except Exception as e:
+            print(f"  qwen dense retrieval fallback to languagebind: {e}")
+            return "dense", self.retriever.get_informative_dense_frames(
+                query,
+                self.video_path,
+                self.dataset_folder,
+                top_k=top_k,
+                total_duration=float(self.duration),
+                dense_sample_fps=float(getattr(self, "dense_frame_fps", 24.0)),
+                embed_batch=int(getattr(self, "dense_frame_embed_batch", 8)),
+            )
+
+    def _dense_frame_embed_cache_paths(self):
+        """Returns (embeddings_pt_path, frame_paths_json_path) for the current video."""
+        from pathlib import Path as _Path
+        video_id = _Path(str(self.video_path)).stem
+        cache_dir = _Path(self.dataset_folder) / "dense_frames" / video_id
+        return cache_dir / "qwen_frame_embeddings.pt", cache_dir / "qwen_frame_paths.json"
+
+    def _get_or_load_frame_embedder(self):
+        """Return the resident Qwen3-VL-Embedding-8B instance, loading it on first call.
+        Stays on GPU 1 (FRAME_EMBEDDER_DEVICE_INDEX) for the entire pipeline so that
+        only the query (1 forward pass) needs to run per frame_retriever call.
+        Call _release_frame_embedder() only at pipeline end to free GPU memory.
+        """
+        if getattr(self, "_frame_embedder", None) is not None:
+            return self._frame_embedder
+
+        model_dir = self._resolve_temporal_grounder_model_dir(
+            getattr(self, "temporal_grounder_model_name", "Qwen/Qwen3-VL-Embedding-8B")
         )
+        Embedder = self._load_temporal_grounder_helper_class(
+            model_dir, "qwen3_vl_embedding.py", "Qwen3VLEmbedder",
+            "_temporal_grounder_embedder_class",
+        )
+        model_kwargs = self._temporal_grounder_model_kwargs()
+        embed_dev_idx = self._frame_embedder_device_index()
+        print(f"  [frame embedder] Loading Qwen3-VL-Embedding-8B onto GPU {embed_dev_idx} (resident) ...")
+        with torch.cuda.device(embed_dev_idx):
+            self._frame_embedder = Embedder(model_name_or_path=str(model_dir), **model_kwargs)
+        print(f"  [frame embedder] Loaded — resident on GPU {embed_dev_idx} for the full pipeline.")
+        return self._frame_embedder
+
+    def _release_frame_embedder(self):
+        """Release the resident frame embedder from GPU memory (called at pipeline end)."""
+        embedder = getattr(self, "_frame_embedder", None)
+        if embedder is not None:
+            embed_dev_idx = self._frame_embedder_device_index()
+            model = getattr(embedder, "model", None)
+            if isinstance(model, torch.nn.Module):
+                try:
+                    model.cpu()
+                except Exception:
+                    pass
+            for attr in ("model", "processor", "tokenizer", "score_linear"):
+                if hasattr(embedder, attr):
+                    try:
+                        setattr(embedder, attr, None)
+                    except Exception:
+                        pass
+            import gc as _gc
+            _gc.collect()
+            if torch.cuda.is_available():
+                with torch.cuda.device(embed_dev_idx):
+                    torch.cuda.empty_cache()
+            self._frame_embedder = None
+            print("  [frame embedder] Released from GPU.")
+
+    def _precompute_frame_embeddings_cache(self, frame_items: list) -> bool:
+        """Embed *all* frame_items with Qwen3-VL-Embedding-8B and save to disk.
+        Idempotent — skips when cache already exists.  Returns True on success.
+        Reuses the resident frame embedder so load cost is paid at most once."""
+        emb_path, paths_path = self._dense_frame_embed_cache_paths()
+        if emb_path.is_file() and paths_path.is_file():
+            return True
+        if not frame_items:
+            return False
+
+        def _as_tensor(x):
+            if isinstance(x, torch.Tensor):
+                return x.detach().cpu().float()
+            return torch.tensor(x, dtype=torch.float32)
+
+        batch_size = max(1, int(getattr(self, "dense_frame_embed_batch", 8)))
+        print(f"  [frame embed cache] Precomputing embeddings for {len(frame_items)} frames ...")
+        embedder = self._get_or_load_frame_embedder()
+        try:
+            all_embs = []
+            for i in range(0, len(frame_items), batch_size):
+                batch = frame_items[i : i + batch_size]
+                samples = [{"video": [item["frame_path"]]} for item in batch]
+                try:
+                    with self._frame_embedder_inference_context():
+                        embs = _as_tensor(embedder.process(samples))
+                except Exception:
+                    embs_list = []
+                    for item in batch:
+                        try:
+                            with self._frame_embedder_inference_context():
+                                e = _as_tensor(embedder.process([{"video": [item["frame_path"]]}]))
+                        except Exception:
+                            e = torch.zeros(1, 4096)
+                        embs_list.append(e)
+                    embs = torch.cat(embs_list, dim=0)
+                embs_norm = embs / embs.norm(p=2, dim=-1, keepdim=True).clamp(min=1e-8)
+                all_embs.append(embs_norm.cpu())
+
+            frame_embs = torch.cat(all_embs, dim=0).float()
+            emb_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(frame_embs, emb_path)
+            paths_path.write_text(
+                json.dumps([item["frame_path"] for item in frame_items]),
+                encoding="utf-8",
+            )
+            print(f"  [frame embed cache] Saved {frame_embs.shape[0]} frame embeddings → {emb_path}")
+            return True
+        except Exception as e:
+            print(f"  [frame embed cache] Precompute failed: {e}")
+            return False
+        # NOTE: embedder is intentionally NOT released here — it stays resident
+
+    def _qwen_score_frames(self, query: str, frame_items: list, top_k: int) -> list:
+        """Score frame_items against query using Qwen3-VL-Embedding-8B.
+        Frame embeddings are served from a disk cache built on first call — only
+        the query is embedded live, reducing cost from O(N_frames) to O(1) FWD passes.
+        Returns a list sorted by relevance_score descending, capped at top_k.
+        Each output item: {frame_path, timestamp, relevance_score}.
+        """
+        def _as_tensor(x):
+            if isinstance(x, torch.Tensor):
+                return x.detach().cpu().float()
+            return torch.tensor(x, dtype=torch.float32)
+
+        batch_size = max(1, int(getattr(self, "dense_frame_embed_batch", 8)))
+
+        # ── Load cached frame embeddings ──────────────────────────────────────
+        emb_path, paths_path = self._dense_frame_embed_cache_paths()
+        cached_frame_embs: torch.Tensor | None = None
+        cached_paths_index: dict = {}
+        if emb_path.is_file() and paths_path.is_file():
+            try:
+                saved_paths = json.loads(paths_path.read_text(encoding="utf-8"))
+                cached_frame_embs = torch.load(emb_path, map_location="cpu").float()
+                cached_paths_index = {p: i for i, p in enumerate(saved_paths)}
+            except Exception as e:
+                print(f"  [frame embed cache] load failed, recomputing: {e}")
+                cached_frame_embs = None
+                cached_paths_index = {}
+
+        # ── Get the resident embedder (loads once, stays in GPU memory) ───────
+        embedder = self._get_or_load_frame_embedder()
+
+        # Always embed query fresh (1 forward pass — fast, text-only)
+        with self._frame_embedder_inference_context():
+            q_emb = _as_tensor(embedder.process([
+                {"text": query, "instruction": "Retrieve frames relevant to the user's query."}
+            ]))
+        q_emb = q_emb / q_emb.norm(p=2, dim=-1, keepdim=True).clamp(min=1e-8)
+
+        if cached_frame_embs is not None:
+            # ── Fast path: look up pre-computed frame embeddings ────────────
+            ordered_embs = []
+            frames_to_embed = []
+            frames_to_embed_idx = []
+            for idx, item in enumerate(frame_items):
+                cache_i = cached_paths_index.get(item["frame_path"])
+                if cache_i is not None:
+                    ordered_embs.append((idx, cached_frame_embs[cache_i].float()))
+                else:
+                    frames_to_embed.append(item)
+                    frames_to_embed_idx.append(idx)
+
+            # Embed only frames absent from cache (rare after pre-computation)
+            if frames_to_embed:
+                for i in range(0, len(frames_to_embed), batch_size):
+                    batch = frames_to_embed[i : i + batch_size]
+                    samples = [{"video": [f["frame_path"]]} for f in batch]
+                    try:
+                        with self._frame_embedder_inference_context():
+                            embs = _as_tensor(embedder.process(samples))
+                    except Exception:
+                        embs = torch.zeros(len(batch), q_emb.shape[-1])
+                    embs = embs / embs.norm(p=2, dim=-1, keepdim=True).clamp(min=1e-8)
+                    for item, emb in zip(batch, embs):
+                        orig_idx = frames_to_embed_idx[frames_to_embed.index(item)]
+                        ordered_embs.append((orig_idx, emb.float()))
+
+            ordered_embs.sort(key=lambda x: x[0])
+            frame_embs = torch.stack([e for _, e in ordered_embs], dim=0)
+        else:
+            # ── Slow path: embed all frames, then save cache ─────────────────
+            all_embs = []
+            for i in range(0, len(frame_items), batch_size):
+                batch = frame_items[i : i + batch_size]
+                samples = [{"video": [item["frame_path"]]} for item in batch]
+                try:
+                    with self._frame_embedder_inference_context():
+                        embs = _as_tensor(embedder.process(samples))
+                except Exception:
+                    embs_list = []
+                    for item in batch:
+                        try:
+                            with self._frame_embedder_inference_context():
+                                e = _as_tensor(embedder.process([{"video": [item["frame_path"]]}]))
+                        except Exception:
+                            e = torch.zeros(1, q_emb.shape[-1])
+                        embs_list.append(e)
+                    embs = torch.cat(embs_list, dim=0)
+                all_embs.append(embs)
+            frame_embs = torch.cat(all_embs, dim=0).float()
+            frame_embs_norm = frame_embs / frame_embs.norm(p=2, dim=-1, keepdim=True).clamp(min=1e-8)
+            try:
+                emb_path.parent.mkdir(parents=True, exist_ok=True)
+                torch.save(frame_embs_norm.cpu(), emb_path)
+                paths_path.write_text(
+                    json.dumps([item["frame_path"] for item in frame_items]),
+                    encoding="utf-8",
+                )
+                print(f"  [frame embed cache] Saved {frame_embs_norm.shape[0]} embeddings → {emb_path}")
+            except Exception as e:
+                print(f"  [frame embed cache] save failed: {e}")
+            frame_embs = frame_embs_norm
+
+        # NOTE: embedder is intentionally NOT released here — stays resident
+        sims = (q_emb @ frame_embs.T).squeeze(0)
+        if sims.dim() == 0:
+            sims = sims.unsqueeze(0)
+
+        scored = [
+            {
+                "frame_path": item["frame_path"],
+                "timestamp": item["timestamp"],
+                "relevance_score": float(score),
+            }
+            for item, score in zip(frame_items, sims.tolist())
+        ]
+
+        scored.sort(key=lambda x: (-x["relevance_score"], x["timestamp"]))
+        return scored[:top_k]
 
     def _rerank_frame_candidates(self, query: str, frames: list, top_k: int):
         def _fallback(items):
@@ -1962,61 +2257,10 @@ class RefinerToolsMixin:
             return []
 
         try:
-            from languagebind import to_device
-
-            q_emb = retriever.calculate_text_embedding(query, flag_save_embedding=False, modality="image").cpu()
-            q_emb = q_emb / q_emb.norm(p=2, dim=1, keepdim=True)
-
-            scored = []
-            batch_size = max(1, int(getattr(self, "dense_frame_embed_batch", 8)))
-            device = getattr(retriever, "device", torch.device("cpu"))
-
-            for i in range(0, len(unique_frames), batch_size):
-                batch = unique_frames[i : i + batch_size]
-                batch_paths = [item["frame_path"] for item in batch]
-                try:
-                    inputs = {"image": to_device(retriever.modality_transform["image"](batch_paths), device)}
-                    with torch.no_grad():
-                        emb = retriever.model(inputs)["image"].cpu()
-                    emb = emb / emb.norm(p=2, dim=1, keepdim=True)
-                    similarities = torch.matmul(q_emb, emb.T)[0].tolist()
-                    for item, score in zip(batch, similarities):
-                        scored.append(
-                            {
-                                "frame_path": item["frame_path"],
-                                "timestamp": item["timestamp"],
-                                "relevance_score": float(score),
-                            }
-                        )
-                except Exception:
-                    for item in batch:
-                        try:
-                            inputs = {
-                                "image": to_device(retriever.modality_transform["image"](item["frame_path"]), device)
-                            }
-                            with torch.no_grad():
-                                emb = retriever.model(inputs)["image"].cpu()
-                            emb = emb / emb.norm(p=2, dim=1, keepdim=True)
-                            score = torch.matmul(q_emb, emb.T)[0][0].item()
-                            scored.append(
-                                {
-                                    "frame_path": item["frame_path"],
-                                    "timestamp": item["timestamp"],
-                                    "relevance_score": float(score),
-                                }
-                            )
-                        except Exception as e:
-                            print(f"  skip frame rerank {item['frame_path']}: {e}")
-                    torch.cuda.empty_cache()
+            return self._qwen_score_frames(query, unique_frames, top_k)
         except Exception as e:
-            print(f"  frame rerank fallback: {e}")
+            print(f"  frame rerank qwen fallback: {e}")
             return _fallback(unique_frames)
-
-        if not scored:
-            return _fallback(unique_frames)
-        scored.sort(key=lambda item: (-item["relevance_score"], item["timestamp"]))
-        torch.cuda.empty_cache()
-        return scored[:top_k]
 
     def _clip_path_to_segment(self, clip_path: str, score: float) -> dict | None:
         if not clip_path:
@@ -2065,13 +2309,55 @@ class RefinerToolsMixin:
             total_duration=self.duration,
         )
 
+    def _frame_embedder_device_index(self) -> int:
+        """GPU index reserved for the persistent frame embedder (GPU 1)."""
+        raw = str(os.environ.get("FRAME_EMBEDDER_DEVICE_INDEX", "") or "").strip()
+        if raw.isdigit():
+            return int(raw)
+        count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        return 1 if count > 1 else 0
+
+    def _temporal_grounder_device_index(self) -> int:
+        """GPU index reserved for temporal grounder tools (kept off vLLM GPU 0 and frame-embedder GPU 1)."""
+        requested = getattr(self, "temporal_grounder_device_index", None)
+        if requested is not None:
+            return int(requested)
+        count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        # ≥3 GPUs: 0=vLLM, 1=frame embedder, 2=temporal grounder
+        if count >= 3:
+            return 2
+        return 1 if count > 1 else 0
+
+    @contextmanager
     def _temporal_grounder_inference_context(self):
+        tool_dev = self._temporal_grounder_device_index()
         use_bf16 = (
             torch.cuda.is_available()
             and hasattr(torch.cuda, "is_bf16_supported")
             and torch.cuda.is_bf16_supported()
         )
-        return torch.autocast(device_type="cuda", dtype=torch.bfloat16) if use_bf16 else nullcontext()
+        with torch.cuda.device(tool_dev):
+            if use_bf16:
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    yield
+            else:
+                yield
+
+    @contextmanager
+    def _frame_embedder_inference_context(self):
+        """Inference context for the resident frame embedder on its dedicated GPU (GPU 1)."""
+        embed_dev = self._frame_embedder_device_index()
+        use_bf16 = (
+            torch.cuda.is_available()
+            and hasattr(torch.cuda, "is_bf16_supported")
+            and torch.cuda.is_bf16_supported()
+        )
+        with torch.cuda.device(embed_dev):
+            if use_bf16:
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    yield
+            else:
+                yield
 
     def _temporal_grounder_model_kwargs(self):
         use_bf16 = (
@@ -2084,13 +2370,20 @@ class RefinerToolsMixin:
     def _release_temporal_grounder_runtime(self, runtime):
         if runtime is None:
             return
+        tool_dev = self._temporal_grounder_device_index()
         model = getattr(runtime, "model", None)
         if isinstance(model, torch.nn.Module):
             try:
                 model.cpu()
             except Exception:
                 pass
-        for attr in ("model", "processor", "tokenizer"):
+        score_linear = getattr(runtime, "score_linear", None)
+        if isinstance(score_linear, torch.nn.Module):
+            try:
+                score_linear.cpu()
+            except Exception:
+                pass
+        for attr in ("model", "processor", "tokenizer", "score_linear"):
             if hasattr(runtime, attr):
                 try:
                     setattr(runtime, attr, None)
@@ -2098,7 +2391,8 @@ class RefinerToolsMixin:
                     pass
         gc.collect()
         if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+            with torch.cuda.device(tool_dev):
+                torch.cuda.empty_cache()
 
     def _resolve_temporal_grounder_model_dir(self, model_name: str) -> str:
         raw = str(model_name or "").strip()
@@ -2279,16 +2573,20 @@ class RefinerToolsMixin:
         return result
 
     def _run_qwen_temporal_grounder(self, query: str, top_k: int) -> dict:
+        # NOTE: frame embedder eviction before this call is handled by
+        # _execute_refine_plan which wraps temporal_grounder calls. Do NOT
+        # release here — _execute_refine_plan restores it afterwards.
+
         def _as_tensor(x):
             if isinstance(x, torch.Tensor):
                 return x.detach().cpu().float()
             return torch.tensor(x, dtype=torch.float32)
 
         model_dir = self._resolve_temporal_grounder_model_dir(
-            getattr(self, "temporal_grounder_model_name", "Qwen/Qwen3-VL-Embedding-2B")
+            getattr(self, "temporal_grounder_model_name", "Qwen/Qwen3-VL-Embedding-8B")
         )
         reranker_dir = self._resolve_temporal_grounder_model_dir(
-            getattr(self, "temporal_grounder_reranker_model_name", "Qwen/Qwen3-VL-Reranker-2B")
+            getattr(self, "temporal_grounder_reranker_model_name", "Qwen/Qwen3-VL-Reranker-8B")
         )
         Embedder = self._load_temporal_grounder_helper_class(
             model_dir,
@@ -2337,12 +2635,14 @@ class RefinerToolsMixin:
                 windows = cached.get("clips") or windows
                 clip_embeddings = torch.load(embeddings_path, map_location="cpu")
 
-        embedder = Embedder(
-            model_name_or_path=str(model_dir),
-            num_frames=frames_per_window,
-            max_frames=frames_per_window,
-            **model_kwargs,
-        )
+        tool_dev_idx = self._temporal_grounder_device_index()
+        with torch.cuda.device(tool_dev_idx):
+            embedder = Embedder(
+                model_name_or_path=str(model_dir),
+                num_frames=frames_per_window,
+                max_frames=frames_per_window,
+                **model_kwargs,
+            )
         if clip_embeddings is None:
             embs = []
             for i in range(0, len(windows), batch_size):
@@ -2376,11 +2676,12 @@ class RefinerToolsMixin:
         self._release_temporal_grounder_runtime(embedder)
         embedder = None
 
-        reranker = Reranker(
-            model_name_or_path=str(reranker_dir),
-            num_frames=frames_per_window,
-            max_frames=frames_per_window,
-            **model_kwargs,
+        with torch.cuda.device(tool_dev_idx):
+            reranker = Reranker(
+                model_name_or_path=str(reranker_dir),
+                num_frames=frames_per_window,
+                max_frames=frames_per_window,
+                **model_kwargs,
         )
         candidates = []
         for embed_score, idx in zip(top_scores.tolist(), top_indices.tolist()):
@@ -2419,6 +2720,14 @@ class RefinerToolsMixin:
         reranked_segments.sort(
             key=lambda x: (-float(x.get("confidence", 0.0) or 0.0), float(x.get("start", 0.0))),
         )
+
+        print(f"  [Temporal Grounder] query: {query!r}")
+        for rank, seg in enumerate(reranked_segments[:3], start=1):
+            print(
+                f"  [Temporal Grounder] top-{rank}: "
+                f"{seg['start']:.1f}s–{seg['end']:.1f}s  "
+                f"rerank={seg['rerank_score']:.4f}  embed={seg['embed_score']:.4f}"
+            )
 
         return {
             "query": query,
@@ -2537,6 +2846,9 @@ class RefinerToolsMixin:
 
             try:
                 output = self._execute_refine_tool_call(tool_name, args_dict)
+            except Exception as tool_exc:
+                print(f"  [Tool {step_num} {tool_name}] ERROR: {tool_exc}")
+                output = f"Error executing {tool_name}: {tool_exc}"
             finally:
                 self._refinement_debug_vlm_outputs_dir = None
                 self._refinement_debug_vlm_input_basename = None
@@ -2749,6 +3061,10 @@ class RefinerToolsMixin:
             if isinstance(timestamps, str):
                 timestamps = robust_eval(timestamps)
 
+            # time_range may be injected by _align_visual_tool_arguments to restrict
+            # the search to a temporal_grounder window even in the query-only path.
+            time_range = arguments.get("time_range")  # (start_sec, end_sec) or None
+
             frames = []
             mode = "timestamp"
 
@@ -2778,7 +3094,7 @@ class RefinerToolsMixin:
             elif query:
                 mode = "query"
                 try:
-                    kind, matches = self._informative_retrieval(query, num_frames)
+                    kind, matches = self._informative_retrieval(query, num_frames, time_range=time_range)
                 except Exception as e:
                     print(f"  Error: {e}")
                     kind, matches = "dense", []
@@ -3502,40 +3818,24 @@ class RefinerToolsMixin:
                 parsed = None
 
                 if mode == "api":
-                    raw_output = self._call_chart_vision_api(prompt_text, frame_paths[0])
+                    raw_output = self._call_chart_vision_api(prompt_text, frame_paths)
                     print(f'chart analyzer output: {raw_output}')
                     parsed = self._extract_json_payload(raw_output)
                 elif mode == "vlm":
-                    if len(frame_paths) > 1:
-                        merged = None
-                        best_score = -1.0
-                        for frame_path, frame_ts in zip(frame_paths, frame_timestamps):
-                            candidate = self._run_vlm_json(
-                                prompt_text,
-                                [frame_path],
-                                [frame_ts],
-                                dict(default_result),
-                                force_local=True,
-                            )
-                            score = self._score_chart_analysis_result(candidate)
-                            if score > best_score:
-                                merged = candidate
-                                best_score = score
-                    else:
-                        merged = self._run_vlm_json(
-                            prompt_text,
-                            frame_paths,
-                            frame_timestamps,
-                            dict(default_result),
-                            force_local=True,
-                        )
+                    merged = self._run_vlm_json(
+                        prompt_text,
+                        frame_paths,
+                        frame_timestamps,
+                        dict(default_result),
+                        force_local=True,
+                    )
                     if isinstance(merged, dict) and "raw_output" in merged:
                         parsed = self._extract_json_payload(merged.get("raw_output", ""))
                     elif isinstance(merged, dict):
                         parsed = merged
                 elif mode == "internvl":
                     self._load_chart_model()
-                    pixel_values = self._internvl_load_image(frame_path)
+                    pixel_values = self._internvl_load_image(frame_paths[0])
                     generation_config = dict(max_new_tokens=1024, do_sample=False)
                     raw_output = self._chart_model.chat(
                         self._chart_tokenizer,

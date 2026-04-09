@@ -300,11 +300,11 @@ class RefinerAgentsMixin:
             refiner_debug.write_json(
                 v_out_dir,
                 "l1_model_input.json",
-                {"model": self.planner_model_name, "input": messages},
+                {"model": self.verifier_model_name, "input": messages},
             )
 
         l1_raw = self._text2text(
-            messages, self.planner_model_name, self.planner_api_base, self.planner_api_keys
+            messages, self.verifier_model_name, self.verifier_api_base, self.verifier_api_keys
         )
         if v_out_dir:
             refiner_debug.write_text(v_out_dir, "l1_output.txt", l1_raw or "")

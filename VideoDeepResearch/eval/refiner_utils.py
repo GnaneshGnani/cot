@@ -732,6 +732,31 @@ class RefinerUtilsMixin:
     def _normalize_answer(self, answer: str) -> str:
         return re.sub(r"\s+", " ", str(answer)).strip().lower()
 
+    def _resolve_mcq_answer(self, answer: str, options: list = None) -> str:
+        """If *answer* is a bare MCQ letter (e.g. "A", "(B)", "C."), expand it to
+        the full option text so that downstream comparisons work correctly."""
+        ans = (answer or "").strip()
+        opts = list(options if options is not None else (self.options or []))
+        if not opts or not ans:
+            return ans
+        letter_match = re.match(r'^\(?([A-Za-z])\)?\.?$', ans)
+        if not letter_match:
+            return ans
+        letter = letter_match.group(1).upper()
+        for opt in opts:
+            opt_str = str(opt).strip()
+            if re.match(rf'^\(?{letter}[.):\s]', opt_str, re.IGNORECASE):
+                # Strip the leading "A. " / "A) " / "(A) " prefix and return the text
+                text_part = re.sub(r'^\(?[A-Za-z][.):\s]+', '', opt_str).strip()
+                return text_part if text_part else opt_str
+        return ans  # no matching option found — return as-is
+
+    def _answers_match(self, predicted: str, gold: str, options: list = None) -> bool:
+        """Normalised equality check.  MCQ letters in *predicted* are first
+        resolved to full option text so "A" matches "The man is walking"."""
+        resolved = self._resolve_mcq_answer(predicted, options)
+        return self._normalize_answer(resolved) == self._normalize_answer(gold)
+
     def _format_question_with_options(self) -> str:
         if not self.options:
             return self.question.strip()
