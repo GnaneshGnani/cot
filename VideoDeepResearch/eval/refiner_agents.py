@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 
 import refiner_debug
-from refine_prompt import planner_prompt, refiner_prompt, verifier_prompt
+from refine_prompt import planner_prompt, refiner_prompt, trace_generator_prompt, verifier_prompt
 
 
 class RefinerAgentsMixin:
@@ -557,3 +557,284 @@ class RefinerAgentsMixin:
             refiner_debug.write_json(r_out_dir, "parsed.json", parsed_dict)
 
         return raw_output, parsed_dict
+
+    # =====================================================================
+    # Trace Generation (cold-start, no initial trace)
+    # =====================================================================
+
+    def _build_generator_round_prompt(
+        self,
+        round_idx: int,
+        max_rounds: int,
+        tool_outputs_so_far: list,
+    ) -> str:
+        question_block = self._format_question_with_options()
+        artifacts_text = json.dumps(
+            self._get_preprocessed_artifacts(), ensure_ascii=False, indent=2
+        )
+
+        tool_history = ""
+        if tool_outputs_so_far:
+            lines = []
+            for i, item in enumerate(tool_outputs_so_far, 1):
+                lines.append(
+                    f"Round {i}: {item['tool']}({json.dumps(item.get('arguments', {}), ensure_ascii=False)})\n"
+                    f"  Purpose: {item.get('purpose', '')}\n"
+                    f"  Output: {item.get('output', '')}"
+                )
+            tool_history = "\n\n".join(lines)
+
+        force_trace = ""
+        if round_idx >= max_rounds - 1:
+            force_trace = (
+                "\n\nFINAL ROUND — you MUST output type \"trace\" now. Synthesise the "
+                "best possible trace and answer from the evidence collected so far."
+            )
+
+        return (
+            trace_generator_prompt.strip()
+            + "\n\nQUESTION:\n"
+            + question_block
+            + "\n\nVIDEO_PATH:\n"
+            + str(self.video_path)
+            + "\n\nVIDEO_DURATION:\n"
+            + str(self.duration) + " seconds"
+            + "\n\nPREPROCESSED_ARTIFACTS:\n"
+            + artifacts_text
+            + "\n\nROUND:\n"
+            + f"{round_idx + 1}/{max_rounds}"
+            + "\n\nPREVIOUS_TOOL_OUTPUTS:\n"
+            + (tool_history or "(none yet — this is the first round)")
+            + force_trace
+        )
+
+    def _extract_generator_output(self, raw_text: str) -> dict | None:
+        """Parse generator response into either a tool_call or trace dict."""
+        parsed = self._extract_json_payload(raw_text)
+        if not isinstance(parsed, dict):
+            return None
+
+        output_type = str(parsed.get("type", "")).strip().lower()
+
+        if output_type == "trace":
+            steps = parsed.get("trace_steps", [])
+            if isinstance(steps, list) and steps:
+                return {
+                    "type": "trace",
+                    "trace_steps": [str(s).strip() for s in steps if str(s).strip()],
+                    "answer": str(parsed.get("answer", "")).strip(),
+                }
+
+        if output_type == "tool_call":
+            tool = str(parsed.get("tool", "")).strip()
+            if tool:
+                return {
+                    "type": "tool_call",
+                    "tool": tool,
+                    "arguments": parsed.get("arguments", {}) if isinstance(parsed.get("arguments"), dict) else {},
+                    "purpose": str(parsed.get("purpose", "")).strip(),
+                }
+
+        # Fallback: if it has trace_steps, treat as trace even without explicit type
+        if isinstance(parsed.get("trace_steps"), list) and parsed["trace_steps"]:
+            return {
+                "type": "trace",
+                "trace_steps": [str(s).strip() for s in parsed["trace_steps"] if str(s).strip()],
+                "answer": str(parsed.get("answer", "")).strip(),
+            }
+        # Fallback: if it has tool field, treat as tool_call
+        if parsed.get("tool"):
+            return {
+                "type": "tool_call",
+                "tool": str(parsed["tool"]).strip(),
+                "arguments": parsed.get("arguments", {}) if isinstance(parsed.get("arguments"), dict) else {},
+                "purpose": str(parsed.get("purpose", "")).strip(),
+            }
+
+        return None
+
+    def _execute_single_tool_call(self, tool_call: dict) -> str:
+        """Execute one tool call using the existing refiner tool infrastructure."""
+        tool_name = str(tool_call.get("tool", "")).strip()
+        arguments = tool_call.get("arguments", {})
+        if not isinstance(arguments, dict):
+            arguments = {}
+
+        # Inject video_path if the tool expects it and it's not provided
+        if "video_path" in self._get_tool_argument_names(tool_name) and "video_path" not in arguments:
+            arguments["video_path"] = self.video_path
+
+        try:
+            arguments = self._validate_tool_arguments(tool_name, arguments)
+        except Exception as e:
+            result = self._tool_validation_error_result(tool_name, e)
+            return self._format_refine_tool_result(tool_name, arguments, result)
+
+        try:
+            return self._execute_refine_tool_call(tool_name, arguments)
+        except Exception as exc:
+            return f"Error executing {tool_name}: {exc}"
+
+    def _get_tool_argument_names(self, tool_name: str) -> set:
+        """Return the set of expected argument names for a tool."""
+        known = {
+            "temporal_grounder": {"video_path", "query"},
+            "frame_retriever": {"video_path", "query", "timestamps", "num_frames"},
+            "asr": {"video_path", "start_time", "end_time"},
+            "audio_grounder": {"video_path", "query", "start_time", "end_time"},
+            "ocr": {"frame_path", "timestamp"},
+            "spatial_grounder": {"frame_path", "timestamp", "query"},
+            "counter": {"frame_path", "timestamp", "query", "exemplar_paths"},
+            "dense_captioner": {"video_path", "start_time", "end_time", "granularity"},
+            "action_recognizer": {"video_path", "start_time", "end_time"},
+            "chart_analyzer": {"frame_path", "timestamp", "query"},
+        }
+        return known.get(tool_name, set())
+
+    def _call_trace_generator(self, max_rounds: int = 10):
+        """Iterative trace generation: call tools one at a time, produce trace when ready."""
+        print("\n" + "=" * 70)
+        print("Starting Trace Generation (cold-start, no initial trace)")
+        print("=" * 70 + "\n")
+
+        debug_base = None
+        if self.refinement_debug_root:
+            stem = refiner_debug.sanitize_path_component(Path(self.video_path).stem)
+            debug_base = Path(self.refinement_debug_root) / stem / "generation"
+            debug_base.mkdir(parents=True, exist_ok=True)
+
+        tool_outputs = []
+        all_rounds = []
+
+        for round_idx in range(max_rounds):
+            print(f"\n[Generation Round {round_idx + 1}/{max_rounds}]")
+
+            prompt = self._build_generator_round_prompt(
+                round_idx, max_rounds, tool_outputs
+            )
+            messages = [{"role": "user", "content": prompt}]
+
+            if debug_base:
+                round_dir = debug_base / f"round_{round_idx + 1:02d}"
+                round_dir.mkdir(parents=True, exist_ok=True)
+                refiner_debug.write_json(
+                    str(round_dir), "model_input.json",
+                    {"model": self.planner_model_name, "input": messages},
+                )
+
+            raw_output = self._text2text(
+                messages,
+                self.planner_model_name,
+                self.planner_api_base,
+                self.planner_api_keys,
+            )
+            print(f"[Generator Output]\n{raw_output}\n")
+
+            if debug_base:
+                refiner_debug.write_text(
+                    str(round_dir), "raw_output.txt", raw_output or ""
+                )
+
+            parsed = self._extract_generator_output(raw_output)
+
+            if parsed is None:
+                print(f"  [Warning] Could not parse generator output, retrying...")
+                repair_raw = self._retry_malformed_json_response(
+                    raw_output,
+                    self.planner_model_name,
+                    self.planner_api_base,
+                    self.planner_api_keys,
+                    schema_name="trace_generator",
+                    required_keys=["type"],
+                )
+                parsed = self._extract_generator_output(repair_raw)
+
+            if parsed is None:
+                print(f"  [Error] Unparseable output on round {round_idx + 1}, skipping.")
+                all_rounds.append({
+                    "round": round_idx + 1,
+                    "raw_output": raw_output,
+                    "parsed": None,
+                    "type": "error",
+                })
+                continue
+
+            if parsed["type"] == "trace":
+                print(f"  [Trace produced on round {round_idx + 1}]")
+                print(f"  Steps: {len(parsed['trace_steps'])}")
+                print(f"  Answer: {parsed['answer']}")
+                all_rounds.append({
+                    "round": round_idx + 1,
+                    "raw_output": raw_output,
+                    "parsed": parsed,
+                    "type": "trace",
+                })
+                if debug_base:
+                    refiner_debug.write_json(
+                        str(round_dir), "final_trace.json", parsed
+                    )
+                return parsed["trace_steps"], parsed["answer"], all_rounds
+
+            # type == "tool_call"
+            tool_name = parsed["tool"]
+            print(f"  [Tool call] {tool_name}: {parsed.get('purpose', '')}")
+
+            tool_output = self._execute_single_tool_call(parsed)
+            print(f"  [Tool output] {tool_output[:200]}..." if len(tool_output) > 200 else f"  [Tool output] {tool_output}")
+
+            tool_record = {
+                "tool": tool_name,
+                "arguments": parsed.get("arguments", {}),
+                "purpose": parsed.get("purpose", ""),
+                "output": tool_output,
+            }
+            tool_outputs.append(tool_record)
+
+            all_rounds.append({
+                "round": round_idx + 1,
+                "raw_output": raw_output,
+                "parsed": parsed,
+                "type": "tool_call",
+                "tool_output": tool_output,
+            })
+            if debug_base:
+                refiner_debug.write_text(
+                    str(round_dir), "tool_output.txt", tool_output
+                )
+
+        # If we exhausted all rounds without a trace, force one final attempt
+        print("\n[Warning] Max generation rounds reached without trace output.")
+        print("[Forcing final trace synthesis...]")
+        prompt = self._build_generator_round_prompt(
+            max_rounds - 1, max_rounds, tool_outputs
+        )
+        messages = [{"role": "user", "content": prompt}]
+        raw_output = self._text2text(
+            messages,
+            self.planner_model_name,
+            self.planner_api_base,
+            self.planner_api_keys,
+        )
+        parsed = self._extract_generator_output(raw_output)
+        if parsed and parsed["type"] == "trace":
+            all_rounds.append({
+                "round": max_rounds + 1,
+                "raw_output": raw_output,
+                "parsed": parsed,
+                "type": "trace",
+            })
+            return parsed["trace_steps"], parsed["answer"], all_rounds
+
+        # Last resort: synthesize a minimal trace from tool outputs
+        fallback_steps = []
+        for i, item in enumerate(tool_outputs, 1):
+            fallback_steps.append(
+                f"Tool {item['tool']} was called: {item['purpose']}. "
+                f"Result: {item['output'][:500]}"
+            )
+        fallback_steps.append("Unable to derive a confident answer from the evidence gathered.")
+        all_rounds.append({
+            "round": max_rounds + 1,
+            "type": "fallback",
+        })
+        return fallback_steps, "", all_rounds

@@ -1002,10 +1002,29 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         
         return results
 
-    def run_refinement_pipeline(self, trace_steps: list, trace_answer: str = None, max_iterations: int = 1):
+    def run_refinement_pipeline(self, trace_steps: list = None, trace_answer: str = None, max_iterations: int = 1, max_gen_rounds: int = 10):
         print("\n" + "=" * 70)
         print("Starting Trace Refinement Pipeline")
         print("=" * 70 + "\n")
+
+        generated_trace_info = None
+        trace_steps = list(trace_steps or [])
+
+        # Cold-start generation: produce a trace from scratch if none provided
+        if not trace_steps:
+            gen_steps, gen_answer, gen_rounds = self._call_trace_generator(
+                max_rounds=max_gen_rounds,
+            )
+            trace_steps = gen_steps
+            trace_answer = gen_answer
+            generated_trace_info = {
+                "trace_steps": gen_steps,
+                "answer": gen_answer,
+                "generation_rounds": gen_rounds,
+            }
+            print("\n" + "=" * 70)
+            print(f"Trace generated: {len(gen_steps)} steps, answer: {gen_answer}")
+            print("=" * 70 + "\n")
 
         trace_answer = (trace_answer or self._extract_trace_answer(trace_steps) or "").strip()
         question_text = self._format_question_with_options()
@@ -1132,6 +1151,8 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
             "question": self.question,
             "options": self.options,
             "video_path": self.video_path,
+            "trace_generated": generated_trace_info is not None,
+            "generated_trace": generated_trace_info,
             "initial_trace": {"steps": initial_trace},
             "initial_answer": initial_answer,
             "final_trace": {"steps": current_trace},
@@ -1167,8 +1188,14 @@ def main():
     )
     parser.add_argument("--output", type=str, default=None, help="Output directory path")
     parser.add_argument("--max-iterations", type=int, default=2, help="Max refinement iterations per sample")
+    parser.add_argument("--max-gen-rounds", type=int, default=10, help="Max tool-calling rounds for trace generation (when no initial trace)")
+    parser.add_argument("--generate-only", action="store_true", default=False, help="Generate traces only, skip refinement (sets max_iterations=0)")
+    parser.add_argument("--force-generate", action="store_true", default=False, help="Ignore initial_trace_steps in the input and always generate fresh traces")
     parser.add_argument("--index", type=int, default=None, help="Index of a single entry to process (0-based); omit to process all entries")
     args = parser.parse_args()
+
+    if args.generate_only:
+        args.max_iterations = 0
 
     annotation_path = Path(args.annotation_file).expanduser().resolve()
     if not annotation_path.exists():
@@ -1239,17 +1266,14 @@ def main():
         video_path = str(item.get("video_path", "")).strip()
         question = str(item.get("question", "")).strip()
         options = list(item.get("options") or [])
-        trace_steps = item.get("initial_trace_steps") or []
+        trace_steps = [] if args.force_generate else (item.get("initial_trace_steps") or [])
 
         print(f"\n[{index}/{len(data)}] {Path(video_path).name or '<missing video>'}")
+        if args.force_generate and item.get("initial_trace_steps"):
+            print("  [--force-generate] Ignoring existing initial_trace_steps, generating fresh trace.")
 
         if not video_path or not os.path.exists(video_path):
             record["refiner_error"] = f"Video file not found: {video_path}"
-            _save_result(record, video_path)
-            continue
-
-        if not isinstance(trace_steps, list) or not trace_steps:
-            record["refiner_error"] = "Missing initial_trace_steps"
             _save_result(record, video_path)
             continue
 
@@ -1290,8 +1314,9 @@ def main():
                 )
 
             record["refiner_result"] = demo.run_refinement_pipeline(
-                trace_steps,
+                trace_steps=trace_steps if trace_steps else None,
                 max_iterations=args.max_iterations,
+                max_gen_rounds=args.max_gen_rounds,
             )
         except Exception as e:
             import traceback
