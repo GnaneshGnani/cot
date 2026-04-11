@@ -2,6 +2,7 @@ import json
 import os
 import re
 from pathlib import Path
+from typing import Any, Dict
 
 import refiner_debug
 from refine_prompt import planner_prompt, refiner_prompt, trace_generator_prompt, verifier_prompt
@@ -41,7 +42,7 @@ class RefinerAgentsMixin:
         if not output_str or "are:\n" not in output_str:
             return None
         tail = output_str.split("are:\n", 1)[-1].strip()
-        parsed = self._extract_json_payload(tail)
+        parsed = self._extract_json_payload_with_schema(tail, model_cls=Dict[str, Any])
         return parsed if isinstance(parsed, dict) else None
 
     def _extract_tool_confidence(self, tool_name: str, result: dict) -> float:
@@ -404,6 +405,260 @@ class RefinerAgentsMixin:
             + (last_tools or "[]")
         )
 
+    def _step_depends_on_tool(self, step_num: int, tool_name: str, call_by_step: dict, seen=None) -> bool:
+        seen = seen or set()
+        if step_num in seen:
+            return False
+        seen.add(step_num)
+        call = call_by_step.get(step_num)
+        if not isinstance(call, dict):
+            return False
+        if str(call.get("tool", "") or "").strip() == tool_name:
+            return True
+        for dep in call.get("depends_on", []) or []:
+            try:
+                dep_num = int(dep)
+            except (TypeError, ValueError):
+                continue
+            if self._step_depends_on_tool(dep_num, tool_name, call_by_step, seen):
+                return True
+        return False
+
+    def _chart_plan_needs_temporal_grounding(
+        self,
+        frame_call: dict,
+        chart_call: dict,
+        diagnosis,
+        history: list | None = None,
+    ) -> bool:
+        frame_args = frame_call.get("arguments", {}) if isinstance(frame_call, dict) else {}
+        chart_args = chart_call.get("arguments", {}) if isinstance(chart_call, dict) else {}
+        frame_query = str(frame_args.get("query", "") or "").strip()
+        chart_query = str(chart_args.get("query", "") or "").strip()
+        if not frame_query:
+            return False
+        if frame_args.get("timestamps"):
+            return False
+
+        blobs = [
+            str(self.question or ""),
+            self._format_question_with_options(),
+            frame_query,
+            chart_query,
+        ]
+        if diagnosis is not None:
+            blobs.append(json.dumps(diagnosis, ensure_ascii=False))
+        if history:
+            blobs.append(json.dumps(history, ensure_ascii=False))
+        text = " ".join(blob for blob in blobs if blob).lower()
+
+        chart_cues = (
+            "chart" in text
+            or "graph" in text
+            or "plot" in text
+            or "infographic" in text
+            or "dashboard" in text
+            or "table" in text
+        )
+        comparison_cues = any(
+            cue in text
+            for cue in (
+                "difference",
+                "discrepancy",
+                "compare",
+                "comparison",
+                "gap",
+                "highest",
+                "lowest",
+                "largest",
+                "smallest",
+                "versus",
+                "between",
+            )
+        )
+        multi_metric_cues = any(
+            cue in text
+            for cue in (
+                "metrics",
+                "attributes",
+                "series",
+                "store cleanliness",
+                "value for dollar",
+                "availability of items",
+            )
+        )
+        incomplete_chart_cues = any(
+            cue in text
+            for cue in (
+                "does not contain",
+                "does not provide",
+                "missing",
+                "lacks",
+                "only provides",
+                "only include",
+                "cannot be computed",
+                "partial",
+                "incomplete",
+                "wrong phase",
+                "wrong frame",
+                "not visible",
+                "not fully shown",
+                "not fully rendered",
+                "animated",
+                "progressively",
+            )
+        )
+        return bool(chart_cues and (comparison_cues or multi_metric_cues or incomplete_chart_cues))
+
+    def _build_chart_temporal_grounder_query(self, frame_call: dict, chart_call: dict) -> str:
+        frame_args = frame_call.get("arguments", {}) if isinstance(frame_call, dict) else {}
+        chart_args = chart_call.get("arguments", {}) if isinstance(chart_call, dict) else {}
+        frame_query = str(frame_args.get("query", "") or "").strip()
+        chart_query = str(chart_args.get("query", "") or "").strip()
+        if re.match(r"^(read|identify|determine|extract|compute|interpret)\b", chart_query, flags=re.IGNORECASE):
+            base = frame_query or chart_query or str(self.question or "").strip()
+        else:
+            base = chart_query or frame_query or str(self.question or "").strip()
+        if not base:
+            return "segment where the relevant chart or infographic appears on screen"
+
+        base = re.sub(r"^\s*frame\s+(showing|with)\s+", "", base, flags=re.IGNORECASE)
+        base = base.rstrip(". ")
+        if re.search(r"\b(chart|graph|plot|infographic|dashboard|table)\b", base, flags=re.IGNORECASE):
+            return f"segment where {base} appears on screen"
+        return f"segment where the relevant chart or infographic appears on screen for: {base}"
+
+    def _repair_planner_chart_grounding(
+        self,
+        planner_output: dict,
+        diagnosis,
+        history: list | None = None,
+    ) -> dict:
+        if not isinstance(planner_output, dict):
+            return planner_output
+
+        tool_calls = planner_output.get("tool_calls", [])
+        if not isinstance(tool_calls, list):
+            return planner_output
+
+        ordered_calls = sorted(
+            [dict(call) for call in tool_calls if isinstance(call, dict)],
+            key=lambda call: int(call.get("step", 0) or 0),
+        )
+        if not ordered_calls:
+            return planner_output
+
+        call_by_step = {
+            int(call.get("step", 0) or 0): call
+            for call in ordered_calls
+            if int(call.get("step", 0) or 0)
+        }
+        inject_before: dict[int, str] = {}
+
+        for call in ordered_calls:
+            if str(call.get("tool", "") or "").strip() != "chart_analyzer":
+                continue
+            for dep in call.get("depends_on", []) or []:
+                try:
+                    dep_step = int(dep)
+                except (TypeError, ValueError):
+                    continue
+                frame_call = call_by_step.get(dep_step)
+                if not isinstance(frame_call, dict):
+                    continue
+                if str(frame_call.get("tool", "") or "").strip() != "frame_retriever":
+                    continue
+                frame_args = frame_call.get("arguments", {}) if isinstance(frame_call.get("arguments"), dict) else {}
+                if not str(frame_args.get("query", "") or "").strip():
+                    continue
+                if frame_args.get("timestamps"):
+                    continue
+                if self._step_depends_on_tool(dep_step, "temporal_grounder", call_by_step):
+                    continue
+                if not self._chart_plan_needs_temporal_grounding(frame_call, call, diagnosis, history):
+                    continue
+                inject_before[dep_step] = self._build_chart_temporal_grounder_query(frame_call, call)
+
+        if not inject_before:
+            return planner_output
+
+        staged_calls = []
+        for call in ordered_calls:
+            old_step = int(call.get("step", 0) or 0)
+            if old_step in inject_before:
+                staged_calls.append(
+                    (
+                        ("tg", old_step),
+                        {
+                            "tool": "temporal_grounder",
+                            "arguments": {
+                                "video_path": (
+                                    (call.get("arguments") or {}).get("video_path")
+                                    if isinstance(call.get("arguments"), dict)
+                                    else None
+                                ),
+                                "query": inject_before[old_step],
+                            },
+                            "purpose": (
+                                "Localize the chart / infographic interval before frame retrieval so "
+                                "downstream chart reading uses temporally grounded frames instead of "
+                                "raw query-ranked hits that may reflect a partial or animated state."
+                            ),
+                            "depends_on": [],
+                        },
+                    )
+                )
+            staged_calls.append((old_step, dict(call)))
+
+        new_step_map = {}
+        for new_step, (key, _) in enumerate(staged_calls, start=1):
+            new_step_map[key] = new_step
+
+        repaired_calls = []
+        for key, call in staged_calls:
+            old_deps = call.get("depends_on", []) or []
+            new_deps = []
+            for dep in old_deps:
+                try:
+                    dep_num = int(dep)
+                except (TypeError, ValueError):
+                    continue
+                mapped = new_step_map.get(dep_num)
+                if mapped is not None:
+                    new_deps.append(mapped)
+            if isinstance(key, int) and key in inject_before:
+                new_deps.append(new_step_map[("tg", key)])
+
+            updated_call = dict(call)
+            updated_call["step"] = new_step_map[key]
+            updated_call["depends_on"] = list(dict.fromkeys(new_deps))
+            repaired_calls.append(updated_call)
+
+        repaired = dict(planner_output)
+        repaired["tool_calls"] = repaired_calls
+
+        strategy = str(repaired.get("strategy", "") or "").strip()
+        strategy_note = (
+            "Because the planner does not see the video, this plan first temporally grounds the chart "
+            "interval before frame retrieval so animated or partially rendered chart states do not "
+            "silently contaminate chart_analyzer."
+        )
+        if strategy_note not in strategy:
+            repaired["strategy"] = strategy_note if not strategy else strategy + " " + strategy_note
+
+        refinstr = str(repaired.get("refinement_instructions", "") or "").strip()
+        refinstr_note = (
+            "Use the temporally grounded frame bundle as the chart-reading evidence anchor. Do not "
+            "treat a raw query-ranked chart frame as guaranteed complete when the task needs full "
+            "chart contents, multiple metrics, or cross-metric comparison."
+        )
+        if refinstr_note not in refinstr:
+            repaired["refinement_instructions"] = (
+                refinstr_note if not refinstr else refinstr + " " + refinstr_note
+            )
+
+        return repaired
+
     def _call_planner(
         self,
         trace_steps: list,
@@ -456,6 +711,12 @@ class RefinerAgentsMixin:
             parsed_output = self._extract_planner_payload(repair_raw_output)
 
         parsed_dict = parsed_output if isinstance(parsed_output, dict) else None
+        if parsed_dict is not None:
+            parsed_dict = self._repair_planner_chart_grounding(
+                parsed_dict,
+                diagnosis,
+                history or [],
+            )
         if p_out_dir and parsed_dict is not None:
             refiner_debug.write_json(p_out_dir, "plan.json", parsed_dict)
         if parsed_dict is None:
@@ -552,6 +813,25 @@ class RefinerAgentsMixin:
             refiner_debug.write_text(r_out_dir, "raw_output.txt", raw_output or "")
 
         parsed_output = self._extract_refiner_payload(raw_output)
+        repair_raw_output = ""
+        if parsed_output is None and str(raw_output or "").strip():
+            repair_raw_output = self._retry_malformed_json_response(
+                raw_output,
+                self.planner_model_name,
+                self.planner_api_base,
+                self.planner_api_keys,
+                schema_name="refiner",
+                required_keys=[
+                    "refined_trace",
+                    "refined_answer",
+                    "answer_changed",
+                    "changes_made",
+                    "unresolved_issues",
+                ],
+            )
+            if r_out_dir:
+                refiner_debug.write_text(r_out_dir, "repair_raw_output.txt", repair_raw_output or "")
+            parsed_output = self._extract_refiner_payload(repair_raw_output)
         parsed_dict = parsed_output if isinstance(parsed_output, dict) else None
         if r_out_dir and parsed_dict is not None:
             refiner_debug.write_json(r_out_dir, "parsed.json", parsed_dict)
@@ -561,6 +841,56 @@ class RefinerAgentsMixin:
     # =====================================================================
     # Trace Generation (cold-start, no initial trace)
     # =====================================================================
+
+    def _build_initial_generation_diagnosis(self) -> dict:
+        return {
+            "verdict": "FAIL",
+            "answer_correct": False,
+            "trace_quality_scores": {
+                "perceptual_correctness": 0.0,
+                "temporal_accuracy": 0.0,
+                "logical_coherence": 0.0,
+                "completeness": 0.0,
+            },
+            "error_categories": [
+                {
+                    "type": "INCOMPLETE_TRACE",
+                    "step_index": None,
+                    "description": (
+                        "No initial reasoning trace or answer is available. Decompose the question "
+                        "into answer-critical subgoals, gather the minimal tool evidence needed to "
+                        "answer it from scratch, and prepare refinement instructions that let the "
+                        "refiner synthesize a complete first trace."
+                    ),
+                    "severity": "HIGH",
+                    "suggested_tools": [],
+                    "evidence": None,
+                }
+            ],
+            "confidence": 1.0,
+            "summary": (
+                "Cold-start generation mode: ORIGINAL_TRACE and ORIGINAL_ANSWER are intentionally "
+                "empty. Plan tool calls from the question alone, then synthesize the first "
+                "tool-grounded trace."
+            ),
+            "generation_mode": "cold_start",
+        }
+
+    def _planner_output_for_initial_generation(self, planner_output: dict | None) -> dict:
+        out = dict(planner_output or {})
+        existing = str(out.get("refinement_instructions", "") or "").strip()
+        generation_note = (
+            "GENERATION MODE: ORIGINAL_TRACE and ORIGINAL_ANSWER are intentionally empty. "
+            "Do not patch nonexistent steps. Instead synthesize a complete initial trace from "
+            "the TOOL_OUTPUTS, decomposed into clear question-aligned reasoning steps. Every "
+            "media-grounded claim must preserve tool provenance inline in the trace itself. "
+            "If the gathered evidence remains partial or ambiguous, state that limitation "
+            "explicitly in the trace and unresolved_issues rather than forcing unsupported details."
+        )
+        out["refinement_instructions"] = (
+            generation_note if not existing else generation_note + "\n\n" + existing
+        )
+        return out
 
     def _build_generator_round_prompt(
         self,
@@ -610,47 +940,23 @@ class RefinerAgentsMixin:
 
     def _extract_generator_output(self, raw_text: str) -> dict | None:
         """Parse generator response into either a tool_call or trace dict."""
-        parsed = self._extract_json_payload(raw_text)
+        parsed = self._extract_generator_payload(raw_text)
         if not isinstance(parsed, dict):
             return None
-
         output_type = str(parsed.get("type", "")).strip().lower()
-
         if output_type == "trace":
-            steps = parsed.get("trace_steps", [])
-            if isinstance(steps, list) and steps:
-                return {
-                    "type": "trace",
-                    "trace_steps": [str(s).strip() for s in steps if str(s).strip()],
-                    "answer": str(parsed.get("answer", "")).strip(),
-                }
-
-        if output_type == "tool_call":
-            tool = str(parsed.get("tool", "")).strip()
-            if tool:
-                return {
-                    "type": "tool_call",
-                    "tool": tool,
-                    "arguments": parsed.get("arguments", {}) if isinstance(parsed.get("arguments"), dict) else {},
-                    "purpose": str(parsed.get("purpose", "")).strip(),
-                }
-
-        # Fallback: if it has trace_steps, treat as trace even without explicit type
-        if isinstance(parsed.get("trace_steps"), list) and parsed["trace_steps"]:
             return {
                 "type": "trace",
-                "trace_steps": [str(s).strip() for s in parsed["trace_steps"] if str(s).strip()],
+                "trace_steps": [str(s).strip() for s in (parsed.get("trace_steps") or []) if str(s).strip()],
                 "answer": str(parsed.get("answer", "")).strip(),
             }
-        # Fallback: if it has tool field, treat as tool_call
-        if parsed.get("tool"):
+        if output_type == "tool_call":
             return {
                 "type": "tool_call",
-                "tool": str(parsed["tool"]).strip(),
+                "tool": str(parsed.get("tool", "")).strip(),
                 "arguments": parsed.get("arguments", {}) if isinstance(parsed.get("arguments"), dict) else {},
                 "purpose": str(parsed.get("purpose", "")).strip(),
             }
-
         return None
 
     def _execute_single_tool_call(self, tool_call: dict) -> str:
@@ -679,7 +985,7 @@ class RefinerAgentsMixin:
         """Return the set of expected argument names for a tool."""
         known = {
             "temporal_grounder": {"video_path", "query"},
-            "frame_retriever": {"video_path", "query", "timestamps", "num_frames"},
+            "frame_retriever": {"video_path", "query", "timestamps", "time_range", "num_frames"},
             "asr": {"video_path", "start_time", "end_time"},
             "audio_grounder": {"video_path", "query", "start_time", "end_time"},
             "ocr": {"frame_path", "timestamp"},
@@ -691,150 +997,93 @@ class RefinerAgentsMixin:
         }
         return known.get(tool_name, set())
 
-    def _call_trace_generator(self, max_rounds: int = 10):
-        """Iterative trace generation: call tools one at a time, produce trace when ready."""
+    def _call_trace_generator(self):
+        """Planner-backed trace generation from an empty initial trace."""
         print("\n" + "=" * 70)
         print("Starting Trace Generation (cold-start, no initial trace)")
         print("=" * 70 + "\n")
 
+        generation_diagnosis = self._build_initial_generation_diagnosis()
+        generation_record = {
+            "phase": "initial_trace_generation",
+            "diagnosis": generation_diagnosis,
+        }
+
+        prev_iter_dir = getattr(self, "_refinement_debug_iter_dir", None)
         debug_base = None
         if self.refinement_debug_root:
-            stem = refiner_debug.sanitize_path_component(Path(self.video_path).stem)
-            debug_base = Path(self.refinement_debug_root) / stem / "generation"
-            debug_base.mkdir(parents=True, exist_ok=True)
+            session_base = self._ensure_refinement_debug_session_base()
+            if session_base:
+                debug_base = Path(session_base) / "generation" / "initial_trace"
+                debug_base.mkdir(parents=True, exist_ok=True)
+                self._refinement_debug_iter_dir = str(debug_base)
 
-        tool_outputs = []
-        all_rounds = []
-
-        for round_idx in range(max_rounds):
-            print(f"\n[Generation Round {round_idx + 1}/{max_rounds}]")
-
-            prompt = self._build_generator_round_prompt(
-                round_idx, max_rounds, tool_outputs
+        try:
+            print("[Generation Planner] Generating initial evidence plan...")
+            planner_raw, planner_output = self._call_planner(
+                [],
+                "",
+                generation_diagnosis,
+                iteration=0,
+                history=[],
+                max_iterations=1,
             )
-            messages = [{"role": "user", "content": prompt}]
+            print(f"\n[Generation Planner Output]\n{planner_raw}\n")
 
-            if debug_base:
-                round_dir = debug_base / f"round_{round_idx + 1:02d}"
-                round_dir.mkdir(parents=True, exist_ok=True)
-                refiner_debug.write_json(
-                    str(round_dir), "model_input.json",
-                    {"model": self.planner_model_name, "input": messages},
-                )
+            print("[Generation Executor] Running planned tool calls...")
+            executed_tools = self._execute_refine_plan(planner_output if planner_output is not None else {})
+            for item in executed_tools:
+                print(f"  Step {item['step']} - {item['tool']}")
 
-            raw_output = self._text2text(
-                messages,
-                self.planner_model_name,
-                self.planner_api_base,
-                self.planner_api_keys,
+            generation_planner_output = self._planner_output_for_initial_generation(planner_output)
+
+            print("[Generation Refiner] Synthesizing initial trace...")
+            refiner_raw, refiner_output = self._call_refiner(
+                [],
+                "",
+                generation_diagnosis,
+                executed_tools,
+                generation_planner_output,
             )
-            print(f"[Generator Output]\n{raw_output}\n")
+            print(f"\n[Generation Refiner Output]\n{refiner_raw}\n")
 
-            if debug_base:
-                refiner_debug.write_text(
-                    str(round_dir), "raw_output.txt", raw_output or ""
+            generated_steps = []
+            generated_answer = ""
+            if isinstance(refiner_output, dict):
+                generated_steps = self._normalize_refined_trace(
+                    refiner_output.get("refined_trace"),
+                    [],
                 )
+                raw_answer = refiner_output.get("refined_answer", "")
+                if raw_answer is not None and str(raw_answer).strip():
+                    generated_answer = str(raw_answer).strip()
+                elif generated_steps:
+                    generated_answer = (self._extract_trace_answer(generated_steps) or "").strip()
 
-            parsed = self._extract_generator_output(raw_output)
-
-            if parsed is None:
-                print(f"  [Warning] Could not parse generator output, retrying...")
-                repair_raw = self._retry_malformed_json_response(
-                    raw_output,
-                    self.planner_model_name,
-                    self.planner_api_base,
-                    self.planner_api_keys,
-                    schema_name="trace_generator",
-                    required_keys=["type"],
-                )
-                parsed = self._extract_generator_output(repair_raw)
-
-            if parsed is None:
-                print(f"  [Error] Unparseable output on round {round_idx + 1}, skipping.")
-                all_rounds.append({
-                    "round": round_idx + 1,
-                    "raw_output": raw_output,
-                    "parsed": None,
-                    "type": "error",
-                })
-                continue
-
-            if parsed["type"] == "trace":
-                print(f"  [Trace produced on round {round_idx + 1}]")
-                print(f"  Steps: {len(parsed['trace_steps'])}")
-                print(f"  Answer: {parsed['answer']}")
-                all_rounds.append({
-                    "round": round_idx + 1,
-                    "raw_output": raw_output,
-                    "parsed": parsed,
-                    "type": "trace",
-                })
-                if debug_base:
-                    refiner_debug.write_json(
-                        str(round_dir), "final_trace.json", parsed
+            if not generated_steps:
+                generated_answer = ""
+                generated_steps = []
+                for item in executed_tools:
+                    generated_steps.append(
+                        f"{item.get('tool', 'tool')} was called for {item.get('purpose', '')}. "
+                        f"Reported output: {str(item.get('output', '') or '')[:500]}"
                     )
-                return parsed["trace_steps"], parsed["answer"], all_rounds
-
-            # type == "tool_call"
-            tool_name = parsed["tool"]
-            print(f"  [Tool call] {tool_name}: {parsed.get('purpose', '')}")
-
-            tool_output = self._execute_single_tool_call(parsed)
-            print(f"  [Tool output] {tool_output[:200]}..." if len(tool_output) > 200 else f"  [Tool output] {tool_output}")
-
-            tool_record = {
-                "tool": tool_name,
-                "arguments": parsed.get("arguments", {}),
-                "purpose": parsed.get("purpose", ""),
-                "output": tool_output,
-            }
-            tool_outputs.append(tool_record)
-
-            all_rounds.append({
-                "round": round_idx + 1,
-                "raw_output": raw_output,
-                "parsed": parsed,
-                "type": "tool_call",
-                "tool_output": tool_output,
-            })
-            if debug_base:
-                refiner_debug.write_text(
-                    str(round_dir), "tool_output.txt", tool_output
+                generated_steps.append(
+                    "Unable to synthesize a complete initial trace from the gathered evidence."
                 )
 
-        # If we exhausted all rounds without a trace, force one final attempt
-        print("\n[Warning] Max generation rounds reached without trace output.")
-        print("[Forcing final trace synthesis...]")
-        prompt = self._build_generator_round_prompt(
-            max_rounds - 1, max_rounds, tool_outputs
-        )
-        messages = [{"role": "user", "content": prompt}]
-        raw_output = self._text2text(
-            messages,
-            self.planner_model_name,
-            self.planner_api_base,
-            self.planner_api_keys,
-        )
-        parsed = self._extract_generator_output(raw_output)
-        if parsed and parsed["type"] == "trace":
-            all_rounds.append({
-                "round": max_rounds + 1,
-                "raw_output": raw_output,
-                "parsed": parsed,
-                "type": "trace",
-            })
-            return parsed["trace_steps"], parsed["answer"], all_rounds
-
-        # Last resort: synthesize a minimal trace from tool outputs
-        fallback_steps = []
-        for i, item in enumerate(tool_outputs, 1):
-            fallback_steps.append(
-                f"Tool {item['tool']} was called: {item['purpose']}. "
-                f"Result: {item['output'][:500]}"
+            generation_record.update(
+                {
+                    "planner_raw": planner_raw,
+                    "planner_output": planner_output,
+                    "executed_tools": executed_tools,
+                    "refiner_raw": refiner_raw,
+                    "refiner_output": refiner_output,
+                }
             )
-        fallback_steps.append("Unable to derive a confident answer from the evidence gathered.")
-        all_rounds.append({
-            "round": max_rounds + 1,
-            "type": "fallback",
-        })
-        return fallback_steps, "", all_rounds
+            if debug_base:
+                refiner_debug.write_json(debug_base, "generation_summary.json", generation_record)
+
+            return generated_steps, generated_answer, [generation_record]
+        finally:
+            self._refinement_debug_iter_dir = prev_iter_dir

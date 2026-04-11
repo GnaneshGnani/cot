@@ -1,0 +1,75 @@
+{
+  "strategy": "Directly localize all candidate moments where Scrubby writes/draws with a blue pen on the blackboard, then compare them chronologically to identify the earliest true occurrence and characterize that earliest event using tightly bounded visual and spoken evidence.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "temporal_grounder",
+      "arguments": {
+        "video_path": "<VIDEO_PATH>",
+        "query": "Scrubby robot writing or drawing with a blue pen on a blackboard"
+      },
+      "purpose": "Find candidate intervals for the base event anywhere in the video without assuming the previously sampled moments captured the true first occurrence.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "<VIDEO_PATH>",
+        "query": null,
+        "timestamps": [
+          "<STEP_1:segments[0].start>",
+          "<STEP_1:segments[1].start>",
+          "<STEP_1:segments[2].start>"
+        ],
+        "num_frames": 3
+      },
+      "purpose": "Inspect one representative timestamp from each top candidate interval so the refiner can compare candidate occurrences by actual timestamps and determine which interval is the earliest true blue-pen blackboard drawing event.",
+      "depends_on": [
+        1
+      ]
+    },
+    {
+      "step": 3,
+      "tool": "ocr",
+      "arguments": {
+        "frame_path": "<STEP_2:frames>",
+        "timestamp": null
+      },
+      "purpose": "Read any on-screen words near each candidate frame, especially descriptors such as 'poorly,' to tie the characterization to a specific candidate moment instead of relying on aggregated OCR across mixed times.",
+      "depends_on": [
+        2
+      ]
+    },
+    {
+      "step": 4,
+      "tool": "dense_captioner",
+      "arguments": {
+        "video_path": "<VIDEO_PATH>",
+        "start_time": "<STEP_1:segments[0].start>",
+        "end_time": "<STEP_1:segments[0].end>",
+        "granularity": "frame"
+      },
+      "purpose": "Describe the earliest validated candidate interval in detail so the refiner can determine whether Scrubby's first blue-pen blackboard action is poor handwriting, neat writing, a seamed picture, or just movement.",
+      "depends_on": [
+        1,
+        2
+      ]
+    },
+    {
+      "step": 5,
+      "tool": "asr",
+      "arguments": {
+        "video_path": "<VIDEO_PATH>",
+        "start_time": "<STEP_1:segments[0].start>",
+        "end_time": "<STEP_1:segments[0].end>"
+      },
+      "purpose": "Capture any narration within the earliest validated candidate interval that explicitly describes the quality of Scrubby's writing/drawing, which is the most direct support for choosing among the qualitative answer options.",
+      "depends_on": [
+        1,
+        2
+      ]
+    }
+  ],
+  "refinement_instructions": "Use step 1 only to generate candidate intervals for the base event; do not assume segments[0] is earliest by rank. Compare the actual timestamps of the candidate intervals and use step 2 frame contents to determine which candidate is the earliest real instance of Scrubby writing/drawing with a blue pen on the blackboard. Then use step 3 OCR plus step 4 dense captions and step 5 ASR only for that earliest validated occurrence. Replace the prior 'unresolved' conclusion with a grounded characterization of the earliest occurrence. If OCR/ASR explicitly links words like 'poorly' to that earliest event, cite that directly; otherwise use dense-captioner’s visual description to distinguish among writing, neat handwriting, picture-with-seams, or mere movement. Preserve the earlier supported fact that 30-40s was not validated as the target event unless the new temporal grounding contradicts it. Update the final answer to the matching option once the earliest occurrence is identified and characterized."
+}

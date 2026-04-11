@@ -65,4 +65,4 @@ export TEMPORAL_GROUNDER_MAX_FRAMES="${TEMPORAL_GROUNDER_MAX_FRAMES:-32}"
 export TOPK=10
 threads=6
 
-CUDA_VISIBLE_DEVICES=2,3 python3 refiner.py "$@"
+CUDA_VISIBLE_DEVICES=1,2 python3 refiner.py "$@"

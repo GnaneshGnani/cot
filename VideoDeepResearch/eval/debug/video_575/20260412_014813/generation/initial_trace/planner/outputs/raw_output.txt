@@ -1,0 +1,58 @@
+{
+  "strategy": "Ground the answer from scratch by first localizing the moment when Scrubby makes the first blue-pen drawing on the blackboard, then inspect that short interval visually and via any narration to determine whether the result is neat writing, poor writing, a seam-containing picture, or no writing at all.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "temporal_grounder",
+      "arguments": {
+        "video_path": "video",
+        "query": "Scrubby using a blue pen to draw or write on a blackboard for the first time"
+      },
+      "purpose": "Find candidate time windows for the first blackboard drawing event so later visual and speech analysis can be bounded to the relevant moment.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "video",
+        "query": null,
+        "timestamps": [
+          "<STEP_1:segments[0].start>",
+          "<STEP_1:segments[0].end>",
+          "<STEP_1:segments[1].start>",
+          "<STEP_1:segments[1].end>",
+          "<STEP_1:segments[2].start>",
+          "<STEP_1:segments[2].end>"
+        ],
+        "num_frames": 6
+      },
+      "purpose": "Sample candidate frames from multiple top-ranked drawing intervals so the refiner can identify which interval actually shows the first blue-pen blackboard drawing and what the produced marks look like.",
+      "depends_on": [1]
+    },
+    {
+      "step": 3,
+      "tool": "dense_captioner",
+      "arguments": {
+        "video_path": "video",
+        "start_time": "<STEP_1:segments[0].start>",
+        "end_time": "<STEP_1:segments[0].end>",
+        "granularity": "segment"
+      },
+      "purpose": "Describe the localized candidate drawing sequence to verify whether Scrubby writes, draws a picture, or only moves around, and to capture the visual outcome on the blackboard.",
+      "depends_on": [1]
+    },
+    {
+      "step": 4,
+      "tool": "asr",
+      "arguments": {
+        "video_path": "video",
+        "start_time": "<STEP_1:segments[0].start>",
+        "end_time": "<STEP_1:segments[0].end>"
+      },
+      "purpose": "Check whether narration or dialogue explicitly describes the quality or type of Scrubby's first drawing, which could directly distinguish the answer options.",
+      "depends_on": [1]
+    }
+  ],
+  "refinement_instructions": "Use step 2 first to compare the sampled timestamps chronologically and identify which candidate interval truly contains Scrubby's earliest blue-pen drawing on the blackboard; do not assume the highest-confidence temporal segment is the earliest occurrence. Then use the corresponding bounded interval evidence: step 3 is authoritative for whether Scrubby writes legible text, makes a picture with visible seams, or merely moves without writing; step 4 should be cited if narration explicitly evaluates the handwriting or drawing. In the rewritten trace, explicitly ground the answer in observed blackboard marks and/or spoken description, not plausibility. If the evidence shows clear, readable writing, choose B; if messy illegible writing, choose A; if a picture with seams, choose C; if no visible writing/drawing result, choose D. If step 3 on segment 0 appears to be the wrong candidate relative to the chronological frame evidence from step 2, the refiner should treat step 2 as the selector of the true first occurrence and only use step 3/4 cautiously as partial evidence rather than forcing an unsupported conclusion."
+}

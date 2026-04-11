@@ -2,6 +2,7 @@ import argparse
 import base64
 import fcntl
 import hashlib
+from html import parser
 import io
 import json
 import os
@@ -45,7 +46,6 @@ from refiner_utils import (
     openai_chat_completion_limit_kwargs,
     openai_chat_temperature_kwargs,
 )
-from retriever_languagebind import Retrieval_Manager
 from video_utils import parse_subtitle_time
 
 def safe_write_with_lock(data, file_path):
@@ -202,6 +202,7 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
             ),
         )
         self._temporal_grounder_video_info_cache = None
+        self._temporal_grounder_qwen_clip_embeddings_cache = None
         self._temporal_grounder_embedder_class = None
         self._temporal_grounder_reranker_class = None
         # GPU index for tool models (temporal grounder); kept off vLLM's GPU 0
@@ -300,9 +301,7 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
             else 1.0
         )
 
-        self.retriever = None
-        self._retriever_init_error = None
-        self._ensure_retriever_ready()
+        self._ensure_video_clip_embeddings()
 
         self.subtitles = self._extract_subtitles()
 
@@ -319,7 +318,25 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         self.question = (question or "").strip()
         self.answer = answer
         self.options = list(options or [])
-        self.messages = []
+
+    def _ensure_refinement_debug_session_base(self) -> str | None:
+        if not self.refinement_debug_root:
+            self._refinement_debug_session_base = None
+            return None
+        if self._refinement_debug_session_base:
+            return self._refinement_debug_session_base
+
+        stem = refiner_debug.sanitize_path_component(Path(self.video_path).stem)
+        base = Path(self.refinement_debug_root) / stem
+        unique_debug = os.environ.get("REFINER_DEBUG_UNIQUE_RUN", "1").strip() != "0"
+        if unique_debug:
+            rid = (os.environ.get("REFINER_DEBUG_RUN_ID") or "").strip() or time.strftime(
+                "%Y%m%d_%H%M%S"
+            )
+            base = base / refiner_debug.sanitize_path_component(rid)
+        base.mkdir(parents=True, exist_ok=True)
+        self._refinement_debug_session_base = str(base.resolve())
+        return self._refinement_debug_session_base
 
     def load_sample(self, video_path: str, question: str, answer: str = None, options: list = None):
         # Release the resident frame embedder so the new video's frames are
@@ -328,6 +345,7 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         self.video_path = str(video_path)
         self.set_task(question, answer=answer, options=options)
         self._temporal_grounder_video_info_cache = None
+        self._temporal_grounder_qwen_clip_embeddings_cache = None
         self.duration = self._get_video_duration()
         self._video_fps = self._get_video_fps()
         self.dense_frame_fps = (
@@ -335,7 +353,6 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
             if self._dense_frame_fps_override is not None
             else 1.0
         )
-        self._ensure_retriever_ready()
         self._ensure_video_clip_embeddings()
         self.subtitles = self._extract_subtitles()
 
@@ -635,56 +652,18 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
 
         return ""
     
-    def _initialize_retriever(self):
-        print("Initializing retriever...")
-
-        class Args:
-            dataset_folder = self.dataset_folder
-            dataset = "demo"
-            clip_duration = self.clip_duration
-            retriever_type = "large"
-            clip_fps=1.0
-        
-        args = Args()
-        clip_save_folder = f'{self.dataset_folder}/clips/{self.clip_duration}/'
-        
-        retriever = Retrieval_Manager(args, clip_save_folder=clip_save_folder)
-        
-        if torch.cuda.is_available():
-            retriever.load_model_to_gpu(0)
-        
-        print(f"✓ Retriever initialized")
-        return retriever
-
     def _ensure_retriever_ready(self) -> bool:
-        if self.retriever is not None:
-            return True
-        if self._retriever_init_error is not None:
-            return False
-
         try:
-            self.retriever = self._initialize_retriever()
             self._ensure_video_clip_embeddings()
-            self._retriever_init_error = None
             return True
         except Exception as e:
-            self.retriever = None
-            self._retriever_init_error = str(e)
-            print(f"Warning: Retriever unavailable: {e}")
+            print(f"Warning: Qwen retriever preparation failed: {e}")
             return False
 
     def _ensure_video_clip_embeddings(self):
-        if self.retriever is None:
-            return
-        folder_path = f'{self.dataset_folder}/embeddings/{self.clip_duration}/large'
-        video_clip_paths, _ = self.retriever.calculate_video_clip_embedding(
-            self.video_path, folder_path, total_duration=self.duration, pre_calculate=False
-        )
-        if len(video_clip_paths) == 0:
-            print("Clip embeddings not found, preprocessing current video...")
-            self.retriever.calculate_video_clip_embedding(
-                self.video_path, folder_path, total_duration=self.duration, pre_calculate=True
-            )
+        # The active retrieval stack is Qwen-based. Pre-build dense frames and
+        # their frame embeddings so frame_retriever does not depend on
+        # LanguageBind clip preprocessing.
         self._ensure_dense_frames()
 
     def _ensure_dense_frames(self):
@@ -1002,7 +981,7 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         
         return results
 
-    def run_refinement_pipeline(self, trace_steps: list = None, trace_answer: str = None, max_iterations: int = 1, max_gen_rounds: int = 10):
+    def run_refinement_pipeline(self, trace_steps: list = None, trace_answer: str = None, max_iterations: int = 1):
         print("\n" + "=" * 70)
         print("Starting Trace Refinement Pipeline")
         print("=" * 70 + "\n")
@@ -1012,9 +991,7 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
 
         # Cold-start generation: produce a trace from scratch if none provided
         if not trace_steps:
-            gen_steps, gen_answer, gen_rounds = self._call_trace_generator(
-                max_rounds=max_gen_rounds,
-            )
+            gen_steps, gen_answer, gen_rounds = self._call_trace_generator()
             trace_steps = gen_steps
             trace_answer = gen_answer
             generated_trace_info = {
@@ -1042,21 +1019,7 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         final_verifier_raw = None
         final_verifier_output = None
 
-        debug_resolved = None
-        if self.refinement_debug_root:
-            stem = refiner_debug.sanitize_path_component(Path(self.video_path).stem)
-            base = Path(self.refinement_debug_root) / stem
-            unique_debug = os.environ.get("REFINER_DEBUG_UNIQUE_RUN", "1").strip() != "0"
-            if unique_debug:
-                rid = (os.environ.get("REFINER_DEBUG_RUN_ID") or "").strip() or time.strftime(
-                    "%Y%m%d_%H%M%S"
-                )
-                base = base / refiner_debug.sanitize_path_component(rid)
-            base.mkdir(parents=True, exist_ok=True)
-            self._refinement_debug_session_base = str(base.resolve())
-            debug_resolved = self._refinement_debug_session_base
-        else:
-            self._refinement_debug_session_base = None
+        debug_resolved = self._ensure_refinement_debug_session_base()
 
         for iteration in range(max_iterations):
             print(f"\n[Iteration {iteration + 1}/{max_iterations}]")
@@ -1188,14 +1151,13 @@ def main():
     )
     parser.add_argument("--output", type=str, default=None, help="Output directory path")
     parser.add_argument("--max-iterations", type=int, default=2, help="Max refinement iterations per sample")
-    parser.add_argument("--max-gen-rounds", type=int, default=10, help="Max tool-calling rounds for trace generation (when no initial trace)")
-    parser.add_argument("--generate-only", action="store_true", default=False, help="Generate traces only, skip refinement (sets max_iterations=0)")
-    parser.add_argument("--force-generate", action="store_true", default=False, help="Ignore initial_trace_steps in the input and always generate fresh traces")
-    parser.add_argument("--index", type=int, default=None, help="Index of a single entry to process (0-based); omit to process all entries")
+    parser.add_argument(
+        "--index",
+        type=int,
+        default=None,
+        help="Index of a single entry to process (0-based); omit to process all entries",
+    )
     args = parser.parse_args()
-
-    if args.generate_only:
-        args.max_iterations = 0
 
     annotation_path = Path(args.annotation_file).expanduser().resolve()
     if not annotation_path.exists():
@@ -1204,7 +1166,7 @@ def main():
     results_dir = (
         Path(args.output).expanduser().resolve()
         if args.output
-        else Path(_eval_dir) / "results_final"
+        else Path(_eval_dir) / "results_generated"
     )
     results_dir.mkdir(parents=True, exist_ok=True)
     data = _load_annotations(annotation_path)
@@ -1261,16 +1223,20 @@ def main():
             json.dump(record, f, ensure_ascii=False, indent=2)
         return out_file
 
-    for index, item in enumerate(data, start=1):
+    for index, item in enumerate(data[23:24], start=1):
         record = dict(item)
         video_path = str(item.get("video_path", "")).strip()
         question = str(item.get("question", "")).strip()
         options = list(item.get("options") or [])
-        trace_steps = [] if args.force_generate else (item.get("initial_trace_steps") or [])
+        trace_steps = []
+        input_answer = item.get("answer")
+        # Always generate the initial trace from scratch without exposing the gold
+        # answer to the pipeline. We still score against the input answer after the run.
+        pipeline_answer = None
 
         print(f"\n[{index}/{len(data)}] {Path(video_path).name or '<missing video>'}")
-        if args.force_generate and item.get("initial_trace_steps"):
-            print("  [--force-generate] Ignoring existing initial_trace_steps, generating fresh trace.")
+        if item.get("initial_trace_steps"):
+            print("  Ignoring existing initial_trace_steps; generating a fresh trace.")
 
         if not video_path or not os.path.exists(video_path):
             record["refiner_error"] = f"Video file not found: {video_path}"
@@ -1282,7 +1248,7 @@ def main():
                 demo = VideoQADemo(
                     video_path=video_path,
                     question=question,
-                    answer=item.get("answer"),
+                    answer=pipeline_answer,
                     options=options,
                     dataset_folder=dataset_folder,
                     use_subtitle=False,
@@ -1309,15 +1275,17 @@ def main():
                 demo.load_sample(
                     video_path=video_path,
                     question=question,
-                    answer=item.get("answer"),
+                    answer=pipeline_answer,
                     options=options,
                 )
 
             record["refiner_result"] = demo.run_refinement_pipeline(
                 trace_steps=trace_steps if trace_steps else None,
                 max_iterations=args.max_iterations,
-                max_gen_rounds=args.max_gen_rounds,
             )
+            if pipeline_answer is None and input_answer:
+                final_answer = record["refiner_result"].get("final_answer") or record["refiner_result"].get("final_answer_raw", "")
+                record["refiner_result"]["is_correct"] = demo._answers_match(final_answer, input_answer, options=options)
         except Exception as e:
             import traceback
             traceback.print_exc()

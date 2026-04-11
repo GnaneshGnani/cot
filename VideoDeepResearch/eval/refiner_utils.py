@@ -2,7 +2,7 @@ import json
 import re
 from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel, Field, ValidationError, root_validator, validator
+from pydantic import BaseModel, Field, ValidationError, parse_obj_as, root_validator, validator
 
 from video_utils import extract_subtitles, robust_eval, timestamp_to_clip_path
 
@@ -19,6 +19,8 @@ def _coerce_float_list(value):
         value = parsed if parsed != value else [value]
     elif isinstance(value, (int, float)):
         value = [value]
+    elif isinstance(value, tuple):
+        value = list(value)
     elif not isinstance(value, list):
         value = [value]
     return [float(item) for item in value]
@@ -45,10 +47,15 @@ class FrameRetrieverArgsModel(BaseModel):
     video_path: Optional[str] = None
     query: Optional[str] = None
     timestamps: Optional[List[float]] = None
+    time_range: Optional[List[float]] = None
     num_frames: int = 5
 
     @validator("timestamps", pre=True)
     def _normalize_timestamps(cls, value):
+        return _coerce_float_list(value)
+
+    @validator("time_range", pre=True)
+    def _normalize_time_range(cls, value):
         return _coerce_float_list(value)
 
     @validator("num_frames")
@@ -61,8 +68,16 @@ class FrameRetrieverArgsModel(BaseModel):
     def _validate_source(cls, values):
         query = str(values.get("query") or "").strip()
         timestamps = values.get("timestamps") or []
+        time_range = values.get("time_range") or []
         if not query and not timestamps:
             raise ValueError("frame_retriever requires either query or timestamps")
+        if time_range:
+            if len(time_range) != 2:
+                raise ValueError("time_range must contain exactly two timestamps")
+            start, end = float(time_range[0]), float(time_range[1])
+            if end <= start:
+                raise ValueError("time_range end must be greater than start")
+            values["time_range"] = [start, end]
         values["query"] = query or None
         return values
 
@@ -286,6 +301,57 @@ class RefinerOutputModel(BaseModel):
         return [str(item).strip() for item in value if str(item).strip()]
 
 
+class TraceGeneratorOutputModel(BaseModel):
+    type: str = ""
+    tool: str = ""
+    arguments: Dict[str, Any] = Field(default_factory=dict)
+    purpose: str = ""
+    trace_steps: List[str] = Field(default_factory=list)
+    answer: str = ""
+
+    @validator("type", "tool", "purpose", "answer", pre=True)
+    def _normalize_generator_string_fields(cls, value):
+        return str(value or "").strip()
+
+    @validator("arguments", pre=True)
+    def _normalize_generator_arguments(cls, value):
+        return value if isinstance(value, dict) else {}
+
+    @validator("trace_steps", pre=True)
+    def _normalize_generator_trace_steps(cls, value):
+        if value in (None, ""):
+            return []
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, list):
+            value = [value]
+        return [str(item).strip() for item in value if str(item).strip()]
+
+    @root_validator(skip_on_failure=True)
+    def _validate_generator_payload(cls, values):
+        output_type = str(values.get("type") or "").strip().lower()
+        tool = str(values.get("tool") or "").strip()
+        trace_steps = list(values.get("trace_steps") or [])
+
+        if not output_type:
+            if trace_steps:
+                output_type = "trace"
+            elif tool:
+                output_type = "tool_call"
+
+        if output_type == "trace":
+            if not trace_steps:
+                raise ValueError("trace output requires non-empty trace_steps")
+        elif output_type == "tool_call":
+            if not tool:
+                raise ValueError("tool_call output requires non-empty tool")
+        else:
+            raise ValueError("type must be 'trace' or 'tool_call'")
+
+        values["type"] = output_type
+        return values
+
+
 def openai_chat_completion_limit_kwargs(model_name: str, limit: int) -> dict:
     """Kwargs for OpenAI ``chat.completions.create`` output length.
 
@@ -441,7 +507,10 @@ class RefinerUtilsMixin:
         return value
 
     def _extract_json_payload(self, text):
-        return self._extract_json_payload_with_schema(text)
+        return self._extract_json_payload_with_schema(
+            text,
+            model_cls=Union[Dict[str, Any], List[Any]],
+        )
 
     def _repair_json_candidate(self, candidate: str) -> str:
         if not isinstance(candidate, str) or "<" not in candidate:
@@ -510,10 +579,23 @@ class RefinerUtilsMixin:
         if model_cls is None:
             return payload
         try:
-            validated = model_cls.parse_obj(payload)
-        except ValidationError:
+            if hasattr(model_cls, "parse_obj"):
+                validated = model_cls.parse_obj(payload)
+                if isinstance(validated, BaseModel):
+                    root_value = getattr(validated, "__root__", None)
+                    if root_value is not None:
+                        return root_value
+                    return validated.dict(exclude_none=False)
+                return validated
+            validated = parse_obj_as(model_cls, payload)
+            if isinstance(validated, BaseModel):
+                root_value = getattr(validated, "__root__", None)
+                if root_value is not None:
+                    return root_value
+                return validated.dict(exclude_none=False)
+            return validated
+        except (ValidationError, TypeError, ValueError):
             return None
-        return validated.dict(exclude_none=False)
 
     def _extract_json_payload_with_schema(self, text, model_cls=None, repair_placeholders: bool = False):
         if isinstance(text, (dict, list)):
@@ -589,6 +671,13 @@ class RefinerUtilsMixin:
         return self._extract_json_payload_with_schema(
             text,
             model_cls=RefinerOutputModel,
+            repair_placeholders=False,
+        )
+
+    def _extract_generator_payload(self, text):
+        return self._extract_json_payload_with_schema(
+            text,
+            model_cls=TraceGeneratorOutputModel,
             repair_placeholders=False,
         )
 

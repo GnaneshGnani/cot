@@ -1,0 +1,51 @@
+{
+  "strategy": "Resolve the high-severity temporal gap first by directly checking the earliest candidate blue-pen blackboard interval, then read the visual/text evidence in that earliest validated occurrence to determine which option matches the first drawing itself rather than a later example.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "VIDEO_PATH",
+        "query": null,
+        "timestamps": [30.0, 35.0, 40.0, 55.0, 60.0, 65.0],
+        "num_frames": 6
+      },
+      "purpose": "Chronologically sample the earliest unresolved candidate intervals already identified in the trace so the refiner can determine whether the first blue-pen blackboard drawing occurs in 30-40s or only later around 55-65s.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "ocr",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null
+      },
+      "purpose": "Check the sampled frames for visible on-screen words describing the robot's first drawing quality and to help identify which sampled moment actually shows the blue-pen blackboard writing/drawing event.",
+      "depends_on": [1]
+    },
+    {
+      "step": 3,
+      "tool": "dense_captioner",
+      "arguments": {
+        "video_path": "VIDEO_PATH",
+        "start_time": 30.0,
+        "end_time": 40.0,
+        "granularity": "frame"
+      },
+      "purpose": "If the earliest candidate interval does contain the first relevant event, describe what Scrubby is drawing/writing on the blackboard during 30-40s and whether the result is writing, a picture, or merely movement.",
+      "depends_on": []
+    },
+    {
+      "step": 4,
+      "tool": "asr",
+      "arguments": {
+        "video_path": "VIDEO_PATH",
+        "start_time": 30.0,
+        "end_time": 40.0
+      },
+      "purpose": "Capture any narration during the earliest candidate interval that explicitly characterizes the first drawing quality, which is safer than inferring option A from body movement alone.",
+      "depends_on": []
+    }
+  ],
+  "refinement_instructions": "Rewrite the trace around the earliest validated occurrence, not the later 60-70s event unless steps 1-4 show no relevant blue-pen blackboard drawing in 30-40s. Use Step 1 timestamps chronologically to determine the earliest sampled interval that visibly contains Scrubby drawing/writing with a blue pen on a blackboard; do not use retrieval rank to decide 'first.' Use Step 2 OCR only for actual visible text in those sampled frames. Use Step 3 and Step 4 as the authoritative sources for what happens in 30-40s and for any explicit evaluation of the first drawing. Remove or narrow the old unsupported claim that the first drawing is poor based mainly on mechanical limitations. If the earliest validated event is in 30-40s, base the final option choice on that interval only; if 30-40s does not show the target event, state that the earliest validated sampled event is later and then use the corresponding sampled evidence conservatively. Preserve only tool-grounded claims: whether it writes/draws at all, whether it is handwriting versus a picture, and any explicit description of quality. Update the final answer if the earliest-occurrence evidence contradicts the original answer."
+}

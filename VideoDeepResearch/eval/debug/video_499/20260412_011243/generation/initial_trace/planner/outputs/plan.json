@@ -1,0 +1,57 @@
+{
+  "strategy": "Split the question into two answer-critical subgoals: identify which hand Dr. Sturgis uses to hold the pot in the binoculars scene, and verify from dialogue whether Sheldon's brother was a premature baby. Use a visual localization branch for the binoculars scene and a speech branch for the premature-baby claim.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "temporal_grounder",
+      "arguments": {
+        "video_path": "video",
+        "query": "Sheldon observing Dr. Sturgis through binoculars while Dr. Sturgis is outside holding a pot"
+      },
+      "purpose": "Localize the binoculars scene so later frame analysis targets the correct moment instead of searching the whole video.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "video",
+        "query": null,
+        "timestamps": [
+          "<STEP_1:segments[0].start>",
+          "<STEP_1:segments[0].end>"
+        ],
+        "num_frames": 2
+      },
+      "purpose": "Extract candidate frames from the localized binoculars interval to inspect Dr. Sturgis and the pot at that moment.",
+      "depends_on": [
+        1
+      ]
+    },
+    {
+      "step": 3,
+      "tool": "spatial_grounder",
+      "arguments": {
+        "frame_path": "<STEP_2:frames>",
+        "timestamp": null,
+        "query": "Dr. Sturgis holding a pot, with emphasis on which hand is holding the pot"
+      },
+      "purpose": "Determine whether the pot is in Dr. Sturgis's left or right hand by grounding the person-pot-hand relation across the candidate frames.",
+      "depends_on": [
+        2
+      ]
+    },
+    {
+      "step": 4,
+      "tool": "asr",
+      "arguments": {
+        "video_path": "video",
+        "start_time": null,
+        "end_time": null
+      },
+      "purpose": "Transcribe the episode dialogue to find the statement about whether Sheldon's brother was a premature baby.",
+      "depends_on": []
+    }
+  ],
+  "refinement_instructions": "Rewrite the trace from scratch using only tool-grounded evidence. For the first subgoal, use step 1 only as a temporal anchor, then inspect the frame-level outputs from step 3 rather than assuming either retrieved frame is correct by rank alone; cite the frame result that clearly shows which hand holds the pot, and state left vs right explicitly. For the second subgoal, use the transcript from step 4 to locate the dialogue about Sheldon's brother and whether he was premature; quote or closely paraphrase the relevant ASR segment instead of inferring from general plot knowledge. The repaired trace should explicitly answer both fields—hand and yes/no on premature baby—then map that pair to the correct option. If the ASR transcript does not contain a clear mention, state that the speech evidence is insufficient rather than guessing, but do not omit the visual hand evidence."
+}

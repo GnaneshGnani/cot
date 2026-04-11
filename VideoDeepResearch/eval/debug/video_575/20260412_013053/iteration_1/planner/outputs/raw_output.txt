@@ -1,0 +1,83 @@
+{
+  "strategy": "First establish the true earliest occurrence of Scrubby drawing on the blackboard with a blue pen, rather than relying on a single high-confidence candidate interval. Then inspect frames from that earliest grounded interval to determine whether the result is poor handwriting, neat handwriting, a picture with seams, or no writing.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "temporal_grounder",
+      "arguments": {
+        "video_path": "video",
+        "query": "Scrubby drawing on a blackboard or whiteboard with a blue pen"
+      },
+      "purpose": "Find candidate intervals where Scrubby is drawing with a blue pen on the board; this provides possible occurrences that can then be ordered by timestamp to identify the earliest one.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "video",
+        "query": null,
+        "timestamps": [
+          "<STEP_1:segments[0].start>",
+          "<STEP_1:segments[1].start>",
+          "<STEP_1:segments[2].start>"
+        ],
+        "num_frames": 3
+      },
+      "purpose": "Sample one frame from each top candidate interval so the refiner can verify which returned temporal_grounder segments actually show Scrubby drawing with a blue pen on the board, and then choose the earliest valid occurrence by timestamp rather than by retrieval rank.",
+      "depends_on": [
+        1
+      ]
+    },
+    {
+      "step": 3,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "video",
+        "query": null,
+        "timestamps": [
+          "<STEP_1:segments[0].start>",
+          "<STEP_1:segments[0].end>",
+          "<STEP_1:segments[1].start>",
+          "<STEP_1:segments[1].end>",
+          "<STEP_1:segments[2].start>",
+          "<STEP_1:segments[2].end>"
+        ],
+        "num_frames": 6
+      },
+      "purpose": "Provide additional timestamped evidence within the top candidate intervals so the earliest true drawing interval can be confirmed and the visible board output can be inspected across the interval rather than from a single moment.",
+      "depends_on": [
+        1
+      ]
+    },
+    {
+      "step": 4,
+      "tool": "ocr",
+      "arguments": {
+        "frame_path": "<STEP_3:frames>",
+        "timestamp": null
+      },
+      "purpose": "Check whether the earliest validated drawing interval contains actual written letters/words on the board, which helps distinguish handwriting options from non-writing or picture options.",
+      "depends_on": [
+        3
+      ]
+    },
+    {
+      "step": 5,
+      "tool": "dense_captioner",
+      "arguments": {
+        "video_path": "video",
+        "start_time": "<STEP_1:segments[0].start>",
+        "end_time": "<STEP_1:segments[0].end>",
+        "granularity": "frame"
+      },
+      "purpose": "Describe what Scrubby is drawing and how it appears within one candidate interval; if step 2/3 show this is the earliest valid occurrence, this gives contextual evidence about whether the output is handwriting, a picture, or just motion.",
+      "depends_on": [
+        1,
+        2,
+        3
+      ]
+    }
+  ],
+  "refinement_instructions": "Replace the unsupported assumption that 110.0–120.0s is the first drawing with an explicitly grounded earliest-occurrence check using the temporal_grounder intervals plus the timestamped frame evidence from steps 2 and 3. Do not treat temporal_grounder rank as chronology: compare candidate segment timestamps and only call an interval 'first' if the sampled frames actually show Scrubby drawing with a blue pen on the board. Use the frame-level evidence from step 3 and OCR from step 4 to determine whether visible letters/words are present; if OCR finds readable writing, use that to assess handwriting quality, and if OCR does not, do not infer 'didn't write anything' unless the visual evidence clearly shows only motion or non-writing marks. Use dense_captioner in step 5 only as contextual support for what is being drawn inside the validated earliest interval; if step 2/3 indicate that segments[0] is not the earliest true drawing interval, then the refiner should ignore step 5 for final answering and instead keep the trace explicit about remaining uncertainty rather than forcing option D. Update the final answer if the grounded earliest interval supports A, B, or C instead of D."
+}

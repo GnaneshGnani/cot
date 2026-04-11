@@ -1,10 +1,10 @@
 import os
 
 # Default scratch layout (override with VDR_RUNTIME_ROOT or NEXUS_RUNTIME_ROOT).
-# NEXUS_RUNTIME_ROOT_DEFAULT = "/nfs-stor/ghazi.ahmad/.cache"
-NEXUS_RUNTIME_ROOT_DEFAULT = "/fs/nexus-scratch/gnanesh/.cache/huggingface"
-# SHARED_HF_HOME_DEFAULT = "/nfs-stor/ghazi.ahmad/HF_HOME"
-SHARED_HF_HOME_DEFAULT = "/fs/nexus-scratch/gnanesh/.cache/huggingface"
+NEXUS_RUNTIME_ROOT_DEFAULT = "/nfs-stor/ghazi.ahmad/.cache"
+# NEXUS_RUNTIME_ROOT_DEFAULT = "/fs/nexus-scratch/gnanesh/.cache/huggingface"
+SHARED_HF_HOME_DEFAULT = "/nfs-stor/ghazi.ahmad/HF_HOME"
+# SHARED_HF_HOME_DEFAULT = "/fs/nexus-scratch/gnanesh/.cache/huggingface"
 
 
 

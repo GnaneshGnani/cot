@@ -44,6 +44,11 @@ IMPORTANT OPERATING MODE:
 - If the trace resets from a previously supported claim to "unknown" or to a
   different claim without that justification, diagnose bad evidence integration
   rather than blaming the earlier tool output itself.
+- A temporal or visual anchor established for one subgoal is not automatically
+  evidence for a different unresolved subgoal. If the trace reuses the same
+  interval, frame, or screen state for a new missing fact without text showing
+  that the missing fact is actually grounded there, diagnose incomplete
+  grounding or overreach rather than treating the reused anchor as sufficient.
 - Omission is not contradiction: if a tool report does not mention left vs
   right, exact count, earliest instance, or speaker identity, that means the
   trace may need more concrete evidence for that detail; it does NOT mean the
@@ -103,6 +108,11 @@ Evaluate the trace in this order:
   required by the question?
 - If the question asks for a maximum/minimum/ranking over several entities,
   verify that all required candidates are actually evaluated or ruled out.
+- For ordinal or sequence questions (first/second/third/last/earliest/latest),
+  verify that the trace separately identifies the base event/state, validates
+  which occurrence is the relevant one in time, and characterizes that
+  validated occurrence. If any of those pieces is missing, the trace has not
+  yet answered the question.
 
 2. Step-by-step logical validity
 - Does each step follow from earlier steps?
@@ -133,10 +143,19 @@ Evaluate the trace in this order:
   1. what the tool output positively establishes,
   2. what remains unresolved or too fine-grained,
   3. whether the trace overstates the tool result.
+- If the trace claims several candidate windows, timestamps, or retrieved frames
+  were checked, confirm that the cited evidence actually characterizes those
+  candidates. A long timestamp list with evidence described for only one subset
+  is a coverage gap, not a resolved comparison.
 - If a tool output includes per-frame results across multiple candidate frames,
   evaluate whether the trace chose the relevant frame-level result in a
   question-aligned way. Do not treat an arbitrary candidate frame as justified
   merely because it appears in the bundle.
+- If the answer wording is qualitative (for example poor/neat/clear/messy,
+  loud/quiet, happy/angry), check whether the trace grounds that
+  characterization in explicit ASR/OCR/on-screen text or another sufficiently
+  specific attributed tool report, rather than inferring it only from a coarse
+  scene description.
 - Prefer diagnoses such as "the cited tool result confirms pot presence but not
   handedness" or "the cited ASR supports the topic but not speaker identity"
   rather than saying the tool result itself is unsupported.
@@ -149,6 +168,11 @@ Evaluate the trace in this order:
   fails to confirm it, stays broad, or covers the wrong slice of evidence,
   treat that as a belief-update error. Non-confirmation is not disproof unless
   the trace text supplies a direct contradiction or a stronger correction.
+- If one localized interval/frame bundle grounds only part of the answer
+  (for example one metric, one entity, one phase, or one side of a comparison),
+  check whether the trace incorrectly assumes the remaining answer-critical
+  fields must come from that same anchor. If so, diagnose the missing fields as
+  unresolved rather than letting the trace inherit them from the reused anchor.
 - Still treat the claim as unsupported if the trace strips away provenance and
   presents the value as a bare fact about unseen media.
 - This includes:
@@ -251,11 +275,21 @@ If included, use this format:
 
 Do NOT include modality routing, tool recommendations, priority labels,
 time anchors for execution, or repair instructions.
+Make evidence_gaps maximally planner-useful while staying diagnostic:
+- explicitly name what is already grounded,
+- explicitly name the missing answer-critical field(s),
+- when relevant, say that the current grounded interval/frame/state only
+  partially covers the question and that whether the missing field appears in
+  the same or a different moment remains unresolved.
 Prefer summaries such as:
 - "Object presence is grounded, but the exact hand/body-side relation remains unresolved."
 - "ASR grounds the dialogue topic, but the speaker identity remains unresolved."
 - "A chart is localized, but the symbol-to-entity mapping remains unresolved."
 - "Candidate moments are localized, but earliest/latest order is not yet established."
+- "One early candidate interval is ruled out, but the remaining earlier candidates are still uncharacterized, so the earliest validated occurrence is unresolved."
+- "The current grounded chart state supports Store Cleanliness, but Value for
+  Dollar for the same entities remains unresolved; co-occurrence in the same
+  chart state is not established from the trace text."
 
 ━━━━━━━━ Output Format ━━━━━━━━
 You MUST respond with a JSON object and NOTHING else:
@@ -477,6 +511,40 @@ Each call should be easy for the downstream tool to execute correctly:
 - each retrieval should target one subject / event / claim cluster
 - avoid vague references like "this", "that", "the scene", "what happens"
 
+Before proposing tool calls, do this decomposition mentally:
+1. Read QUESTION and identify the answer-critical subgoals.
+   - What exact entities, attributes, relations, counts, times, or comparisons
+     must be grounded to answer the question?
+   - If the question is multiple-choice, what evidence would distinguish the
+     options rather than merely sounding compatible with one option?
+2. Read DIAGNOSIS as a repair specification, not just a warning.
+   - Use `error_categories`, `evidence_gaps`, and any `suggested_tools` to see
+     which subgoals remain unsupported or were previously inferred incorrectly.
+   - Treat verifier recommendations as hints about what is missing, not as a
+     script to follow blindly.
+3. Map unresolved subgoals to tool plans.
+   - Prefer one focused tool chain per unresolved subgoal or tightly linked
+     claim cluster.
+   - If several subgoals may live in different moments or different evidence
+     states, decompose them into separate localization/retrieval branches rather
+     than forcing one branch to answer everything.
+   - Treat prior temporal_grounder results as query-conditioned anchors, not as
+     globally valid locations for every unresolved fact.
+4. Only then write the plan.
+   - The plan should be derived from QUESTION + DIAGNOSIS together, not from
+     the surface wording of the old TRACE alone.
+   - Preserve prior supported evidence when useful, but do not anchor the new
+     plan to unsupported assumptions from the old trace.
+
+IMPORTANT LIMITATION:
+- You do NOT see the video itself. Infer planning risk only from the question,
+  diagnosis, preprocessing, and previous tool outputs.
+- Therefore, when planning for charts / infographics / diagrams, do not assume a
+  query-ranked frame is already a fully rendered stable state. Animated or
+  progressive chart reveals are a known risk pattern that must be handled by
+  temporal localization plus timestamped frame retrieval when the task needs
+  complete chart contents rather than just chart presence.
+
 ━━━ Scope And Cost Awareness (VERY IMPORTANT) ━━━
 Plan for the cheapest sufficient evidence, not the broadest possible evidence.
 
@@ -499,12 +567,79 @@ General principles:
   on the likely spoken region, or another directly relevant narrow tool.
 - If a previous iteration already produced partial evidence, prefer a narrower
   follow-up over restarting with a broader scan.
+- Plan around answer-critical gaps, not around tool names.
+  Example mindset:
+  - bad: "Verifier mentioned chart_analyzer, so call chart_analyzer again."
+  - better: "The question needs the missing series / label / comparison, so
+    localize the correct frame state and then call the tool that can read that
+    exact missing field."
+- Do not let PREVIOUS_TOOL_RESULTS_SUMMARY silently lock the plan onto an old
+  temporal anchor. Use history to see what was already grounded, what was only
+  partially grounded, and what failed.
+
+━━━ Question-To-Plan Decomposition ━━━
+Use this reasoning pattern implicitly before producing the JSON:
+
+1. Extract the answer schema from QUESTION.
+   Examples:
+   - who / which entity
+   - what value / label / count
+   - when / first / last / before / after
+   - comparison / max / min / difference / change
+   - For ordinal or sequence questions (first/second/last/earliest/latest),
+     explicitly split the task into:
+     1. localize the base observable event or state,
+     2. test candidate occurrences in chronological order,
+     3. characterize the validated occurrence that actually answers the question.
+2. Extract the missing support from DIAGNOSIS.
+   Look especially for:
+   - unsupported claims
+   - wrong inference steps
+   - missing modalities
+   - evidence_gaps scopes
+   - suggested_tools
+3. Convert those into minimal verification subgoals.
+   Examples:
+   - "ground the missing text label"
+   - "find the correct time window"
+   - "compare two candidate frames/phases"
+   - "read the missing series/value"
+4. Build the tool plan from those subgoals in dependency order.
+   Common pattern:
+   - localize -> retrieve/sample -> specialized reading -> optional follow-up comparison
+5. In refinement_instructions, tell the Refiner exactly which prior claims to
+   replace, which tool outputs are authoritative, and what comparison or
+   computation must now be performed.
+
+Important:
+- If QUESTION requires multiple answer-critical fields, the planner must name
+  all of them in its internal decomposition and gather evidence for each.
+- If DIAGNOSIS says the old answer came from plausibility, elimination, or
+  unsupported inference, the new plan must gather the missing direct evidence
+  rather than rephrase the same inference.
+- If DIAGNOSIS suggests tools that do not fully resolve the answer-critical
+  fields from QUESTION, extend or refine the plan so the missing fields are
+  actually grounded.
+- If a previous temporally grounded interval or retrieved frame bundle grounded
+  one subgoal but did NOT reveal another required field, do not default to
+  reusing that same interval/frame bundle for the missing field.
+  First ask:
+  1. Is the missing field actually expected to co-occur in that same state?
+  2. Did DIAGNOSIS indicate that the current anchor is partial, wrong-phase, or
+     otherwise insufficient?
+  3. Should the missing field be temporally grounded directly with a new query?
+- If the answer to those questions is uncertain, prefer a new
+  temporal_grounder query targeting the missing fact / phase / metric / step
+  rather than chaining frame_retriever from an older temporal grounding result.
 
 Dense-captioner anti-patterns:
 - Bad: using dense_captioner on an entire video just to find where text or a
   repeated phrase appears.
 - Bad: using dense_captioner as a generic substitute for OCR, ASR, or
   chart_analyzer when the question is specifically about text, speech, or chart values.
+- Bad: using dense_captioner on a merely plausible candidate interval for an
+  ordinal question before cheaper evidence has shown that the interval is
+  actually a true instance of the base event.
 - Better: first localize candidate moments with frame_retriever / OCR / ASR,
   then call dense_captioner only on the unresolved short interval if broader
   scene understanding is still needed.
@@ -591,6 +726,9 @@ A good tool query should:
      that describes the text category, placement, and scene context
    - if the task depends on first/second/earliest/latest occurrence, prefer a
      timestamp sweep plus OCR over a brittle exact-string retrieval
+12. For temporal_grounder on ordinal questions, query the base observable event
+    or state rather than the resolved ordinal conclusion or answer-option text.
+    Determine first/earliest/latest downstream by comparing candidate times.
 
 ━━━ Tool-Specific Query Guidance ━━━
 
@@ -612,9 +750,10 @@ Question-conditioned retrieval guidance:
   - before a hand/pen/pointer modifies the scene vs during/after demonstration
 - If the question contains an ordinal or sequence reference such as first,
   second, third, last, final, earliest, or latest, include that role in the
-  query itself. Do not reduce "the last shape" to just "shape" or "final
-  puzzle diagram" if the video may later show explanatory versions of the same
-  structure.
+  query only when the retrieval target is a known question-bearing frame/state
+  and the ordinal itself helps disambiguate phases. For occurrence-order tasks
+  where chronology is still unresolved, do not rely on ordinal wording alone;
+  pair it with timestamped sampling or chronological candidate comparison.
 - Prefer queries that describe the target as the question-bearing frame rather
   than an explanatory frame. Good generic cues include:
   - "unsolved"
@@ -626,6 +765,17 @@ Question-conditioned retrieval guidance:
 - When the likely failure mode is retrieving explanation-state frames instead of
   question-state frames, make the query explicitly exclude that phase in natural
   language by targeting the pre-explanation state, not by asking for the answer.
+- For charts, tables, scoreboards, infographics, or slides whose values/labels
+  may animate, appear progressively, or cycle through multiple metrics, do NOT
+  assume query-mode retrieval alone will land on a fully populated frame.
+  If the question needs complete chart contents, first localize the chart's
+  appearance window with temporal_grounder, then use timestamped
+  frame_retriever inside that window before chart_analyzer / OCR.
+- More generally, if the question needs complete evidence but the needed
+  evidence may be distributed across recurring screens, successive states,
+  separate slides, different metrics, or different moments, do NOT assume one
+  retrieved frame or one top-ranked interval contains everything. First use
+  retrieval to test candidate states, then branch or sweep as needed.
 - If a visual target recurs in several variants, include the answer-critical
   distinguishing attribute in the query:
   - which item in the sequence (first/last/etc.)
@@ -686,9 +836,28 @@ Do NOT merge queries like:
 - "man entering room and close-up of computer screen and later crowd cheering"
 These should be separate steps.
 
+Coverage-before-commit rule:
+- If temporal_grounder returns multiple plausible candidate intervals and the
+  question requires complete structured evidence, do not commit to only
+  `segments[0]` by default.
+- A good generic pattern is:
+  1. sample one or a few timestamps from each top candidate interval,
+  2. inspect which interval actually contains the needed evidence state, then
+  3. run a tighter local sweep only inside the winning interval.
+- If no single interval contains all answer-critical evidence, plan separate
+  retrieval branches for the missing evidence rather than forcing one frame
+  bundle to answer the entire question.
+
 When timestamps are available or can be inferred confidently, prefer:
 - `timestamps=[...]` with a small number of targeted moments
 instead of a broad semantic query.
+
+Timestamp coverage rule:
+- In timestamp mode, frame_retriever returns at most `num_frames` frames.
+- If you need evidence from N specific timestamps or N candidate windows, ensure
+  `num_frames >= N` or split the timestamps across separate frame_retriever calls.
+- Never assume that giving a long `timestamps` list with a smaller `num_frames`
+  value will still sample every requested candidate.
 
 If a retrieved frame nearly answers the question but a fine-grained relation,
 body-part use, contact moment, or temporal transition is still unclear:
@@ -731,6 +900,8 @@ frames, OCR, ASR follow-ups, or dense captioning.
 
 Good uses:
 - localize when a chart first appears before reading values
+- localize when an animated chart / infographic is on screen before selecting a
+  fully rendered frame for chart_analyzer
 - localize the interval where a person performs an action before retrieving frames
 - localize candidate moments where a sign/title/object appears before OCR or spatial grounding
 
@@ -740,9 +911,26 @@ Important semantics:
 - If the question is about first/second/earliest/latest occurrence, use
   temporal_grounder to narrow candidates, then add timestamped frame/OCR/ASR
   steps to establish order.
+- For ordinal questions, the temporal_grounder query should usually name the
+  base event or scene state, not the final ordinal answer or subjective option
+  wording. Downstream tools should decide which returned segment is earliest,
+  latest, first, or last.
 - Use `segments[*].start/end` as real interval bounds for downstream tools.
 - Prefer the top-confidence segment when the goal is simply to localize the
   most likely moment, not when chronology itself is the question.
+- Write temporal_grounder queries so they describe one observable event, scene
+  state, screen state, or evidence-bearing visual at a time.
+- Do NOT pack several not-yet-verified evidence states into one query if they
+  may appear in different moments. If the answer depends on multiple attributes,
+  metrics, phases, or screens and co-occurrence is not established, either:
+  1. use separate temporal_grounder calls, or
+  2. treat the top returned segments as alternatives to inspect before deciding
+     where each required evidence item actually lives.
+- Do not assume the highest-confidence segment contains every answer-critical
+  subpiece just because it matches part of the query.
+- If temporal_grounder returns several strong segments that may correspond to
+  different states of the same recurring visual target, plan frame retrieval so
+  those segments are compared, not just the first one accepted blindly.
 
 For frame_retriever query mode:
 - choose `num_frames` just large enough to capture alternatives
@@ -946,6 +1134,13 @@ If a prior chart_analyzer call found the right chart but left entity/value
 mapping ambiguous, do not repeat a generic chart query. Re-query for the exact
 legend, label, symbol, row, cell, or relationship that is still blocking the answer.
 
+Animated-chart planning rule:
+- If the question requires multiple values, multiple metrics, or a comparison
+  across entities, and the chart / infographic could be revealed progressively,
+  prefer temporal_grounder first and then timestamped frame_retriever inside the
+  grounded window. Do not rely on a raw query-ranked chart frame as if it were
+  guaranteed to show the complete final chart state.
+
 ━━━ Planning Rules ━━━
 - Minimize tool calls. Only call tools that address diagnosed errors.
 - Use DIAGNOSIS.evidence_gaps (when present) to identify which unsupported claim
@@ -1011,8 +1206,18 @@ legend, label, symbol, row, cell, or relationship that is still blocking the ans
   any broad summarization pass.
 - If an evidence gap scope mentions chart/OCR/text, include frame_retriever and
   then chart_analyzer/ocr.
+- More specifically for charts / infographics / dashboards:
+  if the task needs complete values, multiple metrics, or a cross-metric
+  comparison, prefer temporal_grounder → timestamped frame_retriever →
+  chart_analyzer rather than raw query-mode frame_retriever alone, because the
+  planner does not see the video and must account for animated / partial chart states.
 - If an evidence gap scope mentions audio or speech, prefer asr for speech and
   audio_grounder for non-speech events.
+- If the answer choices are qualitative characterizations (for example poor,
+  neat, clear, messy, loud, quiet, happy, angry), ask whether the decisive
+  evidence may be stated by narration, subtitles, or on-screen captions. In a
+  validated interval, prefer ASR and/or OCR alongside visual tools rather than
+  inferring the characterization only from a coarse scene description.
 - If an evidence gap scope mentions counting or spatial claims, include
   frame_retriever then counter/spatial_grounder.
 - If the answer choices are sentence-like claims or paraphrases, and OCR-style
@@ -1033,6 +1238,25 @@ legend, label, symbol, row, cell, or relationship that is still blocking the ans
   retry with a near-synonym of the same query. Change the retrieval strategy:
   switch to timestamped sampling, split the claim into narrower subproblems, or
   use a broader text-context query that does not depend on an unverified token.
+- If a prior chart_analyzer call says a requested metric / series / label is
+  missing, or only one of several needed metrics is visible, do NOT assume the
+  metric is absent from the video. Treat this as possible partial-chart or
+  wrong-phase evidence first. Prefer temporal_grounder plus timestamped
+  frame_retriever around the chart interval before concluding the chart itself
+  lacks the requested data.
+- More generally, if a specialized reading tool returns only part of the needed
+  evidence from a visually plausible frame or interval, treat that as a
+  coverage failure first, not as proof that the missing evidence does not
+  exist. Revisit alternate candidate intervals or split the evidence search
+  into separate grounded branches before falling back to option elimination or
+  "cannot determine."
+- If an earlier candidate interval is ruled out for an ordinal question, do not
+  stop there. Continue chronologically to the next unresolved candidate interval
+  until one is validated or the remaining uncertainty is explicitly bounded.
+- Do not infer a final multiple-choice answer from partial structured evidence
+  by testing which option sounds plausible. If one answer-critical field is
+  still ungrounded, gather that missing field directly or keep the trace marked
+  incomplete.
 - If a previous query-mode frame_retriever call returned frames from the wrong
   phase of a recurring visual target (for example, an explanatory or solved
   variant instead of the original question frame), do not keep re-querying the
@@ -1625,6 +1849,12 @@ RULES:
 - For query mode, rank by relevance and ensure visual diversity (avoid near-
   duplicate frames).
 - For timestamp mode, find the exact frame (nearest I-frame or decoded frame).
+- In timestamp mode, return at most one frame per requested timestamp and at
+  most `num_frames` frames total.
+- If more timestamps are requested than `num_frames`, only the earliest
+  requested timestamps can be guaranteed coverage. Callers who need every
+  timestamp compared must increase `num_frames` or split the request into
+  multiple calls.
 - Include the timestamp in the filename for traceability.
 '''
 
@@ -1732,6 +1962,9 @@ TASK:
   1. Analyze the video to find ALL time segments where the described event occurs.
   2. For each segment, provide a start time, end time, and confidence score.
   3. If the event does not occur in the video, return an empty list.
+  4. If the query describes a scene state or evidence-bearing visual that may
+     recur in several variants, return multiple plausible candidate segments
+     rather than assuming one segment contains every needed detail.
 
 OUTPUT FORMAT (JSON):
 {
@@ -1759,6 +1992,18 @@ RULES:
 - confidence >= 0.8 means high confidence; 0.5-0.8 is moderate; < 0.5 is low.
 - If unsure, return candidates with lower confidence rather than omitting them.
 - Timestamps must be precise to 0.1 second granularity.
+- If the query includes first/second/last/earliest/latest language, treat that
+  as a hint that downstream reasoning will need chronological comparison. The
+  query should still be interpreted as the base observable event/state to
+  localize, not as permission to collapse directly to one guessed ordinal answer.
+- Avoid baking answer-option adjectives or subjective judgments (for example
+  poor handwriting, neat drawing, messy result) into the localization unless
+  that judgment is itself the directly observable state being searched.
+- `segments` are candidate windows, not a guarantee that every answer-critical
+  attribute co-occurs inside the top segment.
+- If the query could match multiple scene states, metrics, slides, or phases of
+  the same recurring visual target, preserve those alternatives in `segments`
+  instead of collapsing to one guessed interpretation.
 '''
 
 chart_analyzer_prompt = '''
@@ -1865,11 +2110,15 @@ extra text before or after the JSON.
    Localizes candidate time windows for an event.
    USE WHEN: need a bounded interval for an event, action, scene phase, chart
    appearance, or any answer-critical moment before calling a specialized tool.
+   IMPORTANT: the top segment is only the strongest candidate, not proof that
+   every needed evidence item lives in that same window.
 
 2. frame_retriever(video_path: str, query: str | null, timestamps: list[float] | null, num_frames: int)
    -> {frames: list[{frame_path, timestamp, relevance_score}]}
    Extracts keyframes by query relevance or at specific timestamps.
    USE WHEN: need visual evidence for a specific moment, object, chart, or scene.
+   IMPORTANT: use it to compare candidate states when needed, not just to fetch
+   one convenient frame and assume coverage is complete.
 
 3. asr(video_path: str, start_time: float | null, end_time: float | null)
    -> {transcript, segments: list[{text, start, end}]}
@@ -1920,11 +2169,30 @@ Follow this general strategy:
 1. START with broad orientation:
    - Use temporal_grounder or frame_retriever to understand the video structure
    - If the question mentions specific events, locate them first
+   - If the answer may depend on evidence from different moments or different
+     scene states, do not assume one localization step will capture everything
+   - For first/second/last/earliest/latest questions, split the problem into:
+     1. localize the base event/state,
+     2. compare candidate occurrences chronologically,
+     3. characterize the validated occurrence.
+     Do not assume the highest-confidence temporal grounding is the first one.
 
 2. THEN gather specific evidence:
    - Use the localized time ranges / frames from step 1 to call specialized tools
    - Prefer cheaper tools first: frame_retriever + OCR before dense_captioner
    - Chain naturally: temporal_grounder → frame_retriever → chart_analyzer/ocr/spatial_grounder
+   - If temporal_grounder returns several plausible intervals, sample across the
+     top alternatives before committing to one interval for deeper analysis
+   - If one interval yields only partial evidence, branch to another candidate
+     interval or run a separate retrieval plan for the missing evidence instead
+     of forcing one frame bundle to answer the whole question
+   - Do not spend dense_captioner on a merely plausible candidate interval for
+     an ordinal question until cheaper evidence has shown that the interval is a
+     true instance of the base event
+   - If the answer wording is qualitative (for example poor/neat/clear/messy),
+     check whether narration, subtitles, or on-screen text states that
+     characterization directly; use ASR and/or OCR in the validated interval
+     rather than relying only on a coarse visual description
 
 3. PRODUCE the trace when you have enough evidence to answer confidently.
    - Do NOT wait until round 10 if you have enough evidence earlier
@@ -1938,6 +2206,14 @@ When calling tools with natural-language queries:
 - Include distinctive visual/audio attributes: color, clothing, object type, position
 - Avoid pronouns: do not use "he", "she", "it", "they", "this", "that"
 - Each query should be independently understandable without reading prior context
+- For temporal_grounder, describe one observable event / screen state / scene
+  state per query whenever possible
+- For temporal_grounder on ordinal questions, describe the base observable event
+  or state rather than embedding the resolved ordinal answer or subjective
+  option wording in the query
+- Do not conjoin multiple not-yet-verified evidence states into one retrieval
+  query if they may appear at different times; split them or compare candidate
+  intervals explicitly
 - Keep queries compact but complete
 
 ━━━ Trace Output Rules ━━━
@@ -1954,5 +2230,8 @@ When producing the final trace (type: "trace"):
 - Call ONE tool per round. Do not batch multiple tool calls.
 - Do NOT hallucinate tool outputs. Wait for the actual result before reasoning about it.
 - If a tool returns an error or empty result, adapt your strategy.
+- When using frame_retriever in timestamp mode, ensure `num_frames` covers every
+  timestamp you actually need to compare; otherwise split the timestamps across
+  multiple rounds instead of assuming one call covered them all.
 - On the FINAL round you MUST output type "trace" regardless of evidence state.
 """

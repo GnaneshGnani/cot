@@ -1,0 +1,50 @@
+{
+  "strategy": "Recover the missing Store Cleanliness values by re-localizing the relevant chart/screen rather than assuming they co-occur with the previously found Value for Dollar chart. Then read the chart contents from candidate frames and compare those values against the already grounded Value for Dollar percentages to identify the largest discrepancy.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "temporal_grounder",
+      "arguments": {
+        "video_path": "video",
+        "query": "chart or slide showing customer-rated Store Cleanliness percentages for Walmart, Target, Whole Foods, and Albertsons"
+      },
+      "purpose": "Find candidate time windows where the missing Store Cleanliness chart appears, since the prior evidence only localized a Value for Dollar chart.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "video",
+        "query": null,
+        "timestamps": [
+          "<STEP_1:segments[0].start>",
+          "<STEP_1:segments[0].end>",
+          "<STEP_1:segments[1].start>",
+          "<STEP_1:segments[1].end>",
+          "<STEP_1:segments[2].start>",
+          "<STEP_1:segments[2].end>"
+        ],
+        "num_frames": 6
+      },
+      "purpose": "Sample chronologically meaningful candidate frames from multiple top localized intervals to avoid committing to only the highest-confidence segment and to catch the fully rendered Store Cleanliness chart state.",
+      "depends_on": [
+        1
+      ]
+    },
+    {
+      "step": 3,
+      "tool": "chart_analyzer",
+      "arguments": {
+        "frame_path": "<STEP_2:frames>",
+        "timestamp": null,
+        "query": "customer-rated Store Cleanliness chart values for Walmart, Target, Whole Foods, and Albertsons"
+      },
+      "purpose": "Read the Store Cleanliness percentages from the candidate chart frames and identify which sampled frame actually contains the needed metric.",
+      "depends_on": [
+        2
+      ]
+    }
+  ],
+  "refinement_instructions": "Preserve the previously grounded Value for Dollar readings from the earlier iteration: Walmart 70%, Target 45%, Whole Foods 10%, Albertsons 25%, unless the new evidence directly contradicts them. Use Step 3 frame-level chart_analyzer outputs to find the frame that explicitly shows Store Cleanliness values for the same four stores; do not rely on any top-level summary if multiple frames are analyzed. Replace the old incomplete claim that no answer can be supported with a direct discrepancy computation for each store using Store Cleanliness minus Value for Dollar in absolute percentage-point terms. Then select the option whose store and approximate difference match the computed maximum. If Step 3 still shows only partial or wrong-metric frames, state that the missing metric remains ungrounded rather than guessing."
+}
