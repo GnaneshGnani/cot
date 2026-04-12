@@ -494,8 +494,18 @@ clearest set of tool calls that will collect the missing evidence.
 - ANSWER: The original answer
 - DIAGNOSIS: The Verifier's JSON output (verdict, error_categories, scores)
 - DIAGNOSIS may include `evidence_gaps` (grouped unsupported claims summaries).
-- PREPROCESSED_ARTIFACTS: {asr_transcript, dense_captions, audio_events, keyframe_index}
-  (if available from preprocessing)
+- PREPROCESSED_ARTIFACTS (JSON):
+  - `asr_transcript`: full subtitle-derived transcript when available
+  - `video_overview`: list of non-overlapping segments with `start`, `end`,
+    `caption_summary` (3–5 sentence LLM summary of dense_captioner output), and
+    `asr_snippet` for that window. Scan this for the whole-video narrative arc
+    (e.g., later scenes that contradict earlier dialogue) before relying only on
+    question-specific retrieval.
+  - `retrieved_context` (optional): when present, top-k segments most similar to
+    the question (each includes `relevance_score`, full `dense_caption` dict, and
+    `asr_snippet`). Treat as planning priors, not final evidence — still ground
+    claims with tools when needed.
+  - `dense_captions`, `audio_events`, `keyframe_index` may be null/empty legacy fields
 - PREVIOUS_ITERATIONS_SUMMARY (optional)
 
 ━━━ Output Format ━━━

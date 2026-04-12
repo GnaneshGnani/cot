@@ -1,6 +1,9 @@
 import json
 import re
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
+
+import torch
 
 from pydantic import BaseModel, Field, ValidationError, parse_obj_as, root_validator, validator
 
@@ -763,6 +766,229 @@ class RefinerUtilsMixin:
             return result
         return default_result
 
+    def _segment_dense_captions_cache_path(self, segment_size_s: float) -> Path:
+        video_id = Path(str(self.video_path)).stem
+        return Path(self.dataset_folder) / "dense_captions" / video_id / f"segment_captions_{float(segment_size_s)}s.json"
+
+    def _format_dense_caption_evidence(self, dense: Any) -> str:
+        if not isinstance(dense, dict):
+            return str(dense)[:4000]
+        parts: List[str] = []
+        ov = dense.get("overall_summary")
+        if ov:
+            parts.append(f"Overall summary: {ov}")
+        for cap in dense.get("captions") or []:
+            if not isinstance(cap, dict):
+                continue
+            parts.append(
+                f"Span {cap.get('start')}–{cap.get('end')}: "
+                f"visual={cap.get('visual', '')}; audio={cap.get('audio', '')}; "
+                f"on_screen_text={cap.get('on_screen_text', '')}; "
+                f"actions={cap.get('actions', [])}; objects={cap.get('objects', [])}"
+            )
+        return "\n".join(parts) if parts else json.dumps(dense, ensure_ascii=False)[:4000]
+
+    def _caption_summary_fallback(self, dense: Any) -> str:
+        if not isinstance(dense, dict):
+            return ""
+        visuals: List[str] = []
+        for cap in dense.get("captions") or []:
+            if isinstance(cap, dict) and cap.get("visual"):
+                visuals.append(str(cap["visual"]).strip())
+        text = " ".join(visuals).strip() or str(dense.get("overall_summary") or "").strip()
+        sentences = [s for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+        return " ".join(sentences[:5]).strip()
+
+    def _summarize_segment_caption_object(self, dense: dict, start: float, end: float) -> str:
+        evidence = self._format_dense_caption_evidence(dense)
+        prompt = (
+            f"You are summarizing a video segment from {start:.1f}s to {end:.1f}s.\n\n"
+            f"Dense captioner output:\n{evidence}\n\n"
+            "Write a 3–5 sentence summary of what is visually and audibly happening in this segment. "
+            "Stick strictly to the evidence above; do not invent details. Output plain text only, no JSON."
+        )
+        try:
+            summarize = getattr(self, "_vlm_summarize_text", None)
+            if callable(summarize):
+                text = (summarize(prompt) or "").strip()
+                if text and len(text) > 20:
+                    return text
+        except Exception as ex:
+            print(f"  [_summarize_segment_caption_object] {ex}")
+        return self._caption_summary_fallback(dense)
+
+    def _build_segment_dense_captions(self, segment_size_s: float = 30.0) -> None:
+        """Populate self._segment_captions_cache; uses disk cache when available."""
+        segment_size_s = float(segment_size_s)
+        self._segment_captions_cache = []
+        cache_path = self._segment_dense_captions_cache_path(segment_size_s)
+        if cache_path.is_file():
+            try:
+                raw = json.loads(cache_path.read_text(encoding="utf-8"))
+                if (
+                    abs(float(raw.get("segment_size_s", 0)) - segment_size_s) < 1e-6
+                    and str(raw.get("video_path", "")) == str(self.video_path)
+                ):
+                    self._segment_captions_cache = list(raw.get("segments") or [])
+                    print(f"  Loaded segment captions cache → {cache_path}")
+                    return
+            except Exception as ex:
+                print(f"  segment captions cache read failed: {ex}")
+
+        segments: List[dict] = []
+        dur = float(self.duration or 0.0)
+        t = 0.0
+        while t < dur:
+            end = min(t + segment_size_s, dur)
+            if end - t < 0.5:
+                break
+            print(f"  [segment dense captions] {t:.1f}s – {end:.1f}s ...")
+            dense = self._run_dense_captioner_interval(
+                t, end, granularity="segment", focus_query=""
+            )
+            if not isinstance(dense, dict):
+                dense = {"captions": [], "captioned_range": {"start": t, "end": end}}
+            summary = self._summarize_segment_caption_object(dense, t, end)
+            segments.append(
+                {
+                    "start": float(t),
+                    "end": float(end),
+                    "dense_caption": dense,
+                    "caption_summary": summary,
+                }
+            )
+            t += segment_size_s
+
+        self._segment_captions_cache = segments
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "segment_size_s": segment_size_s,
+                        "video_path": str(self.video_path),
+                        "segments": segments,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            print(f"  Saved segment captions cache → {cache_path}")
+        except Exception as ex:
+            print(f"  segment captions cache write failed: {ex}")
+
+    def _build_segment_index(self, segment_size_s: float = 30.0) -> None:
+        """Join cached segment captions with frame-embedding centroids and ASR snippets."""
+        segment_size_s = float(segment_size_s)
+        self._segment_index = []
+        cache = list(getattr(self, "_segment_captions_cache", None) or [])
+        emb_path, paths_path = self._dense_frame_embed_cache_paths()
+        frame_embs: Optional[torch.Tensor] = None
+        paths_list: List[str] = []
+        path_to_idx: Dict[str, int] = {}
+        if emb_path.is_file() and paths_path.is_file():
+            try:
+                paths_list = json.loads(paths_path.read_text(encoding="utf-8"))
+                frame_embs = torch.load(emb_path, map_location="cpu").float()
+                path_to_idx = {p: i for i, p in enumerate(paths_list)}
+            except Exception as ex:
+                print(f"  [_build_segment_index] embedding load failed: {ex}")
+                frame_embs = None
+                paths_list = []
+                path_to_idx = {}
+
+        for seg in cache:
+            s, e = float(seg["start"]), float(seg["end"])
+            asr = self._get_asr_result_from_subtitles(s, e).get("full_transcript", "") or ""
+            centroid: Optional[torch.Tensor] = None
+            if frame_embs is not None and paths_list:
+                idxs: List[int] = []
+                for p in paths_list:
+                    try:
+                        ts = float(self._timestamp_from_dense_frame_path(p))
+                    except Exception:
+                        continue
+                    if s <= ts < e:
+                        j = path_to_idx.get(p)
+                        if j is not None and j < frame_embs.shape[0]:
+                            idxs.append(j)
+                if idxs:
+                    chunk = frame_embs[idxs].float()
+                    chunk = chunk / chunk.norm(p=2, dim=-1, keepdim=True).clamp(min=1e-8)
+                    c = chunk.mean(dim=0)
+                    centroid = c / c.norm(p=2, dim=-1).clamp(min=1e-8)
+
+            self._segment_index.append(
+                {
+                    "start": s,
+                    "end": e,
+                    "dense_caption": seg.get("dense_caption"),
+                    "caption_summary": seg.get("caption_summary", ""),
+                    "asr_snippet": asr.strip(),
+                    "centroid_emb": centroid,
+                }
+            )
+
+    def _retrieve_relevant_segments(self, question: str, top_k: int = 5) -> List[dict]:
+        q = (question or "").strip()
+        if not q:
+            return []
+        top_k = max(1, int(top_k))
+        index = list(getattr(self, "_segment_index", None) or [])
+        with_centroid = [s for s in index if s.get("centroid_emb") is not None]
+        if not with_centroid:
+            return []
+
+        def _as_tensor(x):
+            if isinstance(x, torch.Tensor):
+                return x.detach().cpu().float()
+            return torch.tensor(x, dtype=torch.float32)
+
+        try:
+            embedder = self._get_or_load_frame_embedder()
+            with self._frame_embedder_inference_context():
+                q_emb = _as_tensor(
+                    embedder.process(
+                        [
+                            {
+                                "text": q,
+                                "instruction": "Retrieve frames relevant to the user's query.",
+                            }
+                        ]
+                    )
+                )
+            if q_emb.dim() > 1:
+                q_emb = q_emb[0]
+            q_emb = q_emb / q_emb.norm(p=2, dim=-1, keepdim=True).clamp(min=1e-8)
+            qv = q_emb.float().flatten()
+
+            scored: List[tuple] = []
+            for seg in with_centroid:
+                c = seg["centroid_emb"]
+                if not isinstance(c, torch.Tensor):
+                    continue
+                cv = c.float().flatten()
+                sim = float(torch.dot(qv, cv))
+                scored.append((sim, seg))
+            scored.sort(key=lambda x: -x[0])
+            out: List[dict] = []
+            for sim, seg in scored[:top_k]:
+                dc = seg.get("dense_caption")
+                out.append(
+                    {
+                        "start": seg["start"],
+                        "end": seg["end"],
+                        "relevance_score": round(sim, 6),
+                        "dense_caption": dc,
+                        "asr_snippet": seg.get("asr_snippet", ""),
+                    }
+                )
+            return out
+        except Exception as ex:
+            print(f"  [_retrieve_relevant_segments] {ex}")
+            return []
+
     def _get_asr_result_from_subtitles(self, start_time=None, end_time=None):
         subtitle_error = None
         try:
@@ -803,12 +1029,28 @@ class RefinerUtilsMixin:
 
     def _get_preprocessed_artifacts(self) -> dict:
         asr_result = self._get_asr_result_from_subtitles()
-        return {
+        out: Dict[str, Any] = {
             "asr_transcript": asr_result.get("full_transcript", ""),
             "dense_captions": None,
             "audio_events": None,
             "keyframe_index": [],
+            "video_overview": [],
         }
+        for seg in getattr(self, "_segment_index", None) or []:
+            out["video_overview"].append(
+                {
+                    "start": seg.get("start"),
+                    "end": seg.get("end"),
+                    "caption_summary": seg.get("caption_summary", ""),
+                    "asr_snippet": seg.get("asr_snippet", ""),
+                }
+            )
+        if getattr(self, "use_retrieved_context", False):
+            k = int(getattr(self, "retrieval_top_k", 5) or 5)
+            out["retrieved_context"] = self._retrieve_relevant_segments(
+                getattr(self, "question", "") or "", top_k=k
+            )
+        return out
 
     def _extract_final_answer(self, text: str) -> str:
         try:

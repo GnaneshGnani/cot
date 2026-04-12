@@ -140,7 +140,9 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
                  dense_segment_half_width: float = 0.5,
                  retrieval_top_k: int = 5,
                  dense_frame_embed_batch: int = 8,
-                 temporal_grounder_device_index: int = None):
+                 temporal_grounder_device_index: int = None,
+                 use_retrieved_context: bool = False,
+                 segment_size_s: float = 30.0):
         self.video_path = video_path
         self.question = question
         self.answer = answer
@@ -152,6 +154,10 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         self.dense_segment_half_width = float(dense_segment_half_width)
         self.retrieval_top_k = int(retrieval_top_k)
         self.dense_frame_embed_batch = max(1, int(dense_frame_embed_batch))
+        self.use_retrieved_context = bool(use_retrieved_context)
+        self.segment_size_s = float(segment_size_s)
+        self._segment_captions_cache = []
+        self._segment_index = []
         self.temporal_grounder_backend = (
             str(os.getenv("TEMPORAL_GROUNDER_BACKEND", "qwen")).strip().lower() or "qwen"
         )
@@ -305,6 +311,12 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
 
         self.subtitles = self._extract_subtitles()
 
+        try:
+            self._build_segment_dense_captions(self.segment_size_s)
+            self._build_segment_index(self.segment_size_s)
+        except Exception as e:
+            print(f"Warning: segment timeline build failed: {e}")
+
         self.messages = []
         
         print(f"✓ Demo initialized successfully")
@@ -346,6 +358,8 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         self.set_task(question, answer=answer, options=options)
         self._temporal_grounder_video_info_cache = None
         self._temporal_grounder_qwen_clip_embeddings_cache = None
+        self._segment_captions_cache = []
+        self._segment_index = []
         self.duration = self._get_video_duration()
         self._video_fps = self._get_video_fps()
         self.dense_frame_fps = (
@@ -355,6 +369,11 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         )
         self._ensure_video_clip_embeddings()
         self.subtitles = self._extract_subtitles()
+        try:
+            self._build_segment_dense_captions(self.segment_size_s)
+            self._build_segment_index(self.segment_size_s)
+        except Exception as e:
+            print(f"Warning: segment timeline build failed: {e}")
 
         print("✓ Sample loaded")
         print(f"  Video: {video_path}")
@@ -861,8 +880,61 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
 
         print('[TEXT2TEXT] ERROR: Timeout, model:', model_name)
         return ''
-    
-    
+
+    def _vlm_summarize_text(self, prompt: str) -> str:
+        """Text-only completion for segment summarization (Qwen3-VL-8B local or remote VLM API)."""
+        prompt = (prompt or "").strip()
+        if not prompt:
+            return ""
+
+        if self._use_vlm_remote_api():
+            pairs = list(zip(self.vlm_api_base, self.vlm_api_keys))
+            if not pairs:
+                return ""
+            for base, key in pairs:
+                try:
+                    client = OpenAI(base_url=base.strip(), api_key=key.strip())
+                    completion = client.chat.completions.create(
+                        model=self.vlm_model_name,
+                        messages=[{"role": "user", "content": prompt}],
+                        **openai_chat_temperature_kwargs(self.vlm_model_name, 0.0),
+                        **openai_chat_completion_limit_kwargs(self.vlm_model_name, 1024),
+                    )
+                    out = completion.choices[0].message.content
+                    return out if isinstance(out, str) else (out or "")
+                except Exception as e:
+                    print(f"[_vlm_summarize_text] remote error base={base}: {e}")
+            return ""
+
+        if self.vlm_server is None or self.processor is None:
+            return ""
+
+        messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+        try:
+            formatted_prompt = self.processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+        except Exception as e:
+            print(f"[_vlm_summarize_text] chat_template error: {e}")
+            return ""
+
+        sampling_params = self._local_vlm_sampling_params()
+        try:
+            outputs = self.vlm_server.generate(
+                {"prompt": formatted_prompt},
+                sampling_params=sampling_params,
+                use_tqdm=False,
+            )
+            text = (
+                (outputs[0].outputs[0].text or "")
+                if outputs and outputs[0].outputs
+                else ""
+            )
+            return text.strip()
+        except Exception as e:
+            print(f"[_vlm_summarize_text] local generate error: {e}")
+            return ""
+
     def _batch_video2text(self, tasks: list, force_local: bool = False):
         results = []
 
@@ -1153,6 +1225,17 @@ def main():
         default=None,
         help="Index of a single entry to process (0-based); omit to process all entries",
     )
+    parser.add_argument(
+        "--use-retrieved-context",
+        action="store_true",
+        help="Add retrieved_context (top-k question-relevant segments) to PREPROCESSED_ARTIFACTS",
+    )
+    parser.add_argument(
+        "--segment-size",
+        type=float,
+        default=30.0,
+        help="Seconds per non-overlapping segment for video_overview / dense caption cache",
+    )
     args = parser.parse_args()
 
     annotation_path = Path(args.annotation_file).expanduser().resolve()
@@ -1162,7 +1245,7 @@ def main():
     results_dir = (
         Path(args.output).expanduser().resolve()
         if args.output
-        else Path(_eval_dir) / "results_generated"
+        else Path(_eval_dir) / "results_generated_full_context"
     )
     results_dir.mkdir(parents=True, exist_ok=True)
     data = _load_annotations(annotation_path)
@@ -1329,6 +1412,8 @@ def main():
                     chart_mode=chart_mode,
                     chart_model_name=chart_model_name,
                     temporal_grounder_device_index=temporal_grounder_device_index,
+                    use_retrieved_context=args.use_retrieved_context,
+                    segment_size_s=args.segment_size,
                 )
             else:
                 demo.load_sample(

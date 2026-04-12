@@ -3750,6 +3750,45 @@ class RefinerToolsMixin:
 
         return "".join(results)
 
+    def _run_dense_captioner_interval(
+        self,
+        start_time=None,
+        end_time=None,
+        granularity: str = "segment",
+        focus_query: str = "",
+    ) -> dict:
+        """Run dense_captioner on [start_time, end_time]; return parsed JSON dict (same as tool output)."""
+        granularity = str(granularity or "segment")
+        fps = 1.0 if granularity == "frame" else 2.0
+        frame_paths, timestamps, start, end = self._get_frames_for_range(
+            start_time, end_time, fps=fps
+        )
+        focus_query = str(focus_query or "").strip()
+        default_result = {
+            "video_duration": float(self.duration),
+            "captioned_range": {"start": start, "end": end},
+            "captions": [],
+            "overall_summary": "",
+        }
+        prompt = (
+            dense_captioner_prompt.strip()
+            + (
+                f"\n\nRequested segment: {start:.3f}s to {end:.3f}s."
+                " The attached frames are in chronological order from this interval."
+                " Use absolute seconds within this requested segment for"
+                " `captioned_range.start`, `captioned_range.end`, and every"
+                " `captions[].start` / `captions[].end` field."
+            )
+            + f"\nGranularity: {granularity}. Focus query: {focus_query}\nReturn JSON only.\n"
+        )
+        return self._run_vlm_json(
+            prompt,
+            frame_paths,
+            timestamps,
+            default_result,
+            force_local=True,
+        )
+
     def _process_dense_captioner(self, output_text: str) -> str:
         calls = self._get_refine_tool_calls(output_text, "dense_captioner")
         if not calls:
@@ -3760,34 +3799,12 @@ class RefinerToolsMixin:
 
         for arguments in calls:
             granularity = str(arguments.get("granularity", "segment") or "segment")
-            fps = 1.0 if granularity == "frame" else 2.0
-            frame_paths, timestamps, start, end = self._get_frames_for_range(
-                arguments.get("start_time"), arguments.get("end_time"), fps=fps
-            )
             focus_query = str(arguments.get("focus_query", "")).strip()
-            default_result = {
-                "video_duration": float(self.duration),
-                "captioned_range": {"start": start, "end": end},
-                "captions": [],
-                "overall_summary": "",
-            }
-            prompt = (
-                dense_captioner_prompt.strip()
-                + (
-                    f"\n\nRequested segment: {start:.3f}s to {end:.3f}s."
-                    " The attached frames are in chronological order from this interval."
-                    " Use absolute seconds within this requested segment for"
-                    " `captioned_range.start`, `captioned_range.end`, and every"
-                    " `captions[].start` / `captions[].end` field."
-                )
-                + f"\nGranularity: {granularity}. Focus query: {focus_query}\nReturn JSON only.\n"
-            )
-            result = self._run_vlm_json(
-                prompt,
-                frame_paths,
-                timestamps,
-                default_result,
-                force_local=True,
+            result = self._run_dense_captioner_interval(
+                arguments.get("start_time"),
+                arguments.get("end_time"),
+                granularity=granularity,
+                focus_query=focus_query,
             )
             results.append(self._format_refine_tool_result("dense_captioner", arguments, result))
 
