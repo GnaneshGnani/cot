@@ -639,7 +639,7 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
                 completion = client.chat.completions.create(
                     model=self.vlm_model_name,
                     messages=messages,
-                    **openai_chat_temperature_kwargs(self.vlm_model_name, 0.01),
+                    **openai_chat_temperature_kwargs(self.vlm_model_name, 0.0),
                     **openai_chat_completion_limit_kwargs(self.vlm_model_name, 2048),
                 )
                 out = completion.choices[0].message.content
@@ -817,6 +817,7 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
                     request_kwargs = {
                         "model": model_name,
                         "messages": normalized_messages,
+                        **openai_chat_temperature_kwargs(model_name, 0.0),
                     }
                     try:
                         completion = client.chat.completions.create(
@@ -981,7 +982,13 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         
         return results
 
-    def run_refinement_pipeline(self, trace_steps: list = None, trace_answer: str = None, max_iterations: int = 1):
+    def run_refinement_pipeline(
+        self,
+        trace_steps: list = None,
+        trace_answer: str = None,
+        max_iterations: int = 1,
+        on_iteration_complete=None,
+    ):
         print("\n" + "=" * 70)
         print("Starting Trace Refinement Pipeline")
         print("=" * 70 + "\n")
@@ -1005,12 +1012,10 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
 
         trace_answer = (trace_answer or self._extract_trace_answer(trace_steps) or "").strip()
         question_text = self._format_question_with_options()
-        initial_trace = list(trace_steps)
         initial_answer = trace_answer
         current_trace = list(trace_steps)
         current_answer = trace_answer
         iteration_history = []
-        all_iterations = []
 
         print("\n" + "=" * 70)
         print("trace_answer: ", trace_answer)
@@ -1085,19 +1090,17 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
                 iteration, verifier_output, refiner_output, executed_tools
             )
             iteration_history.append(summary)
-            all_iterations.append(
-                {
-                    "iteration": iteration + 1,
-                    "verifier_raw": verifier_raw,
-                    "verifier_output": verifier_output,
-                    "planner_raw": planner_raw,
-                    "planner_output": planner_output,
-                    "executed_tools": executed_tools,
-                    "refiner_raw": refiner_raw,
-                    "refiner_output": refiner_output,
-                    "iteration_summary": summary,
-                }
-            )
+            iteration_record = {
+                "iteration": iteration + 1,
+                "verifier_raw": verifier_raw,
+                "verifier_output": verifier_output,
+                "planner_output": planner_output,
+                "executed_tools": executed_tools,
+                "refiner_output": refiner_output,
+                "iteration_summary": summary,
+            }
+            if on_iteration_complete:
+                on_iteration_complete(iteration_record)
 
         self._refinement_debug_iter_dir = None
 
@@ -1111,21 +1114,14 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         is_correct = self._answers_match(resolved_answer, self.answer or "") if self.answer else None
 
         return {
-            "question": self.question,
-            "options": self.options,
-            "video_path": self.video_path,
             "trace_generated": generated_trace_info is not None,
             "generated_trace": generated_trace_info,
-            "initial_trace": {"steps": initial_trace},
             "initial_answer": initial_answer,
             "final_trace": {"steps": current_trace},
             "final_answer": resolved_answer,
-            "final_answer_raw": current_answer,
             "is_correct": is_correct,
             "verifier_raw": final_verifier_raw,
             "verifier_output": final_verifier_output,
-            "iteration_history": iteration_history,
-            "all_iterations": all_iterations,
             "max_iterations": max_iterations,
             "refinement_debug_root": debug_resolved,
         }
@@ -1216,14 +1212,63 @@ def main():
     dataset_folder = str((Path(_eval_dir) / "data").resolve())
     debug_root = str((Path(_eval_dir) / "debug").resolve())
 
-    def _save_result(record, video_path):
-        video_stem = Path(video_path).stem if video_path else "unknown"
-        out_file = results_dir / f"{video_stem}.json"
-        with open(out_file, "w", encoding="utf-8") as f:
-            json.dump(record, f, ensure_ascii=False, indent=2)
-        return out_file
+    def _write_json(path: Path, obj):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False, indent=2)
+            f.write("\n")
 
-    for index, item in enumerate(data[23:24], start=1):
+    def _clear_stale_split_outputs(out_dir: Path):
+        """Remove prior refinement_*.json / generated_trace.json so reruns are not mixed."""
+        if not out_dir.is_dir():
+            return
+        for p in out_dir.glob("refinement_*.json"):
+            try:
+                p.unlink()
+            except OSError:
+                pass
+        gt = out_dir / "generated_trace.json"
+        if gt.is_file():
+            try:
+                gt.unlink()
+            except OSError:
+                pass
+
+    def _save_result_dir(record, video_path, out_dir: Path):
+        """Write results_generated/<stem>/meta.json [+ generated_trace.json + refinement_N.json]."""
+        question = str(record.get("question", "") or "").strip()
+        options = list(record.get("options") or [])
+        input_answer = record.get("answer")
+        initial_trace_steps = record.get("initial_trace_steps")
+
+        meta = {
+            "video_path": str(record.get("video_path", "") or video_path or "").strip(),
+            "question": question,
+            "options": options,
+            "answer": input_answer,
+            "initial_trace_steps": initial_trace_steps,
+        }
+        if record.get("refiner_error"):
+            meta["refiner_error"] = record["refiner_error"]
+        rr = record.get("refiner_result")
+        if isinstance(rr, dict):
+            meta.update(
+                {
+                    "trace_generated": rr.get("trace_generated"),
+                    "initial_answer": rr.get("initial_answer"),
+                    "final_trace": rr.get("final_trace"),
+                    "final_answer": rr.get("final_answer"),
+                    "is_correct": rr.get("is_correct"),
+                    "max_iterations": rr.get("max_iterations"),
+                    "refinement_debug_root": rr.get("refinement_debug_root"),
+                }
+            )
+            if rr.get("trace_generated") and rr.get("generated_trace") is not None:
+                _write_json(out_dir / "generated_trace.json", rr["generated_trace"])
+        _write_json(out_dir / "meta.json", meta)
+        return out_dir
+
+    for index, item in enumerate(data, start=1):
         record = dict(item)
         video_path = str(item.get("video_path", "")).strip()
         question = str(item.get("question", "")).strip()
@@ -1234,14 +1279,28 @@ def main():
         # answer to the pipeline. We still score against the input answer after the run.
         pipeline_answer = None
 
+        video_stem = Path(video_path).stem if video_path else "unknown"
+        out_dir = results_dir / video_stem
+
         print(f"\n[{index}/{len(data)}] {Path(video_path).name or '<missing video>'}")
         if item.get("initial_trace_steps"):
             print("  Ignoring existing initial_trace_steps; generating a fresh trace.")
 
         if not video_path or not os.path.exists(video_path):
             record["refiner_error"] = f"Video file not found: {video_path}"
-            _save_result(record, video_path)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            _save_result_dir(record, video_path, out_dir)
+            print(f"  ✓ Saved: {out_dir / 'meta.json'}")
             continue
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+        _clear_stale_split_outputs(out_dir)
+
+        def _on_iteration_complete(iteration_record):
+            n = iteration_record.get("iteration")
+            if n is None:
+                return
+            _write_json(out_dir / "refinement_{}.json".format(int(n)), iteration_record)
 
         try:
             if demo is None:
@@ -1282,17 +1341,21 @@ def main():
             record["refiner_result"] = demo.run_refinement_pipeline(
                 trace_steps=trace_steps if trace_steps else None,
                 max_iterations=args.max_iterations,
+                on_iteration_complete=_on_iteration_complete,
             )
             if pipeline_answer is None and input_answer:
-                final_answer = record["refiner_result"].get("final_answer") or record["refiner_result"].get("final_answer_raw", "")
-                record["refiner_result"]["is_correct"] = demo._answers_match(final_answer, input_answer, options=options)
+                final_answer = record["refiner_result"].get("final_answer") or ""
+                record["refiner_result"]["is_correct"] = demo._answers_match(
+                    final_answer, input_answer, options=options
+                )
         except Exception as e:
             import traceback
             traceback.print_exc()
             record["refiner_error"] = str(e)
+            record.pop("refiner_result", None)
 
-        out_file = _save_result(record, video_path)
-        print(f"  ✓ Saved: {out_file}")
+        _save_result_dir(record, video_path, out_dir)
+        print(f"  ✓ Saved: {out_dir}")
 
     print(f"\n✓ Results saved to: {results_dir}")
 

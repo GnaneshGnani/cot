@@ -364,6 +364,20 @@ does not clearly state a final conclusion, set `answer_correct` to false.
   2. Are any later failures merely consequences of those root causes?
   3. Can multiple unsupported claims be grouped into one diagnostic item?
 - Prefer fewer, sharper errors over many repetitive ones.
+- You are given the current ITERATION (e.g. "ITERATION: 1/2") at the top of this prompt.
+  Use it to apply the following rule:
+  - If the trace's final conclusion is "unresolved", "cannot be determined",
+    "insufficient evidence", or any equivalent formulation that declines to
+    select a specific answer, AND the current iteration is NOT the last one
+    (i.e. ITERATION N/M where N < M), verdict MUST be FAIL with an
+    INCOMPLETE_TRACE error at step_index null and severity HIGH.
+    The description should name the specific missing evidence that prevented
+    resolution so the planner can target it.
+  - If the current iteration IS the last one (N == M) and the trace genuinely
+    demonstrates that no available tool evidence can resolve the question,
+    an "unresolved" conclusion may receive PASS only if all other PASS criteria
+    are met (error_categories empty, evidence_gaps empty, scores ≥ 7,
+    confidence ≥ 0.7, answer_correct true).
 
 Now verify the provided QUESTION and TRACE.
 """
