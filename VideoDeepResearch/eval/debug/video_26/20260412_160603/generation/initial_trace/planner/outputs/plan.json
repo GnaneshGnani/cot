@@ -1,0 +1,31 @@
+{
+  "strategy": "Ground the visual identity of the character named Panda by first retrieving frames featuring Panda, then inspect those frames for the answer-critical attributes that distinguish the options: glasses, bow tie, broom, or Einstein-like depiction.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "VIDEO",
+        "query": "frames showing the character Panda in the movie, with Panda clearly visible",
+        "timestamps": null,
+        "num_frames": 3
+      },
+      "purpose": "Retrieve a small candidate bundle of frames where Panda is visible so the answer can be based on direct visual evidence rather than guesswork.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "spatial_grounder",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null,
+        "query": "Panda character wearing glasses or tying a bow tie or appearing as a broom or appearing as Einstein"
+      },
+      "purpose": "Inspect the retrieved Panda frames for the specific visual attributes named in the answer options and determine which option is directly supported.",
+      "depends_on": [
+        1
+      ]
+    }
+  ],
+  "refinement_instructions": "Write the trace from scratch using only tool-grounded evidence. First cite the retrieved Panda frames from step 1 as the visual anchor. Then use the frame-level results from step 2 to determine which of the option-specific attributes is actually present. Do not infer from plausibility or character stereotypes. Compare the visible evidence against all four options explicitly: glasses, bow tie, broom, and Einstein-like depiction. If step 2 clearly supports one attribute, update the final answer to that option. If the frame bundle shows mixed or unclear results, state the uncertainty rather than forcing an answer."
+}

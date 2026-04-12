@@ -1,0 +1,47 @@
+{
+  "strategy": "Re-localize Panda across the whole video instead of relying on one short cluster, then inspect a small chronologically distributed set of Panda frames for the answer-option attributes. The goal is to get direct positive or negative visual evidence tied to multiple occurrences, not infer B by elimination from one narrow bundle.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "temporal_grounder",
+      "arguments": {
+        "video_path": "video",
+        "query": "scenes where a panda character is visible on screen"
+      },
+      "purpose": "Find multiple candidate time windows across the movie where Panda appears, so the repaired trace is not anchored only to 190s-192s.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "video",
+        "query": null,
+        "timestamps": [
+          "<STEP_1:segments[0].start>",
+          "<STEP_1:segments[1].start>",
+          "<STEP_1:segments[2].start>"
+        ],
+        "num_frames": 3
+      },
+      "purpose": "Sample one frame from each of the top candidate Panda appearance windows so the evidence spans multiple occurrences rather than one local cluster.",
+      "depends_on": [
+        1
+      ]
+    },
+    {
+      "step": 3,
+      "tool": "spatial_grounder",
+      "arguments": {
+        "frame_path": "<STEP_2:frames>",
+        "timestamp": null,
+        "query": "panda character wearing glasses, panda character wearing a bow tie, panda character depicted as a broom, or panda character depicted like Einstein"
+      },
+      "purpose": "Directly test the answer-option attributes on the sampled Panda frames and check frame-level detections/descriptions for positive support or consistent absence.",
+      "depends_on": [
+        2
+      ]
+    }
+  ],
+  "refinement_instructions": "Replace the old claim that B is supported merely because A/C/D were not detected in the 190s-192s bundle. Use Step 1 to state that Panda was checked across multiple candidate appearance windows, and use the frame-level results from Step 3 (not just any top-level summary) to see whether any sampled Panda occurrence shows glasses, a bow tie, broom-like form, or Einstein-like depiction. If Step 3 gives positive evidence for one option in one or more sampled frames, cite that directly and update the answer accordingly. If Step 3 again shows no positive support for any option, do not force a choice by elimination; explicitly narrow the trace to what is supported and note that the previous B answer was unsupported. Preserve only the earlier supported fact that Panda is visible in the previously retrieved nighttime group scene; do not treat that local bundle as exhaustive for the whole movie unless the new cross-video sampling supports it."
+}

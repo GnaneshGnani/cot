@@ -350,6 +350,56 @@ does not clearly state a final conclusion, set `answer_correct` to false.
   facts are explicitly presented as attributed tool outputs inside the TRACE. In
   that case, judge the attribution, uncertainty, arithmetic, answer mapping, and
   internal consistency of the reported tool evidence.
+- A named tool attribution proves only that the tool reported the claim; it
+  does NOT automatically make every sub-claim inside that report equally
+  grounded. When a trace imports a tool's high-level conclusion, check whether
+  the trace also preserves the answer-critical primitive facts needed for that
+  conclusion.
+- For geometry / diagram questions, treat equal lengths, equal partitions,
+  tangency, shared centers, inscribed / circumscribed relations, and exact
+  numeric formulas as answer-critical primitives. If the trace uses them, they
+  must be explicitly stated in the trace or in a quoted tool report, not
+  inferred from visual appearance alone.
+- More generally, for structured-visual questions (diagram, geometry figure,
+  schematic, flowchart, annotated chart), check whether the trace preserves the
+  complete answer-critical description before deriving from it: visible
+  components, whether each mark is a full shape vs an arc / segment / partial
+  shape, which boundaries or endpoints it attaches to, relative orientation,
+  and any attached labels.
+- If a trace simplifies a rotated, tilted, mirrored, or otherwise non-axis-
+  aligned structured visual into an easier top/bottom/left/right or axis-
+  aligned template without explicit grounding, treat that as unsupported
+  inference rather than as a harmless rephrasing.
+- If a single attributed tool report contains mutually inconsistent relations,
+  do not treat that report as sufficient grounding for the derived answer.
+  Diagnose the trace for internal inconsistency or unsupported inference.
+- If a revised final answer depends mainly on one broad tool conclusion rather
+  than on clearly stated grounded premises plus valid reasoning from those
+  premises, verdict should usually remain FAIL.
+- If a trace acknowledges additional visible structured components but dismisses
+  them as "decorative", "extra", or non-answer-critical without an explicitly
+  grounded reason for irrelevance, treat that downgrade as unsupported.
+- If unresolved visible components could plausibly change the derivation under
+  another still-compatible interpretation, PASS requires either a tool-grounded
+  explanation of why those components cannot affect the asked quantity or a
+  trace that remains explicitly unresolved.
+- When multiple cited frames or tool reports describe the same static
+  structured visual, judge the trace against the union of mutually consistent
+  primitive facts across them. A derivation that ignores a clear cited
+  primitive from another matching frame/report without justification is
+  incomplete.
+- Distinguish true ambiguity from mislocalization. If answer-critical evidence
+  comes from materially different scenes, states, outfits, props, accessories,
+  or phases of the subject, diagnose this as wrong temporal anchoring or
+  scene/state mixing rather than as ordinary uncertainty.
+- If a trace draws support for different answer choices from different
+  candidate occurrences of the subject, do not treat those occurrences as one
+  coherent bundle unless the trace explicitly grounds that they refer to the
+  same answer-relevant state.
+- If a local frame bundle has already been checked and still does not ground
+  the answer-critical attribute, prefer a diagnosis that tells the planner to
+  re-localize the relevant occurrence rather than merely densify the same
+  neighborhood again.
 - Do not reject a named tool output merely because it does not fully answer the
   question. If the tool evidence is partial, keep the supported portion and fail
   only the unsupported extrapolation or missing specificity.
@@ -494,18 +544,8 @@ clearest set of tool calls that will collect the missing evidence.
 - ANSWER: The original answer
 - DIAGNOSIS: The Verifier's JSON output (verdict, error_categories, scores)
 - DIAGNOSIS may include `evidence_gaps` (grouped unsupported claims summaries).
-- PREPROCESSED_ARTIFACTS (JSON):
-  - `asr_transcript`: full subtitle-derived transcript when available
-  - `video_overview`: list of non-overlapping segments with `start`, `end`,
-    `caption_summary` (3–5 sentence LLM summary of dense_captioner output), and
-    `asr_snippet` for that window. Scan this for the whole-video narrative arc
-    (e.g., later scenes that contradict earlier dialogue) before relying only on
-    question-specific retrieval.
-  - `retrieved_context` (optional): when present, top-k segments most similar to
-    the question (each includes `relevance_score`, full `dense_caption` dict, and
-    `asr_snippet`). Treat as planning priors, not final evidence — still ground
-    claims with tools when needed.
-  - `dense_captions`, `audio_events`, `keyframe_index` may be null/empty legacy fields
+- PREPROCESSED_ARTIFACTS may be omitted in some runs; do not assume this block
+  is present when constructing the plan.
 - PREVIOUS_ITERATIONS_SUMMARY (optional)
 
 ━━━ Output Format ━━━
@@ -546,6 +586,16 @@ Before proposing tool calls, do this decomposition mentally:
      which subgoals remain unsupported or were previously inferred incorrectly.
    - Treat verifier recommendations as hints about what is missing, not as a
      script to follow blindly.
+   - Classify the failure mode explicitly before planning:
+     1. missing field in the correct state,
+     2. wrong entity / metric / label / phase returned,
+     3. partial coverage of the right state,
+     4. wrong modality,
+     5. unsupported inference after otherwise correct evidence,
+     6. wrong temporal anchor,
+     7. scene/state mixing across retrieved evidence.
+   - Let that failure-mode classification determine whether to reuse an old
+     anchor, inspect alternate candidates, or launch a new localization query.
 3. Map unresolved subgoals to tool plans.
    - Prefer one focused tool chain per unresolved subgoal or tightly linked
      claim cluster.
@@ -641,6 +691,10 @@ Important:
 - If DIAGNOSIS says the old answer came from plausibility, elimination, or
   unsupported inference, the new plan must gather the missing direct evidence
   rather than rephrase the same inference.
+- If DIAGNOSIS says the prior evidence grounded the wrong entity, wrong metric,
+  wrong series, wrong label, wrong phase, or wrong comparison target, the new
+  plan must explicitly target the missing correct field from QUESTION rather
+  than re-reading the same broad evidence target.
 - If DIAGNOSIS suggests tools that do not fully resolve the answer-critical
   fields from QUESTION, extend or refine the plan so the missing fields are
   actually grounded.
@@ -655,6 +709,37 @@ Important:
 - If the answer to those questions is uncertain, prefer a new
   temporal_grounder query targeting the missing fact / phase / metric / step
   rather than chaining frame_retriever from an older temporal grounding result.
+- If the prior iteration already sampled or analyzed one interval / frame bundle
+  and that evidence repeatedly returned a different metric, series, label,
+  entity, or phase than QUESTION requires, do NOT spend the next iteration
+  merely densifying the same anchor unless the prior outputs show that the
+  missing field was partially visible, progressively revealing, or cut off in
+  that same state.
+- In that failure mode, prefer one of these repairs:
+  1. inspect alternate candidate intervals already returned by an earlier
+     temporal_grounder result,
+  2. run a new temporal_grounder query that directly names the missing metric /
+     label / phase,
+  3. add OCR for the missing text label / legend / header if the disagreement is
+     about what is written on the screen.
+- If a targeted local frame bundle has already been checked and still does not
+  ground the answer-critical attribute, do NOT automatically widen the same
+  neighborhood again. First consider whether the active bundle corresponds to
+  the wrong occurrence of the subject or event.
+- When retrieved frames show materially different settings, costumes, props,
+  accessories, subject states, or phases, treat them as separate candidate
+  occurrences rather than pooled evidence for one answer.
+- If different answer choices are supported only in different candidate
+  occurrences, interpret that as a localization problem, not as valid support
+  for multiple answers.
+- For attribute-identification questions, prefer this sequence:
+  1. localize the question-bearing occurrence of the subject,
+  2. keep a temporally coherent frame bundle for that occurrence,
+  3. inspect the answer-critical attribute only within that coherent bundle.
+- If a prior follow-up on the current anchor still produced no decisive
+  answer-critical evidence, prefer re-localization over additional local
+  densification unless the missing detail is visibly partial, progressively
+  revealing, or otherwise likely to co-occur in that same state.
 
 Dense-captioner anti-patterns:
 - Bad: using dense_captioner on an entire video just to find where text or a
@@ -677,7 +762,19 @@ When a previous tool call partially resolves a claim, ask:
 3. Can the same grounded frame / time window be reused with a sharper query?
 4. If motion or timing matters, would a tiny local timestamp sweep resolve it?
 
-Prefer "same evidence anchor, narrower question" over "new broad search."
+Before reusing the same anchor, ask one more question:
+5. Did the prior anchor produce the right state with a missing detail, or did it
+   produce the wrong state / wrong metric / wrong label / wrong entity?
+
+Prefer "same evidence anchor, narrower question" only when the anchor already
+contains the correct state and the missing detail plausibly co-occurs there.
+If the anchor instead keeps yielding the wrong metric, wrong label, wrong
+entity, or wrong phase, switch strategy: inspect alternate candidates or
+re-localize the missing field directly.
+If widening the anchor introduces materially different scenes, states, props,
+outfits, or accessories, do not pool those frames into one answer bundle.
+Treat them as separate candidate occurrences and re-localize the one that
+matches the asked occurrence.
 
 Generic patterns:
 - Object/event localized, attribute missing:
@@ -686,6 +783,10 @@ Generic patterns:
 - Candidate frame set retrieved, decisive frame unknown:
   run the frame-based tool across the candidate frame bundle, then choose the
   relevant frame result from the returned `frames` list based on the question.
+- Prior frame/interval shows the wrong metric / label / series / phase:
+  do NOT just ask for the final answer again on that same anchor. Either target
+  the missing field explicitly (for example the missing label / legend / metric
+  name) or branch to alternate candidate frames / intervals.
 - Interval localized, point moment unresolved:
   preserve the interval as an interval. If the upstream tool returns only
   `start/end` bounds, do NOT collapse it into a fake single timestamp. Reuse
@@ -806,6 +907,9 @@ Question-conditioned retrieval guidance:
   - whether it is raw or annotated
   - whether labels/numbers are already present
   - whether the frame is showing the prompt or the explanation
+- If DIAGNOSIS says the old evidence found the wrong metric / label / series /
+  entity, encode the missing correct one directly in the new query and, when
+  helpful, mention the distinguishing state that separates it from the old one.
 
 Good examples:
 - "scoreboard on a basketball court showing team names and current score"
@@ -871,6 +975,10 @@ Coverage-before-commit rule:
 - If no single interval contains all answer-critical evidence, plan separate
   retrieval branches for the missing evidence rather than forcing one frame
   bundle to answer the entire question.
+- If a previously tested interval already failed by showing the wrong
+  metric/label/phase rather than merely an incomplete render, treat untested
+  alternative intervals as higher priority than further densifying the failed
+  interval.
 
 When timestamps are available or can be inferred confidently, prefer:
 - `timestamps=[...]` with a small number of targeted moments
@@ -1164,6 +1272,14 @@ Animated-chart planning rule:
   prefer temporal_grounder first and then timestamped frame_retriever inside the
   grounded window. Do not rely on a raw query-ranked chart frame as if it were
   guaranteed to show the complete final chart state.
+- If DIAGNOSIS says the previous chart evidence grounded the wrong series,
+  wrong metric, wrong legend item, or wrong comparison target, the next
+  chart_analyzer query must ask for the exact missing field, not for the broad
+  chart answer again.
+- If the disagreement is about chart text (title, legend item, axis label, row
+  header, metric name), pair chart_analyzer with OCR or use OCR on the same
+  candidate frames so the plan can verify the label directly instead of
+  repeatedly trusting a semantic chart guess.
 
 ━━━ Planning Rules ━━━
 - Minimize tool calls. Only call tools that address diagnosed errors.
@@ -1216,7 +1332,7 @@ Animated-chart planning rule:
   localized moments or occurrences, that call should usually depend on the step
   that established those moments. Do not hardcode a guessed interval if the
   interval is itself one of the unresolved issues.
-- Prefer using PREPROCESSED_ARTIFACTS before calling tools.
+- If PREPROCESSED_ARTIFACTS are present, prefer using them before calling tools.
 - If preprocessing already contains sufficiently precise evidence, avoid a
   redundant tool call.
 - If the diagnosis contains ANSWER_ERROR, prioritize frame_retriever,
@@ -1268,6 +1384,11 @@ Animated-chart planning rule:
   wrong-phase evidence first. Prefer temporal_grounder plus timestamped
   frame_retriever around the chart interval before concluding the chart itself
   lacks the requested data.
+- If the same interval has already been re-sampled and the requested metric /
+  series / label is still absent or keeps resolving to a different field, stop
+  spending additional calls inside that same interval by default. Branch to
+  alternate candidate intervals, or launch a new localization query for the
+  missing field itself.
 - More generally, if a specialized reading tool returns only part of the needed
   evidence from a visually plausible frame or interval, treat that as a
   coverage failure first, not as proof that the missing evidence does not
@@ -1281,6 +1402,39 @@ Animated-chart planning rule:
   by testing which option sounds plausible. If one answer-critical field is
   still ungrounded, gather that missing field directly or keep the trace marked
   incomplete.
+- For geometry / diagram math questions, do NOT ask chart_analyzer to solve the
+  whole construction in one step when answer-critical primitives are still
+  missing. First target the missing visible primitives: labels, equal-mark
+  indicators, tangent markers, edge partitioning, centers, endpoints, or which
+  arcs meet which boundaries.
+- More generally, for structured-visual questions whose answer depends on how
+  several primitives combine, first ask for a complete inventory of the visible
+  primitives and their attachments / roles before asking for a final derived
+  relation or value.
+- If the remaining gap is a derived relation rather than a directly visible
+  fact, avoid a broad query such as "determine the radius relation" or
+  "identify the intended construction." Instead ask for the narrowest missing
+  premise whose grounding would justify the later derivation.
+- Avoid answer-directed diagram queries that presuppose the interpretation when
+  the figure itself may still be ambiguous. Prefer inventory queries such as
+  which shapes are full vs partial, which edges / arcs / regions meet, where
+  labels attach, and which sides / nodes are adjacent.
+- If orientation matters, ask for orientation-invariant relations (for example
+  adjacent sides, shared endpoints, attached region, local upper / lower within
+  the figure) rather than collapsing the figure into an assumed axis-aligned
+  top / bottom / left / right template.
+- If a prior tool returns a stable core structure plus additional visible
+  components whose role is unclear, treat those components as potentially
+  answer-critical until another tool grounds their irrelevance.
+- For static charts / diagrams shown across multiple nearby frames, use the
+  bundle to recover the union of consistent primitives. Do not let one "best"
+  frame erase a primitive that is clearer in another matching frame.
+- If a plausible frame still leaves a visible structured component unresolved,
+  prefer a follow-up query that asks what that component attaches to, bounds,
+  intersects, duplicates, or labels before asking for a final derived value.
+- When a prior iteration ended unresolved, do not force closure by using a
+  broad semantic tool to produce a final answer. Prefer a narrower follow-up
+  that can confirm or deny the specific missing premise.
 - If a previous query-mode frame_retriever call returned frames from the wrong
   phase of a recurring visual target (for example, an explanatory or solved
   variant instead of the original question frame), do not keep re-querying the
@@ -1376,10 +1530,21 @@ outputs:
 - whether multiple tools must be reconciled at the entity level before a value
   can be attached to the asked object; if so, name the matching attributes
   explicitly (color, position, bbox, label, ordinal role, local relation)
+- whether the refiner must preserve the complete answer-critical structured
+  description before any derivation, including component type (full shape vs
+  partial shape), attachment points, orientation, adjacency, and label
+  attachment
+- whether any additional visible structured components remain unresolved and
+  therefore must stay live in the rewritten trace rather than being dismissed
+  as decorative or irrelevant
 - whether the final answer should be updated if the verified evidence contradicts
   the original answer
 - whether closest-option mapping needs to be explained when the verified value is
   approximate or does not exactly match an answer choice
+- if a new broad semantic tool output proposes a final answer or closed-form
+  relation, instruct the refiner to update the answer only if that same output
+  explicitly grounds the missing premise and remains consistent with earlier
+  supported evidence
 """
 
 refiner_prompt = """
@@ -1510,6 +1675,44 @@ You may also use a single string for refined_trace if steps are numbered inside 
   reported numeric value.
 - If tool evidence is ambiguous or low-confidence, note it in unresolved_issues
   rather than making a speculative fix.
+- A tool's free-form query_response is NOT by itself sufficient to overturn the
+  answer when the supporting primitive facts are absent, approximate,
+  low-confidence, or internally inconsistent. Prefer explicitly grounded
+  observed facts over a broad tool conclusion.
+- For geometry / diagram math traces, only PATCH_ANSWER when the refined trace
+  can restate the exact tool-grounded premises and the derivation from those
+  premises. If the premises are still not clearly grounded, keep the answer
+  unchanged or unresolved and record the gap in unresolved_issues.
+- For structured-visual reasoning, keep the complete answer-critical
+  description in the trace before using it for derivation: component type (full
+  shape vs partial shape), attachment points, adjacency, orientation, and label
+  attachment when those details matter to the answer.
+- Do not normalize a rotated, tilted, mirrored, or otherwise non-axis-aligned
+  figure into a simpler axis-aligned template unless a tool output explicitly
+  grounds that simplification.
+- Do not relabel a visible component as decorative, incidental, or
+  non-answer-critical unless a tool output explicitly grounds that
+  classification.
+- If a stable subset of a structured visual supports a shortcut derivation but
+  additional visible components remain unresolved and could influence the
+  answer, do not PATCH_ANSWER from the subset alone. Either keep the answer
+  unresolved or include a tool-grounded explanation of why the omitted
+  components cannot matter.
+- Do not combine answer-critical detections across visually incompatible
+  scenes, subject states, outfits, props, accessories, or phases into one
+  conclusion.
+- If different answer choices are supported only in different scenes or
+  subject states, preserve that conflict explicitly and treat the active
+  temporal anchor as potentially wrong.
+- A temporally coherent bundle is stronger evidence than a larger but mixed
+  bundle. Prefer one consistent occurrence of the subject over cross-scene
+  aggregation.
+- If the evidence suggests scene/state mixing, keep the answer unresolved and
+  state that re-localization is needed rather than forcing a comparison across
+  mismatched frames.
+- If a new tool conclusion conflicts with earlier supported evidence and the
+  conflict is not explicitly resolved, preserve the conflict in the trace and
+  do not force an answer update.
 - Update beliefs cumulatively. Treat earlier supported claims as the current
   belief state and use new evidence to revise only the sub-claims that the new
   evidence actually changes.
@@ -1528,6 +1731,10 @@ You may also use a single string for refined_trace if steps are numbered inside 
   1. what is confirmed,
   2. what remains unresolved,
   3. which tool anchors each part.
+- When multiple frames or tool outputs describe the same static structured
+  visual, synthesize the union of mutually consistent primitives across them
+  instead of relying only on the single most confident frame if another cited
+  frame/output clarifies an answer-critical component.
 - If a follow-up tool resolves only one missing sub-detail, keep the already
   grounded parts of the earlier step and patch only the unresolved portion.
 - Only replace or remove an earlier supported claim when later evidence
@@ -2087,6 +2294,41 @@ RULES:
 - If axis ranges or tick values are partially occluded, note this in key_observations.
 - For pie charts, express data_points as {"x": "<slice label>", "y": <percentage or value>}.
 - key_observations should be self-contained sentences useful for downstream reasoning.
+- For geometry / diagram questions, report only visually supported relations as
+  facts. Do NOT infer equal lengths, equal partitions, tangency, shared
+  centers, inscribed / circumscribed relations, or exact radii from appearance
+  alone unless they are visibly marked, labeled, or unavoidable from explicit
+  structure in the frame.
+- Before answering a derived query about a structured diagram, first inventory
+  the visible primitives needed for that answer: component type (full shape vs
+  partial shape), attachment points / endpoints, adjacency, containment,
+  orientation, and label attachment.
+- If multiple frames of the same static chart / diagram are provided, combine
+  mutually consistent primitives across frames and use the clearest frame for
+  each primitive when possible. Do not let selection of one best frame discard
+  a component that is clearly visible in another matching frame.
+- Distinguish full shapes from partial ones whenever that distinction affects
+  interpretation (for example full circle vs semicircle vs arc, closed polygon
+  vs open segment, filled region vs outline).
+- When the layout is rotated, tilted, mirrored, or otherwise non-axis-aligned,
+  preserve that orientation in key_observations if it affects interpretation.
+  Do not silently rewrite the figure into an easier axis-aligned template.
+- For diagrams, use relationships to record clearly visible attachment,
+  adjacency, containment, shared-endpoint, or intersection facts whenever they
+  help preserve the structure of the figure.
+- Do not describe a visible structured component as decorative or non-essential
+  unless that irrelevance is visually explicit from the frame.
+- If a component's role is unclear, describe it literally by count, type,
+  endpoints, host shape, region, or attachment instead of abstracting it away.
+- query_response must not be stronger than the facts already supported by
+  key_observations and relationships. Do not introduce a solved geometric
+  conclusion in query_response if the extracted facts do not justify it.
+- If the query asks for a derived quantity and the visible structure is
+  insufficient, say that the visible evidence is insufficient in query_response
+  instead of guessing.
+- Do not output mutually inconsistent relations together. If one possible
+  interpretation conflicts with another, prefer the smaller set of clearly
+  visible facts and state the ambiguity in key_observations.
 '''
 
 # video_qa_reanswerer tool disabled — prompt kept below for reference.
@@ -2210,6 +2452,22 @@ Follow this general strategy:
    - If one interval yields only partial evidence, branch to another candidate
      interval or run a separate retrieval plan for the missing evidence instead
      of forcing one frame bundle to answer the whole question
+   - For geometry / diagram questions, first ground visible primitives before
+     asking for a final relation or value. Treat a broad diagram tool's solved
+     conclusion as provisional unless the same output also states the explicit
+     premises that justify it.
+   - More generally, for structured-visual questions, first inventory the
+     visible primitives before deriving a value or option. Treat component
+     type, attachment points, orientation, and label attachment as separate
+     evidence fields rather than collapsing them into one high-level
+     interpretation.
+   - If a round yields a stable core structure plus additional unresolved
+     visible components that could affect the answer, do not finalize from the
+     core alone. Use another round to resolve those components or preserve a
+     tool-grounded explanation of why they are irrelevant.
+   - When several frames show the same static diagram, build the union of
+     mutually consistent primitives across frames instead of trusting only the
+     chosen best frame for every detail.
    - Do not spend dense_captioner on a merely plausible candidate interval for
      an ordinal question until cheaper evidence has shown that the interval is a
      true instance of the base event

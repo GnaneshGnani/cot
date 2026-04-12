@@ -177,6 +177,61 @@ class RefinerAgentsMixin:
             else False,
         }
 
+    def _compact_generation_summary(self, generation_record: dict) -> dict:
+        if not isinstance(generation_record, dict):
+            return {
+                "iteration": 0,
+                "phase": "initial_trace_generation",
+                "verifier_verdict": None,
+                "tools_executed": [],
+                "errors_fixed": [],
+                "errors_remaining": [],
+                "answer_changed": False,
+            }
+
+        tools_executed = []
+        threshold = float(os.getenv("REFINER_TOOL_RESOLVED_THRESHOLD", "0.7"))
+        for item in generation_record.get("executed_tools") or []:
+            if not isinstance(item, dict):
+                continue
+            tool = item.get("tool", "")
+            purpose = item.get("purpose", "")
+            parsed = self._parse_tool_result_json(item.get("output", ""))
+            conf = self._extract_tool_confidence(tool, parsed or {})
+            tools_executed.append(
+                {
+                    "tool": tool,
+                    "purpose": purpose,
+                    "confidence": round(conf, 4),
+                    "resolved": bool(conf >= threshold),
+                }
+            )
+
+        errors_fixed = []
+        errors_remaining = []
+        refiner_output = generation_record.get("refiner_output")
+        if isinstance(refiner_output, dict):
+            for ch in refiner_output.get("changes_made") or []:
+                if isinstance(ch, dict):
+                    op = ch.get("operation", "")
+                    si = ch.get("step_index")
+                    errors_fixed.append(f"{op} step {si}")
+            errors_remaining = list(refiner_output.get("unresolved_issues") or [])
+
+        diagnosis = generation_record.get("diagnosis")
+        diag = diagnosis if isinstance(diagnosis, dict) else {}
+        return {
+            "iteration": 0,
+            "phase": "initial_trace_generation",
+            "verifier_verdict": diag.get("verdict"),
+            "tools_executed": tools_executed,
+            "errors_fixed": errors_fixed[:20],
+            "errors_remaining": errors_remaining[:20],
+            "answer_changed": bool(refiner_output.get("answer_changed"))
+            if isinstance(refiner_output, dict)
+            else False,
+        }
+
     def _iteration_context_block(self, iteration: int, max_iterations: int, history: list) -> str:
         hist = history or []
         return (
@@ -382,7 +437,8 @@ class RefinerAgentsMixin:
         diagnosis_text = json.dumps(diagnosis, ensure_ascii=False, indent=2) if isinstance(diagnosis, dict) else str(
             diagnosis
         )
-        artifacts_text = json.dumps(self._get_preprocessed_artifacts(), ensure_ascii=False, indent=2)
+        # Intentionally disabled for artifact-free runs: do not inject
+        # PREPROCESSED_ARTIFACTS into planner prompts.
         ctx = self._iteration_context_block(iteration, max_iterations, history or [])
         last_tools = ""
         if history:
@@ -399,8 +455,6 @@ class RefinerAgentsMixin:
             + trace_answer
             + "\n\nDIAGNOSIS:\n"
             + diagnosis_text
-            + "\n\nPREPROCESSED_ARTIFACTS:\n"
-            + artifacts_text
             + "\n\nPREVIOUS_TOOL_RESULTS_SUMMARY (last iteration tools + confidence):\n"
             + (last_tools or "[]")
         )
@@ -899,9 +953,8 @@ class RefinerAgentsMixin:
         tool_outputs_so_far: list,
     ) -> str:
         question_block = self._format_question_with_options()
-        artifacts_text = json.dumps(
-            self._get_preprocessed_artifacts(), ensure_ascii=False, indent=2
-        )
+        # Intentionally disabled for artifact-free runs: do not inject
+        # PREPROCESSED_ARTIFACTS into generator prompts.
 
         tool_history = ""
         if tool_outputs_so_far:
@@ -929,8 +982,6 @@ class RefinerAgentsMixin:
             + str(self.video_path)
             + "\n\nVIDEO_DURATION:\n"
             + str(self.duration) + " seconds"
-            + "\n\nPREPROCESSED_ARTIFACTS:\n"
-            + artifacts_text
             + "\n\nROUND:\n"
             + f"{round_idx + 1}/{max_rounds}"
             + "\n\nPREVIOUS_TOOL_OUTPUTS:\n"

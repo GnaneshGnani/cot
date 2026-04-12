@@ -311,11 +311,9 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
 
         self.subtitles = self._extract_subtitles()
 
-        try:
-            self._build_segment_dense_captions(self.segment_size_s)
-            self._build_segment_index(self.segment_size_s)
-        except Exception as e:
-            print(f"Warning: segment timeline build failed: {e}")
+        # Segment-level dense-caption preprocessing is intentionally disabled for
+        # artifact-free runs. Leave the segment caches empty instead of building
+        # 30s caption summaries up front.
 
         self.messages = []
         
@@ -369,11 +367,9 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         )
         self._ensure_video_clip_embeddings()
         self.subtitles = self._extract_subtitles()
-        try:
-            self._build_segment_dense_captions(self.segment_size_s)
-            self._build_segment_index(self.segment_size_s)
-        except Exception as e:
-            print(f"Warning: segment timeline build failed: {e}")
+        # Segment-level dense-caption preprocessing is intentionally disabled for
+        # artifact-free runs. Leave the segment caches empty when loading a new
+        # sample as well.
 
         print("✓ Sample loaded")
         print(f"  Video: {video_path}")
@@ -1067,6 +1063,7 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
 
         generated_trace_info = None
         trace_steps = list(trace_steps or [])
+        iteration_history = []
 
         # Cold-start generation: produce a trace from scratch if none provided
         if not trace_steps:
@@ -1078,6 +1075,9 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
                 "answer": gen_answer,
                 "generation_rounds": gen_rounds,
             }
+            iteration_history = [
+                self._compact_generation_summary(rec) for rec in (gen_rounds or []) if isinstance(rec, dict)
+            ]
             print("\n" + "=" * 70)
             print(f"Trace generated: {len(gen_steps)} steps, answer: {gen_answer}")
             print("=" * 70 + "\n")
@@ -1087,7 +1087,6 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         initial_answer = trace_answer
         current_trace = list(trace_steps)
         current_answer = trace_answer
-        iteration_history = []
 
         print("\n" + "=" * 70)
         print("trace_answer: ", trace_answer)
@@ -1351,7 +1350,7 @@ def main():
         _write_json(out_dir / "meta.json", meta)
         return out_dir
 
-    for index, item in enumerate(data, start=1):
+    for index, item in enumerate(data[23:24], start=1):
         record = dict(item)
         video_path = str(item.get("video_path", "")).strip()
         question = str(item.get("question", "")).strip()

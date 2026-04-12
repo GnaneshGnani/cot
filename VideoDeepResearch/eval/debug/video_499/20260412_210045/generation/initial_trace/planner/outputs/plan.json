@@ -1,0 +1,59 @@
+{
+  "strategy": "Answer the two independent subgoals directly: localize the binoculars scene to determine which hand holds the pot, and transcribe the relevant dialogue to verify whether Sheldon says his brother was a premature baby. Use the minimum cross-modal evidence needed rather than broad summarization.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "temporal_grounder",
+      "arguments": {
+        "video_path": "<VIDEO_PATH>",
+        "query": "Sheldon observing Dr. Sturgis through binoculars while Dr. Sturgis is holding a pot"
+      },
+      "purpose": "Find the candidate time window(s) for the exact visual scene referenced in the question before retrieving frames for hand identification.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "<VIDEO_PATH>",
+        "query": null,
+        "timestamps": [
+          "<STEP_1:segments[0].start>",
+          "<STEP_1:segments[0].end>",
+          "<STEP_1:segments[1].start>",
+          "<STEP_1:segments[1].end>"
+        ],
+        "num_frames": 4
+      },
+      "purpose": "Sample candidate frames from the top localized intervals so the refiner can identify which interval actually contains Sheldon looking through binoculars at Dr. Sturgis holding the pot.",
+      "depends_on": [
+        1
+      ]
+    },
+    {
+      "step": 3,
+      "tool": "spatial_grounder",
+      "arguments": {
+        "frame_path": "<STEP_2:frames>",
+        "timestamp": null,
+        "query": "Dr. Sturgis holding a pot, including the hand that is holding the pot"
+      },
+      "purpose": "Determine in the validated binoculars-scene frame which hand Dr. Sturgis uses to hold the pot; use frame-level outputs rather than assuming the top-ranked frame is correct.",
+      "depends_on": [
+        2
+      ]
+    },
+    {
+      "step": 4,
+      "tool": "asr",
+      "arguments": {
+        "video_path": "<VIDEO_PATH>",
+        "start_time": null,
+        "end_time": null
+      },
+      "purpose": "Transcribe the episode clip so the refiner can find the dialogue about whether Sheldon's brother was a premature baby and answer the yes/no part directly from speech.",
+      "depends_on": []
+    }
+  ],
+  "refinement_instructions": "Build the new trace from scratch around two explicit subgoals. For the visual subgoal, use Step 1 only as candidate localization and do not assume segments[0] is chronologically special; inspect the timestamps and Step 2 sampled frames to identify the frame that truly shows Sheldon observing Dr. Sturgis through binoculars while Dr. Sturgis holds the pot. Then use the frame-level result from Step 3 for that matching frame to state whether the pot is in Dr. Sturgis's left or right hand; do not rely on the top-level spatial summary if multiple frames differ. For the dialogue subgoal, read Step 4's transcript and locate the line discussing Sheldon's brother being a premature baby; cite the transcript content directly for a yes/no conclusion. The rewritten trace should keep the visual and speech evidence separate, then combine them to choose among A/B/C/D. If either tool output is still ambiguous, state that uncertainty explicitly rather than inferring from plausibility, but update the final answer if the grounded evidence clearly contradicts any initial assumption."
+}
