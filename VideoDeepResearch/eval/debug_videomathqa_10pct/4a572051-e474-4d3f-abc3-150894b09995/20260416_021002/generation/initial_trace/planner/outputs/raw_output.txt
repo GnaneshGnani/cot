@@ -1,0 +1,30 @@
+{
+  "strategy": "The question is a static probability puzzle with no prior trace, so first localize the frame(s) where the full problem statement and answer options are visible, then use OCR to read the exact on-screen text needed for the refiner to solve the probability from the extracted prompt rather than guessing from the title.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "VIDEO",
+        "query": "question screen for a confusing probability question showing the full problem statement and multiple-choice options on a white background",
+        "timestamps": null,
+        "num_frames": 3
+      },
+      "purpose": "Retrieve candidate frames containing the puzzle statement and options, since the video appears mostly static and text-based.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "ocr",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null
+      },
+      "purpose": "Extract the exact wording of the probability problem and the visible answer choices from the retrieved frames.",
+      "depends_on": [
+        1
+      ]
+    }
+  ],
+  "refinement_instructions": "Use the OCR output as the authoritative source for the problem statement and options. Build the first reasoning trace from scratch: (1) quote or accurately paraphrase the extracted puzzle text, including any counts/conditions about defective and non-defective balls and the listed options; (2) solve the probability only from those OCR-grounded facts; (3) if multiple retrieved frames contain different portions of the text, merge only consistent text across frames and prefer the frame-level OCR evidence that shows the fullest statement; (4) do not rely on the video title 'Confusing Probability Question' as evidence for the answer; (5) if the OCR reveals the original answer differs from the final computed probability, update the answer accordingly; (6) if OCR is partial and a key count/condition remains unreadable, keep the trace explicit about that uncertainty rather than inventing missing numbers."
+}

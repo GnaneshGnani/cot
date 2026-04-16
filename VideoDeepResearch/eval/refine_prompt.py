@@ -532,11 +532,12 @@ clearest set of tool calls that will collect the missing evidence.
 
 10. chart_analyzer(frame_path: str | list[str] | list[dict] | null, timestamp: float | list[float] | null, query: str | null)
    -> {chart_type: str, title: str, axes: dict, series: list, key_observations: list, relationships: list, query_response: str | null}
-   Interprets charts, graphs, plots, flowcharts, and diagrams — reads axis labels
-   and ranges, data series values, trends, and structural node/edge relationships.
+   Interprets charts, graphs, plots, flowcharts, and diagrams by grounding
+   visible structure, labels, values, and local relationships.
    USE WHEN: trace references chart data, graph readings, plot trends, table
-   values, or flowchart logic. Prefer over ocr for any frame where the question
-   involves interpreting a visual structure.
+   values, or diagram / flowchart structure. Use it to understand the visual
+   evidence, not to solve the full problem end-to-end. Prefer over ocr for any
+   frame where the question involves interpreting a structured visual.
 
 ━━━ You will receive ━━━
 - QUESTION: The original question
@@ -544,8 +545,11 @@ clearest set of tool calls that will collect the missing evidence.
 - ANSWER: The original answer
 - DIAGNOSIS: The Verifier's JSON output (verdict, error_categories, scores)
 - DIAGNOSIS may include `evidence_gaps` (grouped unsupported claims summaries).
-- PREPROCESSED_ARTIFACTS may be omitted in some runs; do not assume this block
-  is present when constructing the plan.
+- VIDEO_CAPTION_SUMMARY: a caption-style summary of the complete video.
+  Use it as global context for what the video is broadly about, which subjects
+  or phases appear, and whether the question is likely asking about one local
+  moment or a wider pattern across the video.
+  IMPORTANT: this summary is planning context, not final fine-grained evidence.
 - PREVIOUS_ITERATIONS_SUMMARY (optional)
 
 ━━━ Output Format ━━━
@@ -577,6 +581,12 @@ Each call should be easy for the downstream tool to execute correctly:
 
 Before proposing tool calls, do this decomposition mentally:
 1. Read QUESTION and identify the answer-critical subgoals.
+   - Read `VIDEO_CAPTION_SUMMARY` before decomposing the question so you first
+     understand the overall context of the video, its major subjects/scenes, and
+     any likely phase changes.
+   - Use that overall context to judge whether the unanswered subgoals should be
+     solved within one shared temporal anchor or decomposed into separate
+     occurrences / branches.
    - What exact entities, attributes, relations, counts, times, or comparisons
      must be grounded to answer the question?
    - If the question is multiple-choice, what evidence would distinguish the
@@ -605,14 +615,14 @@ Before proposing tool calls, do this decomposition mentally:
    - Treat prior temporal_grounder results as query-conditioned anchors, not as
      globally valid locations for every unresolved fact.
 4. Only then write the plan.
-   - The plan should be derived from QUESTION + DIAGNOSIS together, not from
-     the surface wording of the old TRACE alone.
+   - The plan should be derived from QUESTION + DIAGNOSIS + VIDEO_CAPTION_SUMMARY,
+     not from the surface wording of the old TRACE alone.
    - Preserve prior supported evidence when useful, but do not anchor the new
      plan to unsupported assumptions from the old trace.
 
 IMPORTANT LIMITATION:
 - You do NOT see the video itself. Infer planning risk only from the question,
-  diagnosis, preprocessing, and previous tool outputs.
+  diagnosis, VIDEO_CAPTION_SUMMARY, and previous tool outputs.
 - Therefore, when planning for charts / infographics / diagrams, do not assume a
   query-ranked frame is already a fully rendered stable state. Animated or
   progressive chart reveals are a known risk pattern that must be handled by
@@ -639,6 +649,9 @@ General principles:
 - If the interval is unknown, first propose a localization step such as:
   targeted frame retrieval, sparse timestamp sweep, OCR on sampled frames, ASR
   on the likely spoken region, or another directly relevant narrow tool.
+- Use VIDEO_CAPTION_SUMMARY to avoid blind broad searches when the high-level
+  context already suggests the relevant scene, subject, or phase, but do not
+  treat that summary as sufficient grounding for answer-critical fine detail.
 - If a previous iteration already produced partial evidence, prefer a narrower
   follow-up over restarting with a broader scan.
 - Plan around answer-critical gaps, not around tool names.
@@ -837,9 +850,9 @@ A good tool query should:
    - prefer "frame showing a green road sign with destination names" over
      "is the road sign green?"
 8. Include temporal anchors when available:
-   - if the diagnosis, trace, captions, or transcript suggests a moment, narrow
-     the time range via timestamps or dependent step outputs instead of relying
-     only on a broad query
+   - if the diagnosis, trace, VIDEO_CAPTION_SUMMARY, captions, or transcript
+     suggests a moment, narrow the time range via timestamps or dependent step
+     outputs instead of relying only on a broad query
 9. Keep the wording compact but complete:
    - one clean sentence or phrase is better than a long paragraph
 10. Make each query independently understandable without reading the trace.
@@ -1245,26 +1258,41 @@ Audio-grounder planning guidance:
   `audio_grounder`.
 
 E) chart_analyzer
-The query should specify the chart/diagram target and the exact relationship or
-value that needs interpretation.
+The query should specify the chart/diagram target and the exact structure,
+label, value, or local relation that needs interpretation. Prefer grounded
+reading / description queries over final-answer or whole-problem-solving
+queries.
 
 Good examples:
 - "bar chart comparing quarterly revenue by region"
 - "line graph trend of temperature over time"
+- "approximate year when line A overtakes line B"
+- "where the two plotted series intersect or cross"
 - "flowchart branch followed after the approval decision"
 - "table cell containing the total count"
 - "legend mapping line colors to company names"
-- "which symbol/shape is assigned the area value in the diagram"
+- "which shapes are present and which boundaries or regions they attach to"
+- "which segment or region carries the visible numeric label"
 - "value of the highlighted bar for the third category"
 
 Bad examples:
 - "read the chart"
 - "what does the graph say"
+- "solve the geometry problem"
+- "compute the final answer from this diagram"
+- "which answer option is correct"
 - "numbers on screen"   (use OCR if plain text, chart_analyzer if structured visual)
 
 If a prior chart_analyzer call found the right chart but left entity/value
 mapping ambiguous, do not repeat a generic chart query. Re-query for the exact
 legend, label, symbol, row, cell, or relationship that is still blocking the answer.
+- For derived chart questions, explicitly name:
+  1. the compared series / entities,
+  2. the relation to evaluate (crosses, exceeds, peaks, minimum, gap, rank),
+  3. whether the answer may be approximate or between labeled ticks.
+- If the answer may occur between labeled x-axis values, do not phrase the query
+  as if the answer must be one of the visible ticks unless the question itself
+  requires closest-option mapping.
 
 Animated-chart planning rule:
 - If the question requires multiple values, multiple metrics, or a comparison
@@ -1332,9 +1360,12 @@ Animated-chart planning rule:
   localized moments or occurrences, that call should usually depend on the step
   that established those moments. Do not hardcode a guessed interval if the
   interval is itself one of the unresolved issues.
-- If PREPROCESSED_ARTIFACTS are present, prefer using them before calling tools.
-- If preprocessing already contains sufficiently precise evidence, avoid a
-  redundant tool call.
+- If VIDEO_CAPTION_SUMMARY is present, use it before choosing tools so the plan
+  accounts for the overall context of the video instead of treating each claim
+  as isolated.
+- If VIDEO_CAPTION_SUMMARY already narrows the likely scene/phase, use that
+  context to make the next tool call more targeted and avoid redundant broad
+  searches.
 - If the diagnosis contains ANSWER_ERROR, prioritize frame_retriever,
   dense_captioner, and ocr/chart_analyzer as needed to verify or correct the answer.
 - For INCOMPLETE_TRACE, do NOT automatically start with dense_captioner.
@@ -1402,19 +1433,6 @@ Animated-chart planning rule:
   by testing which option sounds plausible. If one answer-critical field is
   still ungrounded, gather that missing field directly or keep the trace marked
   incomplete.
-- For geometry / diagram math questions, do NOT ask chart_analyzer to solve the
-  whole construction in one step when answer-critical primitives are still
-  missing. First target the missing visible primitives: labels, equal-mark
-  indicators, tangent markers, edge partitioning, centers, endpoints, or which
-  arcs meet which boundaries.
-- More generally, for structured-visual questions whose answer depends on how
-  several primitives combine, first ask for a complete inventory of the visible
-  primitives and their attachments / roles before asking for a final derived
-  relation or value.
-- If the remaining gap is a derived relation rather than a directly visible
-  fact, avoid a broad query such as "determine the radius relation" or
-  "identify the intended construction." Instead ask for the narrowest missing
-  premise whose grounding would justify the later derivation.
 - Avoid answer-directed diagram queries that presuppose the interpretation when
   the figure itself may still be ambiguous. Prefer inventory queries such as
   which shapes are full vs partial, which edges / arcs / regions meet, where
@@ -1604,6 +1622,48 @@ For reasoning-heavy traces such as VideoMathQA:
 - the final answer step should point back to the comparison or computation that
   was supported by tool evidence.
 
+━━━ Reader-Facing Final Trace Requirement ━━━
+The final trace must read like a compact argument for a reader, NOT like a
+serialized planner/executor log.
+
+Prefer this shape whenever the question allows it:
+1. answer-critical anchor (relevant moment / frame / chart state),
+2. decisive evidence,
+3. reasoning / comparison / arithmetic,
+4. final answer.
+
+Style constraints:
+- Prefer 3-6 steps total. Exceed 6 only when the question truly has multiple
+  independent subgoals or an unresolved branch that must be explained.
+- Prefer one main claim per step and keep each step short: usually 1-2
+  sentences, not a paragraph.
+- Start with the answer-critical anchor or decisive evidence, not with general
+  search history.
+- Group multi-part questions by subgoal rather than by tool chronology, then
+  add one short combining step.
+- Mention negative evidence only when it directly rules out an option, resolves
+  an ambiguity, or explains why the trace must remain unresolved.
+- Keep exhaustive candidate lists, long timestamp sweeps, and failed search
+  attempts out of refined_trace unless those comparisons are themselves
+  answer-critical.
+
+━━━ Confidence-Carrying Evidence Requirement ━━━
+When a cited tool output exposes a numeric support field, include it inline in
+the step that relies on that evidence.
+
+Examples:
+- "temporal_grounder localizes the chart to 430.0s-440.0s (top confidence 0.7305)."
+- "OCR on frame_9.50.png reads the row text (avg detection confidence 0.9900)."
+- "frame_retriever returns frame_195.00.png as the strongest candidate (top relevance_score 0.5771)."
+- "spatial_grounder on frame_195.00.png reports a bow tie (max detection confidence 0.8421)."
+
+Rules for numeric support fields:
+- Use the metric name the tool exposes: confidence, relevance_score, average
+  detection confidence, max detection confidence, etc.
+- Do NOT invent confidence numbers when the tool output does not expose one.
+- If a step cites multiple tools, include only the 1-2 numeric scores that are
+  most useful for that step instead of dumping every available score.
+
 ━━━ You will receive ━━━
 - QUESTION: The original question
 - ORIGINAL_TRACE: The full reasoning trace (with step indices)
@@ -1658,6 +1718,8 @@ Respond with a JSON object:
 }
 
 You may also use a single string for refined_trace if steps are numbered inside the string.
+If you return a list, do NOT prefix each string with "Step 1", "Step 2", etc.;
+the list order already defines the step order.
 
 ━━━ Rules ━━━
 - NEVER introduce information that does not come from either the original trace
@@ -1665,6 +1727,10 @@ You may also use a single string for refined_trace if steps are numbered inside 
 - When a repaired claim comes from a tool, phrase it as an attributed report of
   that tool result inside the refined trace. Do not convert tool outputs into
   naked direct observations of unseen media.
+- Do not narrate internal pipeline bookkeeping in the final trace. Avoid
+  prefixes like "Step 1", "TOOL_OUTPUTS Step 2", "the earlier search
+  surfaced", or similar planner/executor wording unless that reference is truly
+  needed to disambiguate evidence.
 - Do not upgrade candidate evidence into global chronology. If a tool result
   comes from query-ranked retrieval or sparse sampling, do not rewrite it as a
   verified "first", "second", "earliest", or "latest" occurrence unless the
@@ -1675,6 +1741,12 @@ You may also use a single string for refined_trace if steps are numbered inside 
   reported numeric value.
 - If tool evidence is ambiguous or low-confidence, note it in unresolved_issues
   rather than making a speculative fix.
+- The last step should be a crisp answer step. It may briefly point to the
+  decisive reason, but it should not introduce brand-new evidence, candidate
+  lists, or a new calculation.
+- If the trace derives a value that does not match the answer choices, say that
+  explicitly instead of silently remapping to the "closest" option unless the
+  trace also justifies that approximation from the tool evidence.
 - A tool's free-form query_response is NOT by itself sufficient to overturn the
   answer when the supporting primitive facts are absent, approximate,
   low-confidence, or internally inconsistent. Prefer explicitly grounded
@@ -1753,6 +1825,16 @@ You may also use a single string for refined_trace if steps are numbered inside 
 - Do not treat a convenience top-level summary from a multi-frame tool result as
   the only usable evidence when the frame-level results contain the real basis
   for choosing the answer.
+- Special rule for multi-frame diagram / chart_analyzer outputs: if the tool
+  exposes a top-level merged summary plus per-frame `frame_results`, do not
+  cite a per-frame diagram primitive unless that same primitive also survives in
+  the top-level merged `key_observations`, `relationships`, or `query_response`.
+  Per-frame diagram details that do not survive the merged summary must be
+  treated as unresolved rather than reintroduced into the trace.
+- For diagram label text or attachment, do not cite chart_analyzer alone as the
+  basis for claims like "the side is labeled 1" or "each side is labeled 1".
+  Require OCR or another explicit text-grounding tool to support the exact
+  visible label text and its attachment.
 - Resolve entity identity before transferring values. If one tool identifies
   the asked object by color, position, bbox, label, ordinal role, or local
   relation, and another tool provides a value or semantic description, use that
@@ -2240,7 +2322,9 @@ RULES:
 chart_analyzer_prompt = '''
 You are a chart and diagram analysis module. Given a frame containing a chart,
 graph, flowchart, or diagram, interpret its STRUCTURE and SEMANTICS — not just
-the visible text.
+the visible text. Your role is to understand the visual evidence and report the
+grounded primitives and local relations it shows. You are NOT the final math /
+logic solver for the overall question.
 
 INPUT:
   - frame_path: Path to an image file (or video_path + timestamp)
@@ -2255,8 +2339,16 @@ TASK:
      names, data point values, tick marks, units.
   3. For flowcharts and diagrams: extract nodes, edges, and edge labels to capture
      the logical flow or relationships.
-  4. Identify key observations: trends, peaks, minima, comparisons, anomalies.
-  5. If a query is provided, directly answer it using the extracted information.
+  4. Identify key observations: trends, peaks, minima, comparisons, anomalies,
+     thresholds, and any visible crossovers/intersections.
+  5. If a query is provided, answer only the visual-interpretation part that can
+     be supported directly from the frame: what is shown, which labels/values
+     are attached to which entities, and which local relations are visible.
+     If the query would require multi-step derivation, symbolic problem solving,
+     final option selection, or combining evidence beyond this frame, do NOT try
+     to solve the whole problem. Instead, return the grounded local finding in
+     `query_response` when possible, or leave `query_response` null and put the
+     needed primitives / ambiguity in `key_observations`.
 
 OUTPUT FORMAT (JSON):
 {
@@ -2282,7 +2374,7 @@ OUTPUT FORMAT (JSON):
   "relationships": [
     {"from": "<node or concept>", "to": "<node or concept>", "label": "<edge label or null>"}
   ],
-  "query_response": "<direct answer to the query if one was given, or null>"
+  "query_response": "<grounded local answer to the query if it can be read/interpreted from this frame, or null>"
 }
 
 RULES:
@@ -2290,45 +2382,121 @@ RULES:
   populate key_observations with a description of what is visible.
 - axes and series may be empty lists/objects if not applicable (e.g., flowchart).
 - relationships is primarily for flowcharts and diagrams; leave empty for charts.
+- Treat `query_response` as a compact summary of grounded visual understanding,
+  not as a substitute for downstream reasoning.
 - Read numerical values carefully — prefer exact values over approximations.
 - If axis ranges or tick values are partially occluded, note this in key_observations.
+- If the query asks for a crossover, intersection, overtake year, first
+  exceedance, threshold crossing, or other between-tick event, do NOT snap the
+  answer to the nearest labeled tick unless the plotted evidence actually shows
+  the event at that tick.
+- For line charts, if one series is below another at one labeled x-value and
+  above it at the next, treat the crossover as occurring approximately between
+  those labels unless the plotted intersection is visibly closer to one side.
+- If the exact between-tick point is hard to read, report an approximate year /
+  interval in `query_response` and explain the supporting relation in
+  `key_observations` instead of forcing an unsupported exact tick label.
+- If the query asks for a derived relation, ensure `query_response` is
+  consistent with the extracted `series`, `data_points`, and
+  `key_observations`. Do not let `query_response` contradict the numeric trend
+  you already reported.
+- When answering comparative chart queries, name the compared series/entities
+  explicitly in `key_observations` and `query_response` rather than using vague
+  references like "the orange one" or "the other line" unless labels are absent.
+- If series labels appear away from the answer-critical region (for example at
+  the end of a line), map labels to curves by continuity and keep that mapping
+  consistent across the whole chart.
 - For pie charts, express data_points as {"x": "<slice label>", "y": <percentage or value>}.
 - key_observations should be self-contained sentences useful for downstream reasoning.
-- For geometry / diagram questions, report only visually supported relations as
-  facts. Do NOT infer equal lengths, equal partitions, tangency, shared
-  centers, inscribed / circumscribed relations, or exact radii from appearance
-  alone unless they are visibly marked, labeled, or unavoidable from explicit
-  structure in the frame.
-- Before answering a derived query about a structured diagram, first inventory
-  the visible primitives needed for that answer: component type (full shape vs
-  partial shape), attachment points / endpoints, adjacency, containment,
-  orientation, and label attachment.
-- If multiple frames of the same static chart / diagram are provided, combine
-  mutually consistent primitives across frames and use the clearest frame for
-  each primitive when possible. Do not let selection of one best frame discard
-  a component that is clearly visible in another matching frame.
-- Distinguish full shapes from partial ones whenever that distinction affects
-  interpretation (for example full circle vs semicircle vs arc, closed polygon
-  vs open segment, filled region vs outline).
-- When the layout is rotated, tilted, mirrored, or otherwise non-axis-aligned,
-  preserve that orientation in key_observations if it affects interpretation.
-  Do not silently rewrite the figure into an easier axis-aligned template.
-- For diagrams, use relationships to record clearly visible attachment,
-  adjacency, containment, shared-endpoint, or intersection facts whenever they
-  help preserve the structure of the figure.
+- For diagrams and structured visuals, prefer reporting visible components,
+  attachments, labels, ordering, and local relations before naming any higher-
+  level interpretation that depends on them.
+- Do not solve a full mathematical, geometric, logical, or multiple-choice
+  problem inside this tool unless the requested answer is a direct visual read
+  from the frame itself.
+- Do not use unstated domain rules, theorems, or hidden assumptions to turn
+  partial visual evidence into a final derived answer.
 - Do not describe a visible structured component as decorative or non-essential
   unless that irrelevance is visually explicit from the frame.
 - If a component's role is unclear, describe it literally by count, type,
   endpoints, host shape, region, or attachment instead of abstracting it away.
-- query_response must not be stronger than the facts already supported by
-  key_observations and relationships. Do not introduce a solved geometric
-  conclusion in query_response if the extracted facts do not justify it.
-- If the query asks for a derived quantity and the visible structure is
-  insufficient, say that the visible evidence is insufficient in query_response
-  instead of guessing.
 - Do not output mutually inconsistent relations together. If one possible
   interpretation conflicts with another, prefer the smaller set of clearly
   visible facts and state the ambiguity in key_observations.
+'''
+
+math_solver_prompt = '''
+You are a mathematical reasoning module. Solve the question using ONLY the
+grounded evidence provided to you, plus any attached supporting frame(s).
+
+INPUT:
+  - question: the math / geometry / quantitative question to solve
+  - evidence: grounded facts from other tools (OCR, spatial_grounder,
+    chart_analyzer, ASR, etc.)
+  - supporting_frames: optional localized frame(s) showing the same grounded
+    diagram/chart/evidence state
+
+TASK:
+  1. Extract the facts that are actually supported by the evidence.
+  1b. If supporting frame(s) are provided, use them only to read directly
+      visible labels, primitives, relations, or values that are clear in the
+      supplied frame(s).
+  2. Identify any missing premises or ambiguities.
+  3. If the evidence is sufficient, derive the answer step by step.
+  4. If the evidence is insufficient, say so instead of guessing.
+
+OUTPUT FORMAT (JSON):
+{
+  "interpreted_facts": [
+    "<fact 1>",
+    "<fact 2>"
+  ],
+  "derivation": [
+    "<reasoning step 1>",
+    "<reasoning step 2>"
+  ],
+  "result": "<numeric or symbolic result, or null>",
+  "confidence": <float 0.0-1.0>,
+  "insufficient_information": <true or false>,
+  "missing_facts": [
+    "<missing premise 1>",
+    "<missing premise 2>"
+  ]
+}
+
+RULES:
+- Use only the provided evidence. Never invent visual, geometric, algebraic, or
+  measurement facts that are not explicitly grounded.
+- Treat supporting frame(s) as localized visual context, not as permission to
+  guess hidden/unclear premises. If the frame is ambiguous, blurry, cropped, or
+  inconsistent with the textual evidence, preserve that uncertainty.
+- Treat tool outputs as provisional facts only to the extent that they are
+  stated in the evidence. Do not strengthen them.
+- Prefer directly visible primitive facts from attached frame(s) for labels,
+  shape type, attachment points, intersections, and other answer-critical
+  visual relations. Use textual tool evidence for provenance and already
+  grounded values, but if a textual claim and the attached frame imply
+  different directly visible primitives, treat that primitive as ambiguous
+  rather than blindly preferring either source.
+- For geometry, carefully distinguish:
+  - full circle vs semicircle vs arc
+  - inscribed vs merely inside
+  - tangent vs touching at endpoints vs intersecting
+  - side length vs chord vs radius vs diameter
+  - label attachment vs nearby but ambiguous text
+- If the derivation depends on a premise that is ambiguous or unsupported, set
+  `insufficient_information` to true and list that premise in `missing_facts`.
+- If the evidence contains incompatible geometry interpretations, conflicting
+  attachments, or a high-level construction claim that is not backed by stable
+  visible primitives, set `insufficient_information` to true instead of solving
+  the easiest compatible subproblem.
+- Do not generalize a lone visible label into repeated labels, equal values on
+  multiple symmetric parts, or an exact attachment to a specific edge/vertex
+  unless OCR or another grounded text-reading source supports that attachment.
+- Do not dismiss extra visible components as irrelevant unless the evidence
+  explicitly grounds why they cannot affect the asked quantity.
+- The caller will handle any final answer-choice mapping outside this prompt.
+- Return JSON only.
 '''
 
 # video_qa_reanswerer tool disabled — prompt kept below for reference.
@@ -2359,8 +2527,8 @@ with EXACTLY ONE of the following two types:
 {
   "type": "trace",
   "trace_steps": [
-    "Step 1: ...",
-    "Step 2: ...",
+    "The relevant chart appears near ...",
+    "chart_analyzer on frame_... reports ...",
     ...
   ],
   "answer": "<final answer>"
@@ -2424,8 +2592,10 @@ extra text before or after the JSON.
 
 10. chart_analyzer(frame_path: str | list[str] | null, timestamp: float | list[float] | null, query: str | null)
     -> {chart_type, title, axes, series, key_observations, query_response}
-    Interprets charts, graphs, plots, flowcharts, and diagrams.
+    Interprets charts, graphs, plots, flowcharts, and diagrams by extracting
+    grounded structure, labels, values, and local relations.
     USE WHEN: need to read chart data, graph values, or diagram structure.
+    Use its output as evidence for later reasoning, not as the final solver.
 
 ━━━ Strategy Guidelines ━━━
 
@@ -2446,7 +2616,7 @@ Follow this general strategy:
 2. THEN gather specific evidence:
    - Use the localized time ranges / frames from step 1 to call specialized tools
    - Prefer cheaper tools first: frame_retriever + OCR before dense_captioner
-   - Chain naturally: temporal_grounder → frame_retriever → chart_analyzer/ocr/spatial_grounder
+   - Chain naturally: temporal_grounder → frame_retriever → chart_analyzer/ocr/spatial_grounder, then let the final trace synthesize the derivation from grounded evidence
    - If temporal_grounder returns several plausible intervals, sample across the
      top alternatives before committing to one interval for deeper analysis
    - If one interval yields only partial evidence, branch to another candidate
@@ -2456,6 +2626,9 @@ Follow this general strategy:
      asking for a final relation or value. Treat a broad diagram tool's solved
      conclusion as provisional unless the same output also states the explicit
      premises that justify it.
+   - Once the geometry/diagram primitives are grounded, stop adding tools for
+     symbolic derivation and have the final trace derive the result directly
+     from those grounded premises.
    - More generally, for structured-visual questions, first inventory the
      visible primitives before deriving a value or option. Treat component
      type, attachment points, orientation, and label attachment as separate
@@ -2480,6 +2653,8 @@ Follow this general strategy:
    - Do NOT wait until round 10 if you have enough evidence earlier
    - Typically 3-8 rounds of tool calls suffice
    - Each trace step should cite the tool evidence that supports it
+   - The final trace should be a compact reader-facing argument, not a dump of
+     the tool search process
 
 ━━━ Query Construction Rules ━━━
 
@@ -2501,11 +2676,31 @@ When calling tools with natural-language queries:
 ━━━ Trace Output Rules ━━━
 
 When producing the final trace (type: "trace"):
-- trace_steps: ordered list of reasoning steps, each a self-contained sentence
+- trace_steps: ordered list of short reasoning steps, each a self-contained
+  claim rather than a paragraph-length tool log
+- Do NOT prefix each string with "Step 1", "Step 2", etc.; the list order
+  already defines the step order
+- Prefer 3-6 steps total. Exceed 6 only when the question truly has multiple
+  independent subgoals or an unresolved branch that must be explained
+- Use claim-first ordering when possible:
+  1. answer-critical anchor,
+  2. decisive evidence,
+  3. reasoning / comparison / arithmetic,
+  4. final answer
+- Group multi-part questions by subgoal rather than by tool chronology
 - Each step should cite evidence: "chart_analyzer reports ...", "OCR reads ...",
   "temporal_grounder locates the event at 2:30-2:45"
+- When a tool output exposes a numeric support field, include it inline in the
+  step that uses that evidence: confidence, relevance_score, avg OCR detection
+  confidence, max detection confidence, etc.
+- Mention negative evidence only when it rules out an option or explains why
+  the trace remains unresolved
+- Do not narrate internal planner/executor labels such as "Step 1",
+  "TOOL_OUTPUTS Step 2", or long sampled-frame inventories unless that
+  comparison is itself answer-critical
 - Include intermediate reasoning, not just conclusions
-- The last step should state the final answer clearly
+- The last step should state the final answer clearly and should not introduce
+  brand-new evidence
 - answer: the final answer (for MCQ, just the option letter like "A" or full text)
 
 ━━━ Important constraints ━━━

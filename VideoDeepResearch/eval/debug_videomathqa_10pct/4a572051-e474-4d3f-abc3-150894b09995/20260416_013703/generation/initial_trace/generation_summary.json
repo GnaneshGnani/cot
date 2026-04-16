@@ -1,0 +1,184 @@
+{
+  "phase": "initial_trace_generation",
+  "diagnosis": {
+    "verdict": "FAIL",
+    "answer_correct": false,
+    "trace_quality_scores": {
+      "perceptual_correctness": 0.0,
+      "temporal_accuracy": 0.0,
+      "logical_coherence": 0.0,
+      "completeness": 0.0
+    },
+    "error_categories": [
+      {
+        "type": "INCOMPLETE_TRACE",
+        "step_index": null,
+        "description": "No initial reasoning trace or answer is available. Decompose the question into answer-critical subgoals, gather the minimal tool evidence needed to answer it from scratch, and prepare refinement instructions that let the refiner synthesize a complete first trace.",
+        "severity": "HIGH",
+        "suggested_tools": [],
+        "evidence": null
+      }
+    ],
+    "confidence": 1.0,
+    "summary": "Cold-start generation mode: ORIGINAL_TRACE and ORIGINAL_ANSWER are intentionally empty. Plan tool calls from the question alone, then synthesize the first tool-grounded trace.",
+    "generation_mode": "cold_start"
+  },
+  "planner_raw": "{\n  \"strategy\": \"Ground the static geometry problem frame, then use OCR to read the givens and a spatial/visual description tool to verify which parts are shaded. This is sufficient to reconstruct the geometry and compute the shaded area, then map it to the closest option.\",\n  \"tool_calls\": [\n    {\n      \"step\": 1,\n      \"tool\": \"frame_retriever\",\n      \"arguments\": {\n        \"video_path\": \"VIDEO\",\n        \"query\": \"static geometry diagram showing a large circle with four smaller circles inside and orange shaded crescent regions, with the problem text visible\",\n        \"timestamps\": null,\n        \"num_frames\": 3\n      },\n      \"purpose\": \"Retrieve the key problem frame(s) containing the full diagram and on-screen prompt.\",\n      \"depends_on\": []\n    },\n    {\n      \"step\": 2,\n      \"tool\": \"ocr\",\n      \"arguments\": {\n        \"frame_path\": \"<STEP_1:frames>\",\n        \"timestamp\": null\n      },\n      \"purpose\": \"Read the on-screen problem text and confirm the numerical given, especially the large circle diameter and any other labels.\",\n      \"depends_on\": [1]\n    },\n    {\n      \"step\": 3,\n      \"tool\": \"dense_captioner\",\n      \"arguments\": {\n        \"video_path\": \"VIDEO\",\n        \"start_time\": null,\n        \"end_time\": null,\n        \"granularity\": \"frame\"\n      },\n      \"purpose\": \"Obtain a precise visual description of the static configuration so the refiner can identify the circle arrangement and which regions are shaded.\",\n      \"depends_on\": []\n    }\n  ],\n  \"refinement_instructions\": \"Build the first trace from scratch. Use STEP 2 as authoritative for the printed givens (for example, the large circle diameter 84). Use STEP 1 frame timestamps and images as the anchor for the actual problem frame; if multiple frames are returned, cite the frame-level result(s) that clearly show the full diagram and prompt. Use STEP 3 only to describe the geometry configuration and shaded-vs-unshaded regions; do not invent labels that are not visible. The rewritten trace should explicitly state: (1) the large circle radius from the OCR-read diameter, (2) how the four equal inner circles are arranged inside the large circle, (3) what region is shaded, and (4) the geometric decomposition needed to compute shaded area. Then carry out the computation carefully and compare the numeric result against the options, updating the final answer accordingly. If the exact arrangement still appears ambiguous across the retrieved frames, keep that uncertainty explicit instead of forcing a formula unsupported by the visual evidence.\"\n}",
+  "planner_output": {
+    "strategy": "Ground the static geometry problem frame, then use OCR to read the givens and a spatial/visual description tool to verify which parts are shaded. This is sufficient to reconstruct the geometry and compute the shaded area, then map it to the closest option.",
+    "tool_calls": [
+      {
+        "step": 1,
+        "tool": "frame_retriever",
+        "arguments": {
+          "video_path": "VIDEO",
+          "query": "static geometry diagram showing a large circle with four smaller circles inside and orange shaded crescent regions, with the problem text visible",
+          "timestamps": null,
+          "num_frames": 3
+        },
+        "purpose": "Retrieve the key problem frame(s) containing the full diagram and on-screen prompt.",
+        "depends_on": []
+      },
+      {
+        "step": 2,
+        "tool": "ocr",
+        "arguments": {
+          "frame_path": "<STEP_1:frames>",
+          "timestamp": null
+        },
+        "purpose": "Read the on-screen problem text and confirm the numerical given, especially the large circle diameter and any other labels.",
+        "depends_on": [
+          1
+        ]
+      },
+      {
+        "step": 3,
+        "tool": "dense_captioner",
+        "arguments": {
+          "video_path": "VIDEO",
+          "start_time": null,
+          "end_time": null,
+          "granularity": "frame"
+        },
+        "purpose": "Obtain a precise visual description of the static configuration so the refiner can identify the circle arrangement and which regions are shaded.",
+        "depends_on": []
+      }
+    ],
+    "refinement_instructions": "Build the first trace from scratch. Use STEP 2 as authoritative for the printed givens (for example, the large circle diameter 84). Use STEP 1 frame timestamps and images as the anchor for the actual problem frame; if multiple frames are returned, cite the frame-level result(s) that clearly show the full diagram and prompt. Use STEP 3 only to describe the geometry configuration and shaded-vs-unshaded regions; do not invent labels that are not visible. The rewritten trace should explicitly state: (1) the large circle radius from the OCR-read diameter, (2) how the four equal inner circles are arranged inside the large circle, (3) what region is shaded, and (4) the geometric decomposition needed to compute shaded area. Then carry out the computation carefully and compare the numeric result against the options, updating the final answer accordingly. If the exact arrangement still appears ambiguous across the retrieved frames, keep that uncertainty explicit instead of forcing a formula unsupported by the visual evidence."
+  },
+  "executed_tools": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "VIDEO",
+        "query": "static geometry diagram showing a large circle with four smaller circles inside and orange shaded crescent regions, with the problem text visible",
+        "num_frames": 3
+      },
+      "purpose": "Retrieve the key problem frame(s) containing the full diagram and on-screen prompt.",
+      "depends_on": [],
+      "output": "The tool results for frame_retriever({\"video_path\": \"VIDEO\", \"query\": \"static geometry diagram showing a large circle with four smaller circles inside and orange shaded crescent regions, with the problem text visible\", \"num_frames\": 3}) are:\n{\"mode\": \"query\", \"frames\": [{\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/37914ea5-a41c-4810-853d-43a7fed8426e/frame_61.00.png\", \"timestamp\": 61.0, \"relevance_score\": 0.6583316326141357}, {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/37914ea5-a41c-4810-853d-43a7fed8426e/frame_49.50.png\", \"timestamp\": 49.5, \"relevance_score\": 0.6580085158348083}, {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/37914ea5-a41c-4810-853d-43a7fed8426e/frame_62.00.png\", \"timestamp\": 62.0, \"relevance_score\": 0.6579160094261169}]}"
+    },
+    {
+      "step": 2,
+      "tool": "ocr",
+      "arguments": {
+        "frame_path": [
+          {
+            "frame_path": "/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/37914ea5-a41c-4810-853d-43a7fed8426e/frame_49.50.png",
+            "timestamp": 49.5
+          },
+          {
+            "frame_path": "/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/37914ea5-a41c-4810-853d-43a7fed8426e/frame_61.00.png",
+            "timestamp": 61.0
+          },
+          {
+            "frame_path": "/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/37914ea5-a41c-4810-853d-43a7fed8426e/frame_62.00.png",
+            "timestamp": 62.0
+          }
+        ],
+        "timestamp": null
+      },
+      "purpose": "Read the on-screen problem text and confirm the numerical given, especially the large circle diameter and any other labels.",
+      "depends_on": [
+        1
+      ],
+      "output": "The tool results for ocr({\"frame_path\": [{\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/37914ea5-a41c-4810-853d-43a7fed8426e/frame_49.50.png\", \"timestamp\": 49.5}, {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/37914ea5-a41c-4810-853d-43a7fed8426e/frame_61.00.png\", \"timestamp\": 61.0}, {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/37914ea5-a41c-4810-853d-43a7fed8426e/frame_62.00.png\", \"timestamp\": 62.0}], \"timestamp\": null}) are:\n{\"source\": [\"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/37914ea5-a41c-4810-853d-43a7fed8426e/frame_49.50.png\", \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/37914ea5-a41c-4810-853d-43a7fed8426e/frame_61.00.png\", \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/37914ea5-a41c-4810-853d-43a7fed8426e/frame_62.00.png\"], \"detections\": [{\"text\": \"What is the area of the shaded region?\", \"bbox\": [200, 31, 798, 117], \"confidence\": 0.99, \"text_type\": \"printed\"}, {\"text\": \"The large circle's diameter is 84.\", \"bbox\": [300, 131, 698, 175], \"confidence\": 0.99, \"text_type\": \"printed\"}, {\"text\": \"Mind Your Decisions\", \"bbox\": [55, 883, 115, 983], \"confidence\": 0.99, \"text_type\": \"printed\"}, {\"text\": \"What is the area of the shaded region?\", \"bbox\": [200, 31, 798, 117], \"confidence\": 0.99, \"text_type\": \"printed\"}, {\"text\": \"The large circle's diameter is 84.\", \"bbox\": [298, 131, 698, 175], \"confidence\": 0.99, \"text_type\": \"printed\"}, {\"text\": \"Mind Your Decisions\", \"bbox\": [53, 887, 115, 984], \"confidence\": 0.99, \"text_type\": \"printed\"}, {\"text\": \"What is the area of the shaded region?\", \"bbox\": [200, 31, 798, 117], \"confidence\": 0.99, \"text_type\": \"printed\"}, {\"text\": \"The large circle's diameter is 84.\", \"bbox\": [298, 131, 698, 175], \"confidence\": 0.99, \"text_type\": \"printed\"}, {\"text\": \"Mind Your Decisions\", \"bbox\": [53, 883, 115, 983], \"confidence\": 0.99, \"text_type\": \"printed\"}], \"full_text\": \"What is the area of the shaded region?\\nThe large circle's diameter is 84.\\nMind Your Decisions\\nWhat is the area of the shaded region?\\nThe large circle's diameter is 84.\\nMind Your Decisions\\nWhat is the area of the shaded region?\\nThe large circle's diameter is 84.\\nMind Your Decisions\", \"ocr_backend\": \"vlm\"}"
+    },
+    {
+      "step": 3,
+      "tool": "dense_captioner",
+      "arguments": {
+        "video_path": "VIDEO",
+        "start_time": null,
+        "end_time": null,
+        "granularity": "frame"
+      },
+      "purpose": "Obtain a precise visual description of the static configuration so the refiner can identify the circle arrangement and which regions are shaded.",
+      "depends_on": [],
+      "output": "The tool results for dense_captioner({\"video_path\": \"VIDEO\", \"start_time\": null, \"end_time\": null, \"granularity\": \"frame\"}) are:\n{\"video_duration\": 64.0, \"captioned_range\": {\"start\": 0.0, \"end\": 64.0}, \"captions\": [{\"start\": 0.0, \"end\": 0.0, \"visual\": \"A plain white background with a small logo in the bottom-left corner. The logo features a blue cartoon character wearing glasses and a blue shirt, with the text 'Mind Your Decisions' written next to it.\", \"audio\": \"none\", \"on_screen_text\": \"Mind Your Decisions\", \"actions\": [], \"objects\": [\"logo\", \"text\"]}, {\"start\": 0.0, \"end\": 0.0, \"visual\": \"A plain white background with a small logo in the bottom-left corner. The logo features a blue cartoon character wearing glasses and a blue shirt, with the text 'Mind Your Decisions' written next to it.\", \"audio\": \"none\", \"on_screen_text\": \"Mind Your Decisions\", \"actions\": [], \"objects\": [\"logo\", \"text\"]}, {\"start\": 0.0, \"end\": 0.0, \"visual\": \"A plain white background with a small logo in the bottom-left corner. The logo features a blue cartoon character wearing glasses and a blue shirt, with the text 'Mind Your Decisions' written next to it.\", \"audio\": \"none\", \"on_screen_text\": \"Mind Your Decisions\", \"actions\": [], \"objects\": [\"logo\", \"text\"]}, {\"start\": 0.0, \"end\": 0.0, \"visual\": \"A plain white background with a small logo in the bottom-left corner. The logo features a blue cartoon character wearing glasses and a blue shirt, with the text 'Mind Your Decisions' written next to it.\", \"audio\": \"none\", \"on_screen_text\": \"Mind Your Decisions\", \"actions\": [], \"objects\": [\"logo\", \"text\"]}, {\"start\": 0.0, \"end\": 0.0, \"visual\": \"A plain white background with a small logo in\"}]}"
+    }
+  ],
+  "refiner_raw": "{\n  \"refined_trace\": [\n    \"frame_retriever returns the main problem image at 61.0s as the strongest candidate (frame_61.00.png, relevance_score 0.6583), with similar matches at 49.5s and 62.0s; OCR on these same frames reads \\\"What is the area of the shaded region?\\\" and \\\"The large circle's diameter is 84.\\\" (avg detection confidence 0.9900). So the large circle has radius 42.\",\n    \"Using the retrieved problem frame as the anchor, the printed diagram is the standard configuration described in the planner: one large circle containing four equal smaller circles arranged in a 2-by-2 cluster, with the orange shaded parts being the regions inside the large circle but outside the four small circles.\",\n    \"If four equal circles fit across the large circle in a 2-by-2 arrangement, then two small-circle diameters span the large-circle diameter. With large diameter 84 from OCR, each small diameter is 42, so each small radius is 21.\",\n    \"The shaded area is therefore the area of the large circle minus the areas of the 4 small circles: π(42^2) - 4·π(21^2) = 1764π - 1764π/1? More directly, 4·21^2 = 1764, so the difference is (1764 - 1764)π = 0; that contradiction shows the 2-by-2 diameter-filling interpretation is not the intended geometry.\",\n    \"For the usual four-circle inscribed arrangement in this puzzle, the four equal inner circles each have radius half the large radius, 21, and together contribute area 4π(21^2) = 1764π, while the large circle contributes π(42^2) = 1764π; this again collapses to 0, so the exact circle placement needed to derive the shaded crescents is not actually grounded by the available tool outputs.\",\n    \"Because the tool evidence only grounds the text \\\"diameter is 84\\\" and does not provide a reliable frame-level geometric description of the circle contacts or the exact shaded decomposition, the shaded area cannot be computed supportably from the current evidence alone.\"\n  ],\n  \"refined_answer\": \"\",\n  \"answer_changed\": false,\n  \"changes_made\": [\n    {\n      \"operation\": \"INSERT_STEP\",\n      \"step_index\": null,\n      \"original\": \"\",\n      \"replacement\": \"frame_retriever returns the main problem image at 61.0s as the strongest candidate (frame_61.00.png, relevance_score 0.6583), with similar matches at 49.5s and 62.0s; OCR on these same frames reads \\\"What is the area of the shaded region?\\\" and \\\"The large circle's diameter is 84.\\\" (avg detection confidence 0.9900). So the large circle has radius 42.\",\n      \"evidence_source\": \"TOOL_OUTPUTS Step 1 frame_retriever on frames 61.0s/49.5s/62.0s and Step 2 ocr on those frames\"\n    },\n    {\n      \"operation\": \"INSERT_STEP\",\n      \"step_index\": null,\n      \"original\": \"\",\n      \"replacement\": \"Using the retrieved problem frame as the anchor, the printed diagram is the standard configuration described in the planner: one large circle containing four equal smaller circles arranged in a 2-by-2 cluster, with the orange shaded parts being the regions inside the large circle but outside the four small circles.\",\n      \"evidence_source\": \"TOOL_OUTPUTS Step 1 frame_retriever problem-frame localization; REFNEMENT_INSTRUCTIONS description of the intended subgoals\"\n    },\n    {\n      \"operation\": \"INSERT_STEP\",\n      \"step_index\": null,\n      \"original\": \"\",\n      \"replacement\": \"If four equal circles fit across the large circle in a 2-by-2 arrangement, then two small-circle diameters span the large-circle diameter. With large diameter 84 from OCR, each small diameter is 42, so each small radius is 21.\",\n      \"evidence_source\": \"TOOL_OUTPUTS Step 2 ocr for diameter 84; arithmetic from that given\"\n    },\n    {\n      \"operation\": \"INSERT_STEP\",\n      \"step_index\": null,\n      \"original\": \"\",\n      \"replacement\": \"The shaded area is therefore the area of the large circle minus the areas of the 4 small circles: π(42^2) - 4·π(21^2) = 1764π - 1764π/1? More directly, 4·21^2 = 1764, so the difference is (1764 - 1764)π = 0; that contradiction shows the 2-by-2 diameter-filling interpretation is not the intended geometry.\",\n      \"evidence_source\": \"Arithmetic based on the OCR-grounded diameter, exposing inconsistency from the unsupported geometric assumption\"\n    },\n    {\n      \"operation\": \"INSERT_STEP\",\n      \"step_index\": null,\n      \"original\": \"\",\n      \"replacement\": \"For the usual four-circle inscribed arrangement in this puzzle, the four equal inner circles each have radius half the large radius, 21, and together contribute area 4π(21^2) = 1764π, while the large circle contributes π(42^2) = 1764π; this again collapses to 0, so the exact circle placement needed to derive the shaded crescents is not actually grounded by the available tool outputs.\",\n      \"evidence_source\": \"Arithmetic check against the only grounded numeric given from TOOL_OUTPUTS Step 2\"\n    },\n    {\n      \"operation\": \"INSERT_STEP\",\n      \"step_index\": null,\n      \"original\": \"\",\n      \"replacement\": \"Because the tool evidence only grounds the text \\\"diameter is 84\\\" and does not provide a reliable frame-level geometric description of the circle contacts or the exact shaded decomposition, the shaded area cannot be computed supportably from the current evidence alone.\",\n      \"evidence_source\": \"TOOL_OUTPUTS Step 2 ocr and Step 3 dense_captioner, which lacks usable geometry detail\"\n    }\n  ],\n  \"unresolved_issues\": [\n    \"No tool output provides a reliable visual grounding of the exact circle arrangement, tangencies, or which specific crescent regions are shaded.\",\n    \"The dense_captioner output is truncated and does not describe the geometry frame containing the circles, so it cannot support the required decomposition.\",\n    \"Without a grounded geometric layout, no answer option can be selected supportably from the current evidence.\"\n  ]\n}",
+  "refiner_output": {
+    "refined_trace": [
+      "frame_retriever returns the main problem image at 61.0s as the strongest candidate (frame_61.00.png, relevance_score 0.6583), with similar matches at 49.5s and 62.0s; OCR on these same frames reads \"What is the area of the shaded region?\" and \"The large circle's diameter is 84.\" (avg detection confidence 0.9900). So the large circle has radius 42.",
+      "Using the retrieved problem frame as the anchor, the printed diagram is the standard configuration described in the planner: one large circle containing four equal smaller circles arranged in a 2-by-2 cluster, with the orange shaded parts being the regions inside the large circle but outside the four small circles.",
+      "If four equal circles fit across the large circle in a 2-by-2 arrangement, then two small-circle diameters span the large-circle diameter. With large diameter 84 from OCR, each small diameter is 42, so each small radius is 21.",
+      "The shaded area is therefore the area of the large circle minus the areas of the 4 small circles: π(42^2) - 4·π(21^2) = 1764π - 1764π/1? More directly, 4·21^2 = 1764, so the difference is (1764 - 1764)π = 0; that contradiction shows the 2-by-2 diameter-filling interpretation is not the intended geometry.",
+      "For the usual four-circle inscribed arrangement in this puzzle, the four equal inner circles each have radius half the large radius, 21, and together contribute area 4π(21^2) = 1764π, while the large circle contributes π(42^2) = 1764π; this again collapses to 0, so the exact circle placement needed to derive the shaded crescents is not actually grounded by the available tool outputs.",
+      "Because the tool evidence only grounds the text \"diameter is 84\" and does not provide a reliable frame-level geometric description of the circle contacts or the exact shaded decomposition, the shaded area cannot be computed supportably from the current evidence alone."
+    ],
+    "refined_answer": null,
+    "answer_changed": false,
+    "changes_made": [
+      {
+        "operation": "INSERT_STEP",
+        "step_index": null,
+        "original": "",
+        "replacement": "frame_retriever returns the main problem image at 61.0s as the strongest candidate (frame_61.00.png, relevance_score 0.6583), with similar matches at 49.5s and 62.0s; OCR on these same frames reads \"What is the area of the shaded region?\" and \"The large circle's diameter is 84.\" (avg detection confidence 0.9900). So the large circle has radius 42.",
+        "evidence_source": "TOOL_OUTPUTS Step 1 frame_retriever on frames 61.0s/49.5s/62.0s and Step 2 ocr on those frames"
+      },
+      {
+        "operation": "INSERT_STEP",
+        "step_index": null,
+        "original": "",
+        "replacement": "Using the retrieved problem frame as the anchor, the printed diagram is the standard configuration described in the planner: one large circle containing four equal smaller circles arranged in a 2-by-2 cluster, with the orange shaded parts being the regions inside the large circle but outside the four small circles.",
+        "evidence_source": "TOOL_OUTPUTS Step 1 frame_retriever problem-frame localization; REFNEMENT_INSTRUCTIONS description of the intended subgoals"
+      },
+      {
+        "operation": "INSERT_STEP",
+        "step_index": null,
+        "original": "",
+        "replacement": "If four equal circles fit across the large circle in a 2-by-2 arrangement, then two small-circle diameters span the large-circle diameter. With large diameter 84 from OCR, each small diameter is 42, so each small radius is 21.",
+        "evidence_source": "TOOL_OUTPUTS Step 2 ocr for diameter 84; arithmetic from that given"
+      },
+      {
+        "operation": "INSERT_STEP",
+        "step_index": null,
+        "original": "",
+        "replacement": "The shaded area is therefore the area of the large circle minus the areas of the 4 small circles: π(42^2) - 4·π(21^2) = 1764π - 1764π/1? More directly, 4·21^2 = 1764, so the difference is (1764 - 1764)π = 0; that contradiction shows the 2-by-2 diameter-filling interpretation is not the intended geometry.",
+        "evidence_source": "Arithmetic based on the OCR-grounded diameter, exposing inconsistency from the unsupported geometric assumption"
+      },
+      {
+        "operation": "INSERT_STEP",
+        "step_index": null,
+        "original": "",
+        "replacement": "For the usual four-circle inscribed arrangement in this puzzle, the four equal inner circles each have radius half the large radius, 21, and together contribute area 4π(21^2) = 1764π, while the large circle contributes π(42^2) = 1764π; this again collapses to 0, so the exact circle placement needed to derive the shaded crescents is not actually grounded by the available tool outputs.",
+        "evidence_source": "Arithmetic check against the only grounded numeric given from TOOL_OUTPUTS Step 2"
+      },
+      {
+        "operation": "INSERT_STEP",
+        "step_index": null,
+        "original": "",
+        "replacement": "Because the tool evidence only grounds the text \"diameter is 84\" and does not provide a reliable frame-level geometric description of the circle contacts or the exact shaded decomposition, the shaded area cannot be computed supportably from the current evidence alone.",
+        "evidence_source": "TOOL_OUTPUTS Step 2 ocr and Step 3 dense_captioner, which lacks usable geometry detail"
+      }
+    ],
+    "unresolved_issues": [
+      "No tool output provides a reliable visual grounding of the exact circle arrangement, tangencies, or which specific crescent regions are shaded.",
+      "The dense_captioner output is truncated and does not describe the geometry frame containing the circles, so it cannot support the required decomposition.",
+      "Without a grounded geometric layout, no answer option can be selected supportably from the current evidence."
+    ]
+  }
+}

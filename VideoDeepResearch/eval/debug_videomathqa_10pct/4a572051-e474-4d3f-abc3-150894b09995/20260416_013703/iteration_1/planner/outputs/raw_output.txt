@@ -1,0 +1,47 @@
+{
+  "strategy": "Use the already-grounded static problem moment and directly analyze the diagram structure rather than inferring it from generic circle-puzzle patterns. Retrieve a small bundle of the visible geometry frames, then use specialized visual grounding to identify the circles and a chart/diagram analyzer to describe the arrangement and shaded regions precisely enough for the refiner to compute the matching option.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "<VIDEO_PATH>",
+        "timestamps": [
+          49.5,
+          61.0,
+          62.0
+        ],
+        "query": null,
+        "num_frames": 3
+      },
+      "purpose": "Recover the exact candidate frames previously identified around the static problem image, so downstream tools can inspect the actual geometry instead of relying on unsupported interpretation.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "spatial_grounder",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null,
+        "query": "all circles in the geometry diagram, including the one large outer circle and the four smaller inner circles"
+      },
+      "purpose": "Ground the count, relative placement, and bounding boxes of the circles so the refiner can verify the true arrangement and tangencies from frame-level detections rather than from a guessed template.",
+      "depends_on": [
+        1
+      ]
+    },
+    {
+      "step": 3,
+      "tool": "chart_analyzer",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null,
+        "query": "geometry diagram interpretation: describe which regions are shaded, how the four small circles are arranged inside the large circle, and what tangencies or overlaps are visible"
+      },
+      "purpose": "Read the structured diagram as a visual figure, explicitly identifying the shaded components and the circle arrangement needed for the area decomposition.",
+      "depends_on": [
+        1
+      ]
+    }
+  ],
+  "refinement_instructions": "Replace the unsupported layout claim in trace step 2 with only what is directly supported by the new visual tools. Use step 2 frame-level detections to state the number of circles and their relative arrangement/positions; use step 3 as the authoritative source for which regions are shaded and how the circles meet. Preserve the already-supported OCR fact that the large circle’s diameter is 84, hence radius 42. Then recompute the shaded area from the grounded diagram structure, not from a generic remembered puzzle pattern. If step 3 shows the shaded region is the union of the four inner circles, use that exact decomposition; if it shows the shaded region is instead the outer crescents inside the large circle but outside the four small circles, use that decomposition. Cite the frame-level results, not only top-level summaries, and select the answer option that matches the verified computation. If the visual tools still leave a geometric relation ambiguous, the rewritten trace must state that specific ambiguity rather than inventing tangencies."}

@@ -263,8 +263,6 @@ demo = VideoQADemo(
 )
 ```
 
----
-
 ## Environment variables (reference)
 
 | Variable | Effect |

@@ -1,0 +1,237 @@
+{
+  "iteration": 1,
+  "verifier_raw": "{\n  \"verdict\": \"FAIL\",\n  \"answer_correct\": false,\n  \"trace_quality_scores\": {\n    \"logical_coherence\": 5,\n    \"completeness\": 3,\n    \"factual_correctness\": null,\n    \"reasoning_order\": 7\n  },\n  \"error_categories\": [\n    {\n      \"type\": \"INCOMPLETE_TRACE\",\n      \"step_index\": 4,\n      \"description\": \"The trace's final computation depends on a bucket count for 'the bucket on top of the container reading SSL,' but the trace itself says OCR did not confirm any 'SSL' label in the sampled frames. The cited counter outputs therefore ground at most a count for a sampled bucket/frame, not for the question's specifically identified SSL-labeled container.\",\n      \"severity\": \"HIGH\",\n      \"evidence\": null\n    },\n    {\n      \"type\": \"INFERENCE_ERROR\",\n      \"step_index\": 5,\n      \"description\": \"The trace moves from partially grounded premises to a specific answer by treating the 0 count from frame_302.00.png as if it were the count for the required SSL-labeled bucket, despite explicitly acknowledging that this entity was not confirmed. The subtraction 2 - 0 is arithmetically valid, but its applicability to the asked target is not justified by the trace text.\",\n      \"severity\": \"HIGH\",\n      \"evidence\": null\n    }\n  ],\n  \"evidence_gaps\": [\n    {\n      \"step_index\": 2,\n      \"summary\": \"The ice-packing interval is localized and sampled, but the answer-critical target entity—the bucket on top of the container reading 'SSL'—is not actually grounded in the sampled frames.\",\n      \"scope\": \"temporal localization / target entity identification\"\n    },\n    {\n      \"step_index\": 4,\n      \"summary\": \"Counter outputs provide counts for sampled frames, but whether those frames contain the specific SSL-labeled container remains unresolved; thus the required bucket count is still missing.\",\n      \"scope\": \"counting / OCR label confirmation\"\n    }\n  ],\n  \"confidence\": 0.93,\n  \"summary\": \"From text alone, the trace clearly reaches option E via 2 - 0, but it does not justify that the counted bucket is the one on top of a container reading 'SSL.' The ASR-derived weight is grounded, while the visual target for the bucket count remains insufficiently identified.\"\n}",
+  "verifier_output": {
+    "verdict": "FAIL",
+    "answer_correct": false,
+    "trace_quality_scores": {
+      "perceptual_correctness": 0.0,
+      "temporal_accuracy": 0.0,
+      "logical_coherence": 5.0,
+      "completeness": 3.0
+    },
+    "error_categories": [
+      {
+        "type": "INCOMPLETE_TRACE",
+        "step_index": 4,
+        "description": "The trace's final computation depends on a bucket count for 'the bucket on top of the container reading SSL,' but the trace itself says OCR did not confirm any 'SSL' label in the sampled frames. The cited counter outputs therefore ground at most a count for a sampled bucket/frame, not for the question's specifically identified SSL-labeled container.",
+        "severity": "HIGH",
+        "suggested_tools": [],
+        "evidence": null
+      },
+      {
+        "type": "INFERENCE_ERROR",
+        "step_index": 5,
+        "description": "The trace moves from partially grounded premises to a specific answer by treating the 0 count from frame_302.00.png as if it were the count for the required SSL-labeled bucket, despite explicitly acknowledging that this entity was not confirmed. The subtraction 2 - 0 is arithmetically valid, but its applicability to the asked target is not justified by the trace text.",
+        "severity": "HIGH",
+        "suggested_tools": [],
+        "evidence": null
+      }
+    ],
+    "confidence": 0.93,
+    "summary": "From text alone, the trace clearly reaches option E via 2 - 0, but it does not justify that the counted bucket is the one on top of a container reading 'SSL.' The ASR-derived weight is grounded, while the visual target for the bucket count remains insufficiently identified."
+  },
+  "planner_output": {
+    "strategy": "Re-localize the specific visual target instead of reusing the previously sampled ice-packing frames. First find frames during the ice-packing phase that actually show a container with the text 'SSL' and the bucket on top, then count fish in that validated frame bundle.",
+    "tool_calls": [
+      {
+        "step": 1,
+        "tool": "frame_retriever",
+        "arguments": {
+          "video_path": "video",
+          "query": "ice packing area showing a bucket placed on top of a large container or crate with visible printed text or label on the container side",
+          "timestamps": null,
+          "num_frames": 5
+        },
+        "purpose": "Retrieve several candidate frames likely to show the bucket-on-container setup during the ice-packing process, without assuming the earlier 302s/305s frames were the correct SSL-labeled occurrence.",
+        "depends_on": []
+      },
+      {
+        "step": 2,
+        "tool": "ocr",
+        "arguments": {
+          "frame_path": "<STEP_1:frames>",
+          "timestamp": null
+        },
+        "purpose": "Check which retrieved candidate frame(s), if any, actually display the text 'SSL' on the container so the target bucket can be correctly identified.",
+        "depends_on": [
+          1
+        ]
+      },
+      {
+        "step": 3,
+        "tool": "counter",
+        "arguments": {
+          "frame_path": "<STEP_1:frames>",
+          "timestamp": null,
+          "query": "fish visible inside the bucket placed on top of the container labeled SSL",
+          "exemplar_paths": null
+        },
+        "purpose": "Count the fish in the bucket for the same candidate frame bundle, so the refiner can use the frame-level count only from the frame(s) where OCR confirms the container label 'SSL'.",
+        "depends_on": [
+          1,
+          2
+        ]
+      }
+    ],
+    "refinement_instructions": "Keep the ASR-grounded gift weight premise of 2 kilograms from the earlier trace; that part is already supported. Replace the old visual counting claim entirely unless Step 2 OCR confirms that one of the Step 1 retrieved frames actually shows 'SSL' on the container. Use OCR as the authority for identifying the correct frame(s), then use the frame-level result from Step 3 only for those OCR-confirmed frame(s). Do not use a top-level counter summary pooled across mixed frames. If no retrieved frame is OCR-confirmed as showing 'SSL', the refiner must state that the required bucket was not visually grounded and should not preserve the prior 0-count inference or the final answer derived from it."
+  },
+  "executed_tools": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "video",
+        "query": "ice packing area showing a bucket placed on top of a large container or crate with visible printed text or label on the container side",
+        "num_frames": 5
+      },
+      "purpose": "Retrieve several candidate frames likely to show the bucket-on-container setup during the ice-packing process, without assuming the earlier 302s/305s frames were the correct SSL-labeled occurrence.",
+      "depends_on": [],
+      "output": "The tool results for frame_retriever({\"video_path\": \"video\", \"query\": \"ice packing area showing a bucket placed on top of a large container or crate with visible printed text or label on the container side\", \"num_frames\": 5}) are:\n{\"mode\": \"query\", \"frames\": [{\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/5Jrv1h4AztM/frame_304.00.png\", \"timestamp\": 304.0, \"relevance_score\": 0.5410784482955933}, {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/5Jrv1h4AztM/frame_314.00.png\", \"timestamp\": 314.0, \"relevance_score\": 0.5366235375404358}, {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/5Jrv1h4AztM/frame_310.00.png\", \"timestamp\": 310.0, \"relevance_score\": 0.5202696919441223}, {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/5Jrv1h4AztM/frame_298.00.png\", \"timestamp\": 298.0, \"relevance_score\": 0.508739709854126}, {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/5Jrv1h4AztM/frame_311.00.png\", \"timestamp\": 311.0, \"relevance_score\": 0.5037155747413635}]}"
+    },
+    {
+      "step": 2,
+      "tool": "ocr",
+      "arguments": {
+        "frame_path": [
+          {
+            "frame_path": "/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/5Jrv1h4AztM/frame_298.00.png",
+            "timestamp": 298.0
+          },
+          {
+            "frame_path": "/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/5Jrv1h4AztM/frame_304.00.png",
+            "timestamp": 304.0
+          },
+          {
+            "frame_path": "/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/5Jrv1h4AztM/frame_310.00.png",
+            "timestamp": 310.0
+          },
+          {
+            "frame_path": "/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/5Jrv1h4AztM/frame_311.00.png",
+            "timestamp": 311.0
+          },
+          {
+            "frame_path": "/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/5Jrv1h4AztM/frame_314.00.png",
+            "timestamp": 314.0
+          }
+        ],
+        "timestamp": null
+      },
+      "purpose": "Check which retrieved candidate frame(s), if any, actually display the text 'SSL' on the container so the target bucket can be correctly identified.",
+      "depends_on": [
+        1
+      ],
+      "output": "The tool results for ocr({\"frame_path\": [{\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/5Jrv1h4AztM/frame_298.00.png\", \"timestamp\": 298.0}, {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/5Jrv1h4AztM/frame_304.00.png\", \"timestamp\": 304.0}, {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/5Jrv1h4AztM/frame_310.00.png\", \"timestamp\": 310.0}, {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/5Jrv1h4AztM/frame_311.00.png\", \"timestamp\": 311.0}, {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/5Jrv1h4AztM/frame_314.00.png\", \"timestamp\": 314.0}], \"timestamp\": null}) are:\n{\"source\": [\"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/5Jrv1h4AztM/frame_298.00.png\", \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/5Jrv1h4AztM/frame_304.00.png\", \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/5Jrv1h4AztM/frame_310.00.png\", \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/5Jrv1h4AztM/frame_311.00.png\", \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/5Jrv1h4AztM/frame_314.00.png\"], \"detections\": [{\"text\": \"POLYETHYLENE\", \"bbox\": [747, 183, 847, 300], \"confidence\": 0.98, \"text_type\": \"printed\"}, {\"text\": \"TARES OF 100 KG\", \"bbox\": [758, 150, 860, 260], \"confidence\": 0.97, \"text_type\": \"printed\"}, {\"text\": \"NET WT. 100 KG\", \"bbox\": [770, 120, 870, 220], \"confidence\": 0.96, \"text_type\": \"printed\"}, {\"text\": \"WATERPROOF\", \"bbox\": [750, 100, 840, 180], \"confidence\": 0.95, \"text_type\": \"printed\"}, {\"text\": \"POLYETHYLENE\", \"bbox\": [854, 478, 995, 617], \"confidence\": 0.97, \"text_type\": \"printed\"}, {\"text\": \"MATERIAL\", \"bbox\": [878, 430, 970, 500], \"confidence\": 0.96, \"text_type\": \"printed\"}, {\"text\": \"MATERIAL\", \"bbox\": [878, 430, 970, 500], \"confidence\": 0.96, \"text_type\": \"printed\"}, {\"text\": \"MATERIAL\", \"bbox\": [878, 430, 970, 500], \"confidence\": 0.96, \"text_type\": \"printed\"}, {\"text\": \"MATERIAL\", \"bbox\": [878, 430, 970, 500], \"confidence\": 0.96, \"text_type\": \"printed\"}, {\"text\": \"MATERIAL\", \"bbox\": [878, 430, 970, 500], \"confidence\": 0.96, \"text_type\": \"printed\"}, {\"text\": \"MATERIAL\", \"bbox\": [878, 430, 970, 500], \"confidence\": 0.96, \"text_type\": \"printed\"}, {\"text\": \"MATERIAL\", \"bbox\": [878, 430, 970, 500], \"confidence\": 0.96, \"text_type\": \"printed\"}, {\"text\": \"MATERIAL\", \"bbox\": [878, 430, 970, 500], \"confidence\": 0.96, \"text_type\": \"printed\"}, {\"text\": \"M\"}, {\"text\": \"POLYCARBONATE\", \"bbox\": [857, 357, 957, 520], \"confidence\": 0.97, \"text_type\": \"printed\"}, {\"text\": \"BATCH NO. 100\", \"bbox\": [875, 400, 965, 550], \"confidence\": 0.96, \"text_type\": \"printed\"}, {\"text\": \"PRESSURE 100\", \"bbox\": [885, 440, 975, 590], \"confidence\": 0.95, \"text_type\": \"printed\"}, {\"text\": \"MFD. 100\", \"bbox\": [895, 480, 985, 630], \"confidence\": 0.94, \"text_type\": \"printed\"}, {\"text\": \"POLYESTER\", \"bbox\": [862, 370, 940, 500], \"confidence\": 0.98, \"text_type\": \"printed\"}, {\"text\": \"SOURCING\", \"bbox\": [875, 330, 940, 430], \"confidence\": 0.97, \"text_type\": \"printed\"}, {\"text\": \"FOR\", \"bbox\": [900, 300, 940, 350], \"confidence\": 0.96, \"text_type\": \"printed\"}, {\"text\": \"TASER\", \"bbox\": [900, 270, 940, 320], \"confidence\": 0.95, \"text_type\": \"printed\"}, {\"text\": \"WATER\", \"bbox\": [900, 240, 940, 290], \"confidence\": 0.94, \"text_type\": \"printed\"}, {\"text\": \"WATER\", \"bbox\": [900, 210, 940, 260], \"confidence\": 0.93, \"text_type\": \"printed\"}, {\"text\": \"WATER\", \"bbox\": [900, 180, 940, 230], \"confidence\": 0.92, \"text_type\": \"printed\"}, {\"text\": \"WATER\", \"bbox\": [900, 150, 940, 200], \"confidence\": 0.91, \"text_type\": \"printed\"}, {\"text\": \"WATER\", \"bbox\": [900, 120, 940, 170], \"confidence\": 0.9, \"text_type\": \"printed\"}, {\"text\": \"\"}], \"full_text\": \"POLYETHYLENE\\nTARES OF 100 KG\\nNET WT. 100 KG\\nWATERPROOF\\nPOLYCARBONATE\\nBATCH NO. 100\\nPRESSURE 100\\nMFD. 100\", \"ocr_backend\": \"vlm\"}"
+    },
+    {
+      "step": 3,
+      "tool": "counter",
+      "arguments": {
+        "frame_path": [
+          {
+            "frame_path": "/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/5Jrv1h4AztM/frame_298.00.png",
+            "timestamp": 298.0
+          },
+          {
+            "frame_path": "/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/5Jrv1h4AztM/frame_304.00.png",
+            "timestamp": 304.0
+          },
+          {
+            "frame_path": "/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/5Jrv1h4AztM/frame_310.00.png",
+            "timestamp": 310.0
+          },
+          {
+            "frame_path": "/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/5Jrv1h4AztM/frame_311.00.png",
+            "timestamp": 311.0
+          },
+          {
+            "frame_path": "/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/5Jrv1h4AztM/frame_314.00.png",
+            "timestamp": 314.0
+          }
+        ],
+        "timestamp": null,
+        "query": "fish visible inside the bucket placed on top of the container labeled SSL",
+        "exemplar_paths": null
+      },
+      "purpose": "Count the fish in the bucket for the same candidate frame bundle, so the refiner can use the frame-level count only from the frame(s) where OCR confirms the container label 'SSL'.",
+      "depends_on": [
+        1,
+        2
+      ],
+      "output": "The tool results for counter({\"frame_path\": [{\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/5Jrv1h4AztM/frame_298.00.png\", \"timestamp\": 298.0}, {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/5Jrv1h4AztM/frame_304.00.png\", \"timestamp\": 304.0}, {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/5Jrv1h4AztM/frame_310.00.png\", \"timestamp\": 310.0}, {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/5Jrv1h4AztM/frame_311.00.png\", \"timestamp\": 311.0}, {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/5Jrv1h4AztM/frame_314.00.png\", \"timestamp\": 314.0}], \"timestamp\": null, \"query\": \"fish visible inside the bucket placed on top of the container labeled SSL\", \"exemplar_paths\": null}) are:\n{\"query\": \"fish visible inside the bucket placed on top of the container labeled SSL\", \"frames\": [{\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/5Jrv1h4AztM/frame_298.00.png\", \"timestamp\": 298.0, \"query\": \"fish visible inside the bucket placed on top of the container labeled SSL\", \"count\": 0, \"confidence\": 1.0, \"detections\": [], \"notes\": \"No fish are visible inside the bucket. The bucket contains ice or a similar substance, and there is no container labeled 'SSL' visible in the frame.\"}, {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/5Jrv1h4AztM/frame_304.00.png\", \"timestamp\": 304.0, \"query\": \"fish visible inside the bucket placed on top of the container labeled SSL\", \"count\": 0, \"confidence\": 1.0, \"detections\": [], \"notes\": \"There is no bucket placed on top of a container labeled SSL in the frame. The yellow container holds ice, and the red basket to the left contains fish, but neither is inside a bucket labeled SSL.\"}, {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/5Jrv1h4AztM/frame_310.00.png\", \"timestamp\": 310.0, \"query\": \"fish visible inside the bucket placed on top of the container labeled SSL\", \"count\": 0, \"confidence\": 1.0, \"detections\": [], \"notes\": \"There is no bucket placed on top of a container labeled SSL in the frame. The yellow container has ice and a black bag inside, and there is an orange basket with fish to the left, but no fish are visible inside a bucket on a labeled container.\"}, {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/5Jrv1h4AztM/frame_311.00.png\", \"timestamp\": 311.0, \"query\": \"fish visible inside the bucket placed on top of the container labeled SSL\", \"count\": 0, \"confidence\": 0.99, \"detections\": [], \"notes\": \"There is no bucket placed on top of a container labeled SSL in the frame. The yellow container has a black plastic bag with ice inside, and there are fish in an orange basket to the left, but not in a bucket on a labeled container.\"}, {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/5Jrv1h4AztM/frame_314.00.png\", \"timestamp\": 314.0, \"query\": \"fish visible inside the bucket placed on top of the container labeled SSL\", \"count\": 0, \"confidence\": 0.99, \"detections\": [], \"notes\": \"There is no bucket placed on top of a container labeled SSL in the frame. The yellow container has a black plastic bag with ice inside, and a person is handling a fish, but no fish are visible inside a bucket on top of a labeled container.\"}], \"best_frame\": {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/5Jrv1h4AztM/frame_298.00.png\", \"timestamp\": 298.0, \"query\": \"fish visible inside the bucket placed on top of the container labeled SSL\", \"count\": 0, \"confidence\": 1.0, \"detections\": [], \"notes\": \"No fish are visible inside the bucket. The bucket contains ice or a similar substance, and there is no container labeled 'SSL' visible in the frame.\"}, \"count\": 0, \"confidence\": 1.0, \"detections\": [], \"notes\": \"No fish are visible inside the bucket. The bucket contains ice or a similar substance, and there is no container labeled 'SSL' visible in the frame.\", \"selection_reason\": \"Top-level fields mirror one high-salience candidate frame; inspect frames[] for all frame-level counting results.\"}"
+    }
+  ],
+  "refiner_output": {
+    "refined_trace": [
+      "1. ASR segment 354.317s-359.241s states, \"At the end, they gifted us few fishes, which was around 2 kilograms.\" This grounds the narrator's received gift weight value as 2.",
+      "2. For the ice-packing process, Step 1 frame_retriever returned candidate frames at 298.0s, 304.0s, 310.0s, 311.0s, and 314.0s for the query about a bucket placed on top of a large container during packing.",
+      "3. Step 2 OCR on frame_298.00.png, frame_304.00.png, frame_310.00.png, frame_311.00.png, and frame_314.00.png does not detect the text \"SSL.\" Instead, OCR reports printed text such as \"POLYETHYLENE,\" \"TARES OF 100 KG,\" \"NET WT. 100 KG,\" and \"WATERPROOF,\" so these retrieved frames do not visually confirm a container reading \"SSL.\"",
+      "4. Because OCR did not confirm any \"SSL\"-labeled container in the retrieved ice-packing frames, the Step 3 counter outputs for those frames cannot be used as counts for the question's specific target bucket. The frame-level counter notes at 298.0s, 304.0s, 310.0s, 311.0s, and 314.0s each report count 0, but they also explicitly say no container labeled \"SSL\" is visible in those frames.",
+      "5. Therefore, only one answer-critical premise is grounded: the ASR-derived value 2. The required second premise—the fish count in the bucket on top of the container reading \"SSL\" during ice packing—remains ungrounded because Step 2 OCR found no frame in the retrieved bundle with the label \"SSL.\"",
+      "6. Since the specific SSL-labeled bucket was not visually grounded, the prior subtraction 2 - 0 is not justified, and the multiple-choice answer cannot be reliably determined from the provided tool evidence."
+    ],
+    "refined_answer": "E. 2",
+    "answer_changed": false,
+    "changes_made": [
+      {
+        "operation": "PATCH_CLAIM",
+        "step_index": 4,
+        "original": "Counter results must therefore be treated with that limitation. At 302.0s, counter on frame_302.00.png for \"fish inside the bucket on top of the container labeled SSL\" reports count 0 with note \"There are no fish visible inside the bucket in the frame. The bucket contains a white, foamy or snowy substance, not fish.\" At 305.0s, counter on frame_305.00.png also reports count 0, but its note says there is no container labeled \"SSL\" visible in that frame.",
+        "replacement": "Because OCR did not confirm any \"SSL\"-labeled container in the retrieved ice-packing frames, the Step 3 counter outputs for those frames cannot be used as counts for the question's specific target bucket. The frame-level counter notes at 298.0s, 304.0s, 310.0s, 311.0s, and 314.0s each report count 0, but they also explicitly say no container labeled \"SSL\" is visible in those frames.",
+        "evidence_source": "TOOL_OUTPUTS Step 2 OCR on frames 298.0s/304.0s/310.0s/311.0s/314.0s and Step 3 counter frames[] for the same timestamps"
+      },
+      {
+        "operation": "PATCH_INFERENCE",
+        "step_index": 5,
+        "original": "Using the only grounded numeric premises available from the tools: the gift weight value is 2 from ASR, and the sampled ice-packing bucket count is 0 in frame_302.00.png from counter, though OCR did not confirm the \"SSL\" label on that frame. Computing from those reported values gives 2 - 0 = 2 fish needed to match the numerical value.",
+        "replacement": "Therefore, only one answer-critical premise is grounded: the ASR-derived value 2. The required second premise—the fish count in the bucket on top of the container reading \"SSL\" during ice packing—remains ungrounded because Step 2 OCR found no frame in the retrieved bundle with the label \"SSL.\"",
+        "evidence_source": "TOOL_OUTPUTS Step 2 OCR and Step 3 counter, plus ASR premise preserved from ORIGINAL_TRACE step 1"
+      },
+      {
+        "operation": "PATCH_ANSWER",
+        "step_index": 6,
+        "original": "Because the computed difference is 2, the matching option is E, while noting that the visual identification of the specific \"SSL\" container remains unconfirmed by OCR in the sampled frames.",
+        "replacement": "Since the specific SSL-labeled bucket was not visually grounded, the prior subtraction 2 - 0 is not justified, and the multiple-choice answer cannot be reliably determined from the provided tool evidence.",
+        "evidence_source": "TOOL_OUTPUTS Step 2 OCR on retrieved frames and Step 3 counter notes showing no SSL-labeled container is visible"
+      }
+    ],
+    "unresolved_issues": [
+      "No retrieved ice-packing frame in TOOL_OUTPUTS Step 1 was OCR-confirmed by Step 2 as showing a container labeled \"SSL,\" so the fish count for the specifically asked bucket remains unresolved.",
+      "Because the target SSL-labeled bucket was not grounded, there is insufficient tool evidence to correct the original multiple-choice answer to a supported alternative."
+    ]
+  },
+  "iteration_summary": {
+    "iteration": 1,
+    "verifier_verdict": "FAIL",
+    "tools_executed": [
+      {
+        "tool": "frame_retriever",
+        "purpose": "Retrieve several candidate frames likely to show the bucket-on-container setup during the ice-packing process, without assuming the earlier 302s/305s frames were the correct SSL-labeled occurrence.",
+        "confidence": 0.5411,
+        "resolved": false
+      },
+      {
+        "tool": "ocr",
+        "purpose": "Check which retrieved candidate frame(s), if any, actually display the text 'SSL' on the container so the target bucket can be correctly identified.",
+        "confidence": 0.8854,
+        "resolved": true
+      },
+      {
+        "tool": "counter",
+        "purpose": "Count the fish in the bucket for the same candidate frame bundle, so the refiner can use the frame-level count only from the frame(s) where OCR confirms the container label 'SSL'.",
+        "confidence": 1.0,
+        "resolved": true
+      }
+    ],
+    "errors_fixed": [
+      "PATCH_CLAIM step 4",
+      "PATCH_INFERENCE step 5",
+      "PATCH_ANSWER step 6"
+    ],
+    "errors_remaining": [
+      "No retrieved ice-packing frame in TOOL_OUTPUTS Step 1 was OCR-confirmed by Step 2 as showing a container labeled \"SSL,\" so the fish count for the specifically asked bucket remains unresolved.",
+      "Because the target SSL-labeled bucket was not grounded, there is insufficient tool evidence to correct the original multiple-choice answer to a supported alternative."
+    ],
+    "answer_changed": false
+  }
+}

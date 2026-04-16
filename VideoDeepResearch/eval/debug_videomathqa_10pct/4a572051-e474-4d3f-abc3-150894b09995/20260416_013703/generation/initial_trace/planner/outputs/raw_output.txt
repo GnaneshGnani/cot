@@ -1,0 +1,40 @@
+{
+  "strategy": "Ground the static geometry problem frame, then use OCR to read the givens and a spatial/visual description tool to verify which parts are shaded. This is sufficient to reconstruct the geometry and compute the shaded area, then map it to the closest option.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "VIDEO",
+        "query": "static geometry diagram showing a large circle with four smaller circles inside and orange shaded crescent regions, with the problem text visible",
+        "timestamps": null,
+        "num_frames": 3
+      },
+      "purpose": "Retrieve the key problem frame(s) containing the full diagram and on-screen prompt.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "ocr",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null
+      },
+      "purpose": "Read the on-screen problem text and confirm the numerical given, especially the large circle diameter and any other labels.",
+      "depends_on": [1]
+    },
+    {
+      "step": 3,
+      "tool": "dense_captioner",
+      "arguments": {
+        "video_path": "VIDEO",
+        "start_time": null,
+        "end_time": null,
+        "granularity": "frame"
+      },
+      "purpose": "Obtain a precise visual description of the static configuration so the refiner can identify the circle arrangement and which regions are shaded.",
+      "depends_on": []
+    }
+  ],
+  "refinement_instructions": "Build the first trace from scratch. Use STEP 2 as authoritative for the printed givens (for example, the large circle diameter 84). Use STEP 1 frame timestamps and images as the anchor for the actual problem frame; if multiple frames are returned, cite the frame-level result(s) that clearly show the full diagram and prompt. Use STEP 3 only to describe the geometry configuration and shaded-vs-unshaded regions; do not invent labels that are not visible. The rewritten trace should explicitly state: (1) the large circle radius from the OCR-read diameter, (2) how the four equal inner circles are arranged inside the large circle, (3) what region is shaded, and (4) the geometric decomposition needed to compute shaded area. Then carry out the computation carefully and compare the numeric result against the options, updating the final answer accordingly. If the exact arrangement still appears ambiguous across the retrieved frames, keep that uncertainty explicit instead of forcing a formula unsupported by the visual evidence."
+}

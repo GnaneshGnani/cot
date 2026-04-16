@@ -1,0 +1,35 @@
+{
+  "strategy": "Reuse the already localized bottle scene, but replace the coarse outer-body measurement with evidence from the bottle's actual interior cavity and the liquid surface position. One focused frame retrieval plus a sharper spatial grounding query should be enough to estimate the usable interior fill fraction and map it to the nearest option.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "video",
+        "query": null,
+        "timestamps": [
+          1.2,
+          1.8,
+          2.4
+        ],
+        "num_frames": 3
+      },
+      "purpose": "Sample clear frames after the bottle appears so the next step can inspect the bottle in a stable, centered state rather than relying on the earlier query-ranked frame alone.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "spatial_grounder",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null,
+        "query": "the bottle's inner cavity bounded by the white outline where liquid can be contained, and the blue liquid region up to its top surface"
+      },
+      "purpose": "Ground the answer-critical interior container region and the liquid region within the same frame bundle, so the refiner can compare liquid height to usable interior height instead of to the whole visible bottle body.",
+      "depends_on": [
+        1
+      ]
+    }
+  ],
+  "refinement_instructions": "Replace the old step-2/3 measurement basis entirely: do not use the previous bottle-body bbox as the denominator. Inspect the per-frame results from step 2 and choose the frame where both the bottle interior cavity and blue liquid region are most cleanly grounded. Compute the fill fraction from the liquid height relative to the grounded interior cavity height, not the full bottle silhouette or cap. Preserve the earlier supported fact that the relevant bottle illustration appears after about 1.0s, but treat the old 0.52-0.57 estimate as superseded because it measured the wrong region. Update the final answer only if the new interior-based ratio clearly aligns with one option; if it remains only approximate, state that explicitly and explain the closest-option mapping from the interior-based estimate rather than from the outer-box estimate."
+}

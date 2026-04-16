@@ -45,6 +45,90 @@ class RefinerAgentsMixin:
         parsed = self._extract_json_payload_with_schema(tail, model_cls=Dict[str, Any])
         return parsed if isinstance(parsed, dict) else None
 
+    def _normalize_tool_text(self, value) -> str:
+        return " ".join(str(value or "").strip().lower().split())
+
+    def _tool_relationship_key(self, rel) -> tuple[str, str, str]:
+        if not isinstance(rel, dict):
+            return ("", "", "")
+        return (
+            self._normalize_tool_text(rel.get("from")),
+            self._normalize_tool_text(rel.get("to")),
+            self._normalize_tool_text(rel.get("label")),
+        )
+
+    def _sanitize_tool_output_for_refiner(self, tool_name: str, output_str: str) -> str:
+        if str(tool_name or "").strip() != "chart_analyzer" or "are:\n" not in str(output_str or ""):
+            return output_str
+        parsed = self._parse_tool_result_json(output_str)
+        if not isinstance(parsed, dict):
+            return output_str
+        if self._normalize_tool_text(parsed.get("chart_type")) != "diagram":
+            return output_str
+        if not isinstance(parsed.get("frame_results"), list):
+            return output_str
+
+        allowed_observations = {
+            self._normalize_tool_text(observation)
+            for observation in (parsed.get("key_observations") or [])
+            if str(observation or "").strip()
+        }
+        allowed_relationships = {
+            self._tool_relationship_key(rel)
+            for rel in (parsed.get("relationships") or [])
+            if isinstance(rel, dict)
+        }
+
+        sanitized_frame_results = []
+        changed = False
+        for frame_result in parsed.get("frame_results") or []:
+            if not isinstance(frame_result, dict):
+                sanitized_frame_results.append(frame_result)
+                continue
+            safe_frame = dict(frame_result)
+            result = dict(safe_frame.get("result") or {})
+
+            original_observations = list(result.get("key_observations") or [])
+            original_relationships = list(result.get("relationships") or [])
+            original_query_response = result.get("query_response")
+
+            result["key_observations"] = [
+                str(observation or "").strip()
+                for observation in original_observations
+                if self._normalize_tool_text(observation) in allowed_observations
+            ]
+            result["relationships"] = [
+                {
+                    "from": rel.get("from"),
+                    "to": rel.get("to"),
+                    "label": rel.get("label"),
+                }
+                for rel in original_relationships
+                if self._tool_relationship_key(rel) in allowed_relationships
+            ]
+            result["query_response"] = None
+
+            if (
+                result["key_observations"] != original_observations
+                or result["relationships"] != original_relationships
+                or original_query_response not in {None, ""}
+            ):
+                changed = True
+
+            safe_frame["result"] = result
+            sanitized_frame_results.append(safe_frame)
+
+        if not changed:
+            return output_str
+
+        parsed["frame_results"] = sanitized_frame_results
+        parsed["refiner_safety_note"] = (
+            "For diagram outputs, per-frame details are restricted to primitives that also survive "
+            "the top-level merged summary."
+        )
+        prefix = output_str.split("are:\n", 1)[0] + "are:\n"
+        return prefix + json.dumps(parsed, ensure_ascii=False)
+
     def _extract_tool_confidence(self, tool_name: str, result: dict) -> float:
         if not isinstance(result, dict):
             return 0.0
@@ -133,6 +217,129 @@ class RefinerAgentsMixin:
                 score += 0.1
             return min(score, 1.0)
         return 0.0
+
+    def _tool_signal_summary(self, tool_name: str, result) -> str:
+        if not isinstance(result, (dict, list)):
+            return ""
+
+        def _floats(values) -> list[float]:
+            out = []
+            for value in values:
+                if value is None:
+                    continue
+                try:
+                    out.append(float(value))
+                except Exception:
+                    continue
+            return out
+
+        if tool_name == "temporal_grounder" and isinstance(result, dict):
+            confs = _floats(
+                s.get("confidence")
+                for s in (result.get("segments") or [])
+                if isinstance(s, dict) and s.get("confidence") is not None
+            )
+            return f"top segment confidence {max(confs):.4f}" if confs else ""
+
+        if tool_name == "frame_retriever" and isinstance(result, dict):
+            scores = _floats(
+                f.get("relevance_score")
+                for f in (result.get("frames") or [])
+                if isinstance(f, dict) and f.get("relevance_score") is not None
+            )
+            return f"top relevance_score {max(scores):.4f}" if scores else ""
+
+        if tool_name == "ocr" and isinstance(result, dict):
+            confs = _floats(
+                d.get("confidence")
+                for d in (result.get("detections") or [])
+                if isinstance(d, dict) and d.get("confidence") is not None
+            )
+            return f"avg detection confidence {sum(confs) / len(confs):.4f}" if confs else ""
+
+        if tool_name == "spatial_grounder" and isinstance(result, dict):
+            confs = _floats(
+                d.get("confidence")
+                for d in (result.get("detections") or [])
+                if isinstance(d, dict) and d.get("confidence") is not None
+            )
+            if confs:
+                return f"max detection confidence {max(confs):.4f}"
+            frame_scores = []
+            for item in result.get("frames") or []:
+                if not isinstance(item, dict):
+                    continue
+                fdets = item.get("detections") or []
+                frame_scores.extend(
+                    _floats(
+                        d.get("confidence")
+                        for d in fdets
+                        if isinstance(d, dict) and d.get("confidence") is not None
+                    )
+                )
+            return f"max frame detection confidence {max(frame_scores):.4f}" if frame_scores else ""
+
+        if tool_name == "counter" and isinstance(result, dict):
+            top_conf = result.get("confidence")
+            if top_conf is not None:
+                try:
+                    return f"confidence {float(top_conf):.4f}"
+                except Exception:
+                    pass
+            frame_scores = _floats(
+                item.get("confidence")
+                for item in (result.get("frames") or [])
+                if isinstance(item, dict) and item.get("confidence") is not None
+            )
+            return f"max frame confidence {max(frame_scores):.4f}" if frame_scores else ""
+
+        if tool_name == "asr" and isinstance(result, dict):
+            segs = [
+                s for s in (result.get("segments") or []) if isinstance(s, dict) and s.get("confidence") is not None
+            ]
+            confs = _floats(s.get("confidence") for s in segs)
+            return f"avg segment confidence {sum(confs) / len(confs):.4f}" if confs else ""
+
+        if tool_name == "audio_grounder" and isinstance(result, dict):
+            event_confs = _floats(
+                e.get("confidence")
+                for e in (result.get("events") or [])
+                if isinstance(e, dict) and e.get("confidence") is not None
+            )
+            if event_confs:
+                return f"top event confidence {max(event_confs):.4f}"
+            group_confs = _floats(
+                g.get("confidence")
+                for g in (result.get("distinct_event_groups") or [])
+                if isinstance(g, dict) and g.get("confidence") is not None
+            )
+            return f"top group confidence {max(group_confs):.4f}" if group_confs else ""
+
+        if tool_name == "action_recognizer":
+            confs = _floats(
+                a.get("confidence")
+                for a in (result.get("actions") or [])
+                if isinstance(a, dict) and a.get("confidence") is not None
+            )
+            if not confs and isinstance(result, list):
+                confs = _floats(
+                    a.get("confidence")
+                    for a in result
+                    if isinstance(a, dict) and a.get("confidence") is not None
+                )
+            return f"top action confidence {max(confs):.4f}" if confs else ""
+
+        return ""
+
+    def _tool_signal_summary_from_output(self, tool_name: str, output_text: str) -> str:
+        parsed = self._parse_tool_result_json(output_text)
+        if tool_name == "action_recognizer" and parsed is None:
+            tail = str(output_text or "").split("are:\n", 1)[-1].strip()
+            try:
+                parsed = json.loads(tail)
+            except Exception:
+                parsed = None
+        return self._tool_signal_summary(tool_name, parsed or {})
 
     def _compact_iteration_summary(
         self, iteration_idx: int, verifier_output, refiner_output, executed_tools: list
@@ -437,12 +644,15 @@ class RefinerAgentsMixin:
         diagnosis_text = json.dumps(diagnosis, ensure_ascii=False, indent=2) if isinstance(diagnosis, dict) else str(
             diagnosis
         )
-        # Intentionally disabled for artifact-free runs: do not inject
-        # PREPROCESSED_ARTIFACTS into planner prompts.
+        # Provide the planner with caption-derived full-video context.
         ctx = self._iteration_context_block(iteration, max_iterations, history or [])
         last_tools = ""
         if history:
             last_tools = json.dumps(history[-1].get("tools_executed", []), ensure_ascii=False, indent=2)
+        video_caption_summary = ""
+        get_video_caption_summary = getattr(self, "_get_video_caption_summary", None)
+        if callable(get_video_caption_summary):
+            video_caption_summary = str(get_video_caption_summary() or "").strip()
         return (
             ctx
             + "\n"
@@ -455,6 +665,8 @@ class RefinerAgentsMixin:
             + trace_answer
             + "\n\nDIAGNOSIS:\n"
             + diagnosis_text
+            + "\n\nVIDEO_CAPTION_SUMMARY:\n"
+            + (video_caption_summary or "(unavailable)")
             + "\n\nPREVIOUS_TOOL_RESULTS_SUMMARY (last iteration tools + confidence):\n"
             + (last_tools or "[]")
         )
@@ -779,12 +991,24 @@ class RefinerAgentsMixin:
         return raw_output, parsed_dict
 
     def _normalize_refined_trace(self, raw, fallback: list) -> list:
+        def _clean_trace_text(text: str) -> str:
+            cleaned = str(text).strip()
+            patterns = [
+                r"^\d+\.\s*",
+                r"^TOOL_OUTPUTS\s+Step\s+\d+\s*[:.\-]?\s*",
+                r"^Step\s+\d+\s*[:.\-]?\s*",
+            ]
+            prev = None
+            while cleaned != prev:
+                prev = cleaned
+                for pattern in patterns:
+                    cleaned = re.sub(pattern, "", cleaned, count=1, flags=re.IGNORECASE).strip()
+            return cleaned
+
         if isinstance(raw, list):
             out = []
             for item in raw:
-                text = str(item).strip()
-                m = re.match(r"^\d+\.\s*(.*)$", text)
-                out.append(m.group(1) if m else text)
+                out.append(_clean_trace_text(str(item)))
             return out
         if isinstance(raw, str):
             lines = [ln.rstrip() for ln in raw.split("\n")]
@@ -793,8 +1017,7 @@ class RefinerAgentsMixin:
                 line = line.strip()
                 if not line:
                     continue
-                m = re.match(r"^\d+\.\s*(.*)$", line)
-                out.append(m.group(1) if m else line)
+                out.append(_clean_trace_text(line))
             return out if out else [raw]
         return list(fallback)
 
@@ -810,12 +1033,19 @@ class RefinerAgentsMixin:
             diagnosis
         )
         tool_lines = []
+        signal_lines = []
         for item in executed_tools or []:
             if isinstance(item, dict):
+                tool_name = item.get("tool", "")
+                signal = self._tool_signal_summary_from_output(tool_name, item.get("output", ""))
+                if signal:
+                    signal_lines.append(f"Step {item.get('step')}: {tool_name} — {signal}")
+                safe_output = self._sanitize_tool_output_for_refiner(tool_name, item.get("output", ""))
                 tool_lines.append(
-                    f"Step {item.get('step')}: {item.get('tool')} — {item.get('purpose', '')}\n{item.get('output', '')}"
+                    f"Step {item.get('step')}: {tool_name} — {item.get('purpose', '')}\n{safe_output}"
                 )
         tools_block = "\n".join(tool_lines)
+        tool_signals_block = "\n".join(signal_lines) if signal_lines else "(no numeric confidence or relevance exposed)"
         refinstr = ""
         if isinstance(planner_output, dict):
             refinstr = str(planner_output.get("refinement_instructions", "") or "")
@@ -829,11 +1059,13 @@ class RefinerAgentsMixin:
             + trace_answer
             + "\n\nDIAGNOSIS:\n"
             + diagnosis_text
+            + "\n\nTOOL_SIGNAL_SUMMARY:\n"
+            + tool_signals_block
             + "\n\nTOOL_OUTPUTS:\n"
             + tools_block
             + "\n\nREFINEMENT_INSTRUCTIONS:\n"
             + refinstr
-            + "\n\nTRACE_FORMAT: Numbered list of strings (same style as ORIGINAL_TRACE).\n"
+            + "\n\nTRACE_FORMAT: Ordered list of strings; the list position already defines step order.\n"
         )
 
     def _call_refiner(
@@ -938,6 +1170,9 @@ class RefinerAgentsMixin:
             "Do not patch nonexistent steps. Instead synthesize a complete initial trace from "
             "the TOOL_OUTPUTS, decomposed into clear question-aligned reasoning steps. Every "
             "media-grounded claim must preserve tool provenance inline in the trace itself. "
+            "Write the final trace as a compact reader-facing argument rather than a tool log: "
+            "prefer 3-6 short steps in claim-first order, group multi-part questions by subgoal, "
+            "and include numeric confidence or relevance inline whenever the tool outputs expose it. "
             "If the gathered evidence remains partial or ambiguous, state that limitation "
             "explicitly in the trace and unresolved_issues rather than forcing unsupported details."
         )
@@ -960,9 +1195,13 @@ class RefinerAgentsMixin:
         if tool_outputs_so_far:
             lines = []
             for i, item in enumerate(tool_outputs_so_far, 1):
+                tool_name = item.get("tool", "")
+                signal = self._tool_signal_summary_from_output(tool_name, item.get("output", ""))
+                signal_line = f"  Signal summary: {signal}\n" if signal else ""
                 lines.append(
-                    f"Round {i}: {item['tool']}({json.dumps(item.get('arguments', {}), ensure_ascii=False)})\n"
+                    f"Round {i}: {tool_name}({json.dumps(item.get('arguments', {}), ensure_ascii=False)})\n"
                     f"  Purpose: {item.get('purpose', '')}\n"
+                    f"{signal_line}"
                     f"  Output: {item.get('output', '')}"
                 )
             tool_history = "\n\n".join(lines)

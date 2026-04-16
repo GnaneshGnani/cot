@@ -110,6 +110,77 @@ class ChartAnalyzerArgsModel(BaseModel):
         return value or None
 
 
+class MathSolverArgsModel(BaseModel):
+    question: Optional[str] = None
+    evidence: Union[str, List[str]]
+    answer_choices: Optional[List[str]] = None
+    frame_path: Optional[Union[str, List[str], List[FrameBundleItemModel]]] = None
+    timestamp: Optional[Union[float, List[float]]] = None
+
+    @root_validator(pre=True)
+    def _alias_evidence(cls, values):
+        if isinstance(values, dict):
+            values = dict(values)
+            if "evidence" not in values and "facts" in values:
+                values["evidence"] = values.get("facts")
+            if "frame_path" not in values:
+                if "frames" in values:
+                    values["frame_path"] = values.get("frames")
+                elif "frame_paths" in values:
+                    values["frame_path"] = values.get("frame_paths")
+            if "timestamp" not in values and "timestamps" in values:
+                values["timestamp"] = values.get("timestamps")
+        return values
+
+    @validator("question", pre=True)
+    def _normalize_question(cls, value):
+        if value is None:
+            return None
+        value = str(value).strip()
+        return value or None
+
+    @validator("evidence", pre=True)
+    def _normalize_evidence(cls, value):
+        if value in (None, ""):
+            raise ValueError("evidence must be non-empty")
+        if isinstance(value, list):
+            cleaned = [str(item).strip() for item in value if str(item).strip()]
+            if not cleaned:
+                raise ValueError("evidence must contain at least one non-empty item")
+            return cleaned
+        value = str(value).strip()
+        if not value:
+            raise ValueError("evidence must be non-empty")
+        return value
+
+    @validator("timestamp", pre=True)
+    def _normalize_timestamp(cls, value):
+        if value in (None, [], ""):
+            return None
+        if isinstance(value, dict):
+            value = value.get("timestamp")
+        elif isinstance(value, list) and value and all(isinstance(item, dict) for item in value):
+            value = [item.get("timestamp") for item in value]
+        if isinstance(value, list):
+            return [float(item) for item in value]
+        return float(value)
+
+    @validator("answer_choices", pre=True)
+    def _normalize_answer_choices(cls, value):
+        if value in (None, ""):
+            return None
+        if isinstance(value, str):
+            parsed = robust_eval(value)
+            if isinstance(parsed, list):
+                value = parsed
+            else:
+                value = [value]
+        elif not isinstance(value, list):
+            value = [value]
+        cleaned = [str(item).strip() for item in value if str(item).strip()]
+        return cleaned or None
+
+
 class VLMFrameBundleModel(BaseModel):
     frame_paths: List[str] = Field(default_factory=list)
     timestamps: List[float] = Field(default_factory=list)
@@ -877,6 +948,57 @@ class RefinerUtilsMixin:
             print(f"  Saved segment captions cache → {cache_path}")
         except Exception as ex:
             print(f"  segment captions cache write failed: {ex}")
+
+    def _get_video_caption_summary(self) -> str:
+        summary = str(getattr(self, "_video_caption_summary", "") or "").strip()
+        if summary:
+            return summary
+
+        cache = list(getattr(self, "_segment_captions_cache", None) or [])
+        if not cache:
+            try:
+                self._build_segment_dense_captions(getattr(self, "segment_size_s", 30.0) or 30.0)
+            except Exception as ex:
+                print(f"  [_get_video_caption_summary] segment caption build failed: {ex}")
+            cache = list(getattr(self, "_segment_captions_cache", None) or [])
+
+        segment_summaries: List[str] = []
+        for seg in cache:
+            text = str(seg.get("caption_summary", "") or "").strip()
+            if not text:
+                text = self._caption_summary_fallback(seg.get("dense_caption"))
+            if not text:
+                continue
+            start = float(seg.get("start", 0.0) or 0.0)
+            end = float(seg.get("end", 0.0) or 0.0)
+            segment_summaries.append(f"{start:.1f}s-{end:.1f}s: {text}")
+
+        if not segment_summaries:
+            self._video_caption_summary = ""
+            return ""
+
+        joined = "\n".join(segment_summaries)
+        prompt = (
+            "You are summarizing an entire video from caption summaries.\n\n"
+            f"Segment caption summaries:\n{joined}\n\n"
+            "Write a concise 4-6 sentence summary of the complete video. Mention the "
+            "main setting, subjects, event progression, and major phase changes. "
+            "Use only the evidence in the segment summaries. Output plain text only."
+        )
+        try:
+            summarize = getattr(self, "_vlm_summarize_text", None)
+            if callable(summarize):
+                summary = (summarize(prompt) or "").strip()
+        except Exception as ex:
+            print(f"  [_get_video_caption_summary] summarize failed: {ex}")
+
+        if not summary:
+            fallback_text = " ".join(segment_summaries)
+            sentences = [s for s in re.split(r"(?<=[.!?])\s+", fallback_text) if s.strip()]
+            summary = " ".join(sentences[:8]).strip()
+
+        self._video_caption_summary = summary
+        return summary
 
     def _build_segment_index(self, segment_size_s: float = 30.0) -> None:
         """Join cached segment captions with frame-embedding centroids and ASR snippets."""

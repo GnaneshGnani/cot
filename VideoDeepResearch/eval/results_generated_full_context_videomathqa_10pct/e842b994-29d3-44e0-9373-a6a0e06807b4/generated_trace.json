@@ -1,0 +1,178 @@
+{
+  "trace_steps": [
+    "temporal_grounder localizes the meaningful solve manipulation to 10.0s-20.0s (top segment confidence 0.4707), so the ordering should be read from that interval rather than the earlier static display.",
+    "Within that window, dense_captioner gives the earliest detailed action at 10.0s-10.5s as \"Holding the puzzle steady with both hands\" while the gold ring remains threaded through the wooden puzzle; this best matches (D) keep the left hand steady, at least as the initial stabilizing setup.",
+    "Next, dense_captioner at 10.5s-11.0s says \"The top wooden piece is slightly rotated\" and the puzzle is being manipulated; among the listed choices, that most directly matches (B) rotate the right diamond gently. The same 10.5s-11.0s caption also says the other piece is \"adjusted,\" which is the closest tool-grounded support for (A) push the right diamond slightly forward, but the caption does not explicitly say \"forward,\" so this part remains approximate.",
+    "Then dense_captioner at 11.0s-11.5s reports the top piece is \"pulled slightly upward\" while the bottom piece is pulled downward, showing a stronger reorientation move after the gentle rotation/adjustment; among the remaining options, this is the closest available evidence for (C) twist the right diamond shaped ring 90 degrees, though the tool does not explicitly confirm the angle \"90 degrees.\"",
+    "So the best tool-grounded order is D -> B -> A -> C, with D from 10.0s-10.5s, B/A from 10.5s-11.0s, and C approximated from the later 11.0s-11.5s reorientation. That sequence corresponds to option B, DABC."
+  ],
+  "answer": "B. DABC",
+  "generation_rounds": [
+    {
+      "phase": "initial_trace_generation",
+      "diagnosis": {
+        "verdict": "FAIL",
+        "answer_correct": false,
+        "trace_quality_scores": {
+          "perceptual_correctness": 0.0,
+          "temporal_accuracy": 0.0,
+          "logical_coherence": 0.0,
+          "completeness": 0.0
+        },
+        "error_categories": [
+          {
+            "type": "INCOMPLETE_TRACE",
+            "step_index": null,
+            "description": "No initial reasoning trace or answer is available. Decompose the question into answer-critical subgoals, gather the minimal tool evidence needed to answer it from scratch, and prepare refinement instructions that let the refiner synthesize a complete first trace.",
+            "severity": "HIGH",
+            "suggested_tools": [],
+            "evidence": null
+          }
+        ],
+        "confidence": 1.0,
+        "summary": "Cold-start generation mode: ORIGINAL_TRACE and ORIGINAL_ANSWER are intentionally empty. Plan tool calls from the question alone, then synthesize the first tool-grounded trace.",
+        "generation_mode": "cold_start"
+      },
+      "planner_raw": "{\n  \"strategy\": \"Because the question asks for the correct order of four manipulations in a short, single-scene silent puzzle video, first localize the actual solve/manipulation interval, then use a bounded visual description tool to recover the action sequence and verify the ordering of the named steps.\",\n  \"tool_calls\": [\n    {\n      \"step\": 1,\n      \"tool\": \"temporal_grounder\",\n      \"arguments\": {\n        \"video_path\": \"<VIDEO_PATH>\",\n        \"query\": \"hands manipulating a wooden disentanglement puzzle to move the right diamond-shaped wooden piece and free the golden ring\"\n      },\n      \"purpose\": \"Find the short interval where the meaningful solving actions occur, rather than the initial static challenge display.\",\n      \"depends_on\": []\n    },\n    {\n      \"step\": 2,\n      \"tool\": \"dense_captioner\",\n      \"arguments\": {\n        \"video_path\": \"<VIDEO_PATH>\",\n        \"start_time\": \"<STEP_1:segments[0].start>\",\n        \"end_time\": \"<STEP_1:segments[0].end>\",\n        \"granularity\": \"frame\"\n      },\n      \"purpose\": \"Describe the sequence of hand and puzzle movements within the localized solve interval so the refiner can map observed actions to steps A/B/C/D and determine their order.\",\n      \"depends_on\": [\n        1\n      ]\n    },\n    {\n      \"step\": 3,\n      \"tool\": \"action_recognizer\",\n      \"arguments\": {\n        \"video_path\": \"<VIDEO_PATH>\",\n        \"start_time\": \"<STEP_1:segments[0].start>\",\n        \"end_time\": \"<STEP_1:segments[0].end>\"\n      },\n      \"purpose\": \"Provide an additional action-focused check on the sequence of twisting, rotating, pushing, and hand stabilization during the same interval.\",\n      \"depends_on\": [\n        1\n      ]\n    }\n  ],\n  \"refinement_instructions\": \"Write the trace from scratch. Use Step 1 only as the temporal anchor for the actual manipulation interval, not as evidence for the answer itself. Use Step 2 as the primary evidence source: cite the caption spans in chronological order and explicitly map each observed motion to the named options A/B/C/D: (C) twisting the right diamond-shaped ring 90 degrees, (B) rotating the right diamond gently, (A) pushing the right diamond slightly forward, and (D) keeping the left hand steady. Use Step 3 only to reinforce the motion labels if dense captions are slightly ambiguous. Do not infer order from option plausibility; derive it from the observed chronology inside the localized interval. If Step 2 and Step 3 disagree, prefer the temporally detailed Step 2 ordering while noting any residual ambiguity. Update the final answer to the option whose letter sequence matches the grounded action order.\"\n}",
+      "planner_output": {
+        "strategy": "Because the question asks for the correct order of four manipulations in a short, single-scene silent puzzle video, first localize the actual solve/manipulation interval, then use a bounded visual description tool to recover the action sequence and verify the ordering of the named steps.",
+        "tool_calls": [
+          {
+            "step": 1,
+            "tool": "temporal_grounder",
+            "arguments": {
+              "video_path": "<VIDEO_PATH>",
+              "query": "hands manipulating a wooden disentanglement puzzle to move the right diamond-shaped wooden piece and free the golden ring"
+            },
+            "purpose": "Find the short interval where the meaningful solving actions occur, rather than the initial static challenge display.",
+            "depends_on": []
+          },
+          {
+            "step": 2,
+            "tool": "dense_captioner",
+            "arguments": {
+              "video_path": "<VIDEO_PATH>",
+              "start_time": "<STEP_1:segments[0].start>",
+              "end_time": "<STEP_1:segments[0].end>",
+              "granularity": "frame"
+            },
+            "purpose": "Describe the sequence of hand and puzzle movements within the localized solve interval so the refiner can map observed actions to steps A/B/C/D and determine their order.",
+            "depends_on": [
+              1
+            ]
+          },
+          {
+            "step": 3,
+            "tool": "action_recognizer",
+            "arguments": {
+              "video_path": "<VIDEO_PATH>",
+              "start_time": "<STEP_1:segments[0].start>",
+              "end_time": "<STEP_1:segments[0].end>"
+            },
+            "purpose": "Provide an additional action-focused check on the sequence of twisting, rotating, pushing, and hand stabilization during the same interval.",
+            "depends_on": [
+              1
+            ]
+          }
+        ],
+        "refinement_instructions": "Write the trace from scratch. Use Step 1 only as the temporal anchor for the actual manipulation interval, not as evidence for the answer itself. Use Step 2 as the primary evidence source: cite the caption spans in chronological order and explicitly map each observed motion to the named options A/B/C/D: (C) twisting the right diamond-shaped ring 90 degrees, (B) rotating the right diamond gently, (A) pushing the right diamond slightly forward, and (D) keeping the left hand steady. Use Step 3 only to reinforce the motion labels if dense captions are slightly ambiguous. Do not infer order from option plausibility; derive it from the observed chronology inside the localized interval. If Step 2 and Step 3 disagree, prefer the temporally detailed Step 2 ordering while noting any residual ambiguity. Update the final answer to the option whose letter sequence matches the grounded action order."
+      },
+      "executed_tools": [
+        {
+          "step": 1,
+          "tool": "temporal_grounder",
+          "arguments": {
+            "query": "hands manipulating a wooden disentanglement puzzle to move the right diamond-shaped wooden piece and free the golden ring",
+            "video_path": "<VIDEO_PATH>"
+          },
+          "purpose": "Find the short interval where the meaningful solving actions occur, rather than the initial static challenge display.",
+          "depends_on": [],
+          "output": "The tool results for temporal_grounder({\"query\": \"hands manipulating a wooden disentanglement puzzle to move the right diamond-shaped wooden piece and free the golden ring\", \"video_path\": \"<VIDEO_PATH>\"}) are:\n{\"query\": \"hands manipulating a wooden disentanglement puzzle to move the right diamond-shaped wooden piece and free the golden ring\", \"segments\": [{\"start\": 10.0, \"end\": 20.0, \"confidence\": 0.470703125, \"embed_score\": 0.7026289701461792, \"rerank_score\": 0.470703125}, {\"start\": 15.0, \"end\": 25.0, \"confidence\": 0.2451171875, \"embed_score\": 0.6225343942642212, \"rerank_score\": 0.2451171875}, {\"start\": 25.0, \"end\": 30.0, \"confidence\": 0.23046875, \"embed_score\": 0.6632828712463379, \"rerank_score\": 0.23046875}, {\"start\": 5.0, \"end\": 15.0, \"confidence\": 0.208984375, \"embed_score\": 0.603477418422699, \"rerank_score\": 0.208984375}, {\"start\": 0.0, \"end\": 10.0, \"confidence\": 0.19921875, \"embed_score\": 0.6677044630050659, \"rerank_score\": 0.19921875}, {\"start\": 20.0, \"end\": 30.0, \"confidence\": 0.16015625, \"embed_score\": 0.6160673499107361, \"rerank_score\": 0.16015625}], \"initial_segments\": [{\"start\": 10.0, \"end\": 20.0, \"confidence\": 0.7026289701461792, \"embed_score\": 0.7026289701461792}, {\"start\": 0.0, \"end\": 10.0, \"confidence\": 0.6677044630050659, \"embed_score\": 0.6677044630050659}, {\"start\": 25.0, \"end\": 30.0, \"confidence\": 0.6632828712463379, \"embed_score\": 0.6632828712463379}, {\"start\": 15.0, \"end\": 25.0, \"confidence\": 0.6225343942642212, \"embed_score\": 0.6225343942642212}, {\"start\": 20.0, \"end\": 30.0, \"confidence\": 0.6160673499107361, \"embed_score\": 0.6160673499107361}, {\"start\": 5.0, \"end\": 15.0, \"confidence\": 0.603477418422699, \"embed_score\": 0.603477418422699}], \"reranked_segments\": [{\"start\": 10.0, \"end\": 20.0, \"confidence\": 0.470703125, \"embed_score\": 0.7026289701461792, \"rerank_score\": 0.470703125}, {\"start\": 15.0, \"end\": 25.0, \"confidence\": 0.2451171875, \"embed_score\": 0.6225343942642212, \"rerank_score\": 0.2451171875}, {\"start\": 25.0, \"end\": 30.0, \"confidence\": 0.23046875, \"embed_score\": 0.6632828712463379, \"rerank_score\": 0.23046875}, {\"start\": 5.0, \"end\": 15.0, \"confidence\": 0.208984375, \"embed_score\": 0.603477418422699, \"rerank_score\": 0.208984375}, {\"start\": 0.0, \"end\": 10.0, \"confidence\": 0.19921875, \"embed_score\": 0.6677044630050659, \"rerank_score\": 0.19921875}, {\"start\": 20.0, \"end\": 30.0, \"confidence\": 0.16015625, \"embed_score\": 0.6160673499107361, \"rerank_score\": 0.16015625}], \"video_duration\": 30.0, \"retrieval_backend\": \"qwen_embed_rerank\"}"
+        },
+        {
+          "step": 2,
+          "tool": "dense_captioner",
+          "arguments": {
+            "video_path": "<VIDEO_PATH>",
+            "start_time": 10.0,
+            "end_time": 20.0,
+            "granularity": "frame"
+          },
+          "purpose": "Describe the sequence of hand and puzzle movements within the localized solve interval so the refiner can map observed actions to steps A/B/C/D and determine their order.",
+          "depends_on": [
+            1
+          ],
+          "output": "The tool results for dense_captioner({\"video_path\": \"<VIDEO_PATH>\", \"start_time\": 10.0, \"end_time\": 20.0, \"granularity\": \"frame\"}) are:\n{\"video_duration\": 20.0, \"captioned_range\": {\"start\": 10.0, \"end\": 20.0}, \"captions\": [{\"start\": 10.0, \"end\": 10.5, \"visual\": \"A pair of hands holds a wooden puzzle with a gold ring threaded through it. The puzzle is made of two symmetrical, V-shaped wooden pieces connected by red strings that pass through the ring. The background is a solid blue surface with a dark blue book partially visible.\", \"audio\": \"none\", \"on_screen_text\": \"UPON CLOSER INSPECTION\", \"actions\": [\"Holding the puzzle steady with both hands\"], \"objects\": [\"Wooden puzzle\", \"Gold ring\", \"Red strings\", \"Hands\", \"Blue surface\", \"Book\"]}, {\"start\": 10.5, \"end\": 11.0, \"visual\": \"The hands begin to manipulate the wooden puzzle. The top wooden piece is slightly rotated, and the bottom piece is adjusted, causing the gold ring to shift slightly within the puzzle's structure.\", \"audio\": \"none\", \"on_screen_text\": \"UPON CLOSER INSPECTION\", \"actions\": [\"Rotating the top wooden piece\", \"Adjusting the bottom wooden piece\"], \"objects\": [\"Wooden puzzle\", \"Gold ring\", \"Red strings\", \"Hands\", \"Blue surface\", \"Book\"]}, {\"start\": 11.0, \"end\": 11.5, \"visual\": \"The hands continue to manipulate the puzzle. The top wooden piece is pulled slightly upward, and the bottom piece is pulled downward, demonstrating the puzzle's interlocking mechanism. The gold ring remains trapped.\", \"audio\": \"none\", \"on_screen_text\": \"UPON CLOSER INSPECTION\", \"actions\": [\"Pulling the top piece upward\", \"Pulling the bottom piece downward\"], \"objects\": [\"Wooden puzzle\", \"Gold ring\", \"Red strings\", \"Hands\", \"Blue surface\", \"Book\"]}, {}]}"
+        },
+        {
+          "step": 3,
+          "tool": "action_recognizer",
+          "arguments": {
+            "video_path": "<VIDEO_PATH>",
+            "start_time": 10.0,
+            "end_time": 20.0
+          },
+          "purpose": "Provide an additional action-focused check on the sequence of twisting, rotating, pushing, and hand stabilization during the same interval.",
+          "depends_on": [
+            1
+          ],
+          "output": "The tool results for action_recognizer({\"video_path\": \"<VIDEO_PATH>\", \"start_time\": 10.0, \"end_time\": 20.0}) are:\n{\"analyzed_range\": {\"start\": 0.0, \"end\": 10.0}, \"actions\": [{\"action\": \"manipulating a puzzle\", \"start\": 0.0, \"end\": 10.0, \"confidence\": 1.0, \"actor\": \"a person using both hands to hold and move a wooden puzzle with a ring\"}], \"query_response\": null}"
+        }
+      ],
+      "refiner_raw": "{\n  \"refined_trace\": [\n    \"temporal_grounder localizes the meaningful solve manipulation to 10.0s-20.0s (top segment confidence 0.4707), so the ordering should be read from that interval rather than the earlier static display.\",\n    \"Within that window, dense_captioner gives the earliest detailed action at 10.0s-10.5s as \\\"Holding the puzzle steady with both hands\\\" while the gold ring remains threaded through the wooden puzzle; this best matches (D) keep the left hand steady, at least as the initial stabilizing setup.\",\n    \"Next, dense_captioner at 10.5s-11.0s says \\\"The top wooden piece is slightly rotated\\\" and the puzzle is being manipulated; among the listed choices, that most directly matches (B) rotate the right diamond gently. The same 10.5s-11.0s caption also says the other piece is \\\"adjusted,\\\" which is the closest tool-grounded support for (A) push the right diamond slightly forward, but the caption does not explicitly say \\\"forward,\\\" so this part remains approximate.\",\n    \"Then dense_captioner at 11.0s-11.5s reports the top piece is \\\"pulled slightly upward\\\" while the bottom piece is pulled downward, showing a stronger reorientation move after the gentle rotation/adjustment; among the remaining options, this is the closest available evidence for (C) twist the right diamond shaped ring 90 degrees, though the tool does not explicitly confirm the angle \\\"90 degrees.\\\"\",\n    \"So the best tool-grounded order is D -> B -> A -> C, with D from 10.0s-10.5s, B/A from 10.5s-11.0s, and C approximated from the later 11.0s-11.5s reorientation. That sequence corresponds to option B, DABC.\"\n  ],\n  \"refined_answer\": \"B. DABC\",\n  \"answer_changed\": true,\n  \"changes_made\": [\n    {\n      \"operation\": \"INSERT_STEP\",\n      \"step_index\": null,\n      \"original\": \"\",\n      \"replacement\": \"temporal_grounder localizes the meaningful solve manipulation to 10.0s-20.0s (top segment confidence 0.4707), so the ordering should be read from that interval rather than the earlier static display.\",\n      \"evidence_source\": \"TOOL_OUTPUTS Step 1 temporal_grounder, top segment 10.0-20.0 confidence 0.470703125\"\n    },\n    {\n      \"operation\": \"INSERT_STEP\",\n      \"step_index\": null,\n      \"original\": \"\",\n      \"replacement\": \"Within that window, dense_captioner gives the earliest detailed action at 10.0s-10.5s as \\\"Holding the puzzle steady with both hands\\\" while the gold ring remains threaded through the wooden puzzle; this best matches (D) keep the left hand steady, at least as the initial stabilizing setup.\",\n      \"evidence_source\": \"TOOL_OUTPUTS Step 2 dense_captioner, caption span 10.0-10.5s\"\n    },\n    {\n      \"operation\": \"INSERT_STEP\",\n      \"step_index\": null,\n      \"original\": \"\",\n      \"replacement\": \"Next, dense_captioner at 10.5s-11.0s says \\\"The top wooden piece is slightly rotated\\\" and the puzzle is being manipulated; among the listed choices, that most directly matches (B) rotate the right diamond gently. The same 10.5s-11.0s caption also says the other piece is \\\"adjusted,\\\" which is the closest tool-grounded support for (A) push the right diamond slightly forward, but the caption does not explicitly say \\\"forward,\\\" so this part remains approximate.\",\n      \"evidence_source\": \"TOOL_OUTPUTS Step 2 dense_captioner, caption span 10.5-11.0s\"\n    },\n    {\n      \"operation\": \"INSERT_STEP\",\n      \"step_index\": null,\n      \"original\": \"\",\n      \"replacement\": \"Then dense_captioner at 11.0s-11.5s reports the top piece is \\\"pulled slightly upward\\\" while the bottom piece is pulled downward, showing a stronger reorientation move after the gentle rotation/adjustment; among the remaining options, this is the closest available evidence for (C) twist the right diamond shaped ring 90 degrees, though the tool does not explicitly confirm the angle \\\"90 degrees.\\\"\",\n      \"evidence_source\": \"TOOL_OUTPUTS Step 2 dense_captioner, caption span 11.0-11.5s\"\n    },\n    {\n      \"operation\": \"PATCH_ANSWER\",\n      \"step_index\": null,\n      \"original\": \"\",\n      \"replacement\": \"B. DABC\",\n      \"evidence_source\": \"TOOL_OUTPUTS Step 2 dense_captioner chronological captions in 10.0-11.5s, anchored by TOOL_OUTPUTS Step 1 temporal_grounder\"\n    }\n  ],\n  \"unresolved_issues\": [\n    \"The available tool evidence is only a coarse caption sequence from 10.0s-11.5s inside the broader 10.0s-20.0s solve interval; it does not explicitly identify left vs right diamond in each motion.\",\n    \"dense_captioner never explicitly states \\\"push forward\\\" or \\\"twist 90 degrees,\\\" so the mappings to (A) and especially (C) are approximate nearest matches rather than exact verbatim confirmations.\",\n    \"TOOL_OUTPUTS Step 3 action_recognizer is not useful for ordering because it reports a generic action over analyzed_range 0.0s-10.0s, which does not align with the localized 10.0s-20.0s interval.\"\n  ]\n}",
+      "refiner_output": {
+        "refined_trace": [
+          "temporal_grounder localizes the meaningful solve manipulation to 10.0s-20.0s (top segment confidence 0.4707), so the ordering should be read from that interval rather than the earlier static display.",
+          "Within that window, dense_captioner gives the earliest detailed action at 10.0s-10.5s as \"Holding the puzzle steady with both hands\" while the gold ring remains threaded through the wooden puzzle; this best matches (D) keep the left hand steady, at least as the initial stabilizing setup.",
+          "Next, dense_captioner at 10.5s-11.0s says \"The top wooden piece is slightly rotated\" and the puzzle is being manipulated; among the listed choices, that most directly matches (B) rotate the right diamond gently. The same 10.5s-11.0s caption also says the other piece is \"adjusted,\" which is the closest tool-grounded support for (A) push the right diamond slightly forward, but the caption does not explicitly say \"forward,\" so this part remains approximate.",
+          "Then dense_captioner at 11.0s-11.5s reports the top piece is \"pulled slightly upward\" while the bottom piece is pulled downward, showing a stronger reorientation move after the gentle rotation/adjustment; among the remaining options, this is the closest available evidence for (C) twist the right diamond shaped ring 90 degrees, though the tool does not explicitly confirm the angle \"90 degrees.\"",
+          "So the best tool-grounded order is D -> B -> A -> C, with D from 10.0s-10.5s, B/A from 10.5s-11.0s, and C approximated from the later 11.0s-11.5s reorientation. That sequence corresponds to option B, DABC."
+        ],
+        "refined_answer": "B. DABC",
+        "answer_changed": true,
+        "changes_made": [
+          {
+            "operation": "INSERT_STEP",
+            "step_index": null,
+            "original": "",
+            "replacement": "temporal_grounder localizes the meaningful solve manipulation to 10.0s-20.0s (top segment confidence 0.4707), so the ordering should be read from that interval rather than the earlier static display.",
+            "evidence_source": "TOOL_OUTPUTS Step 1 temporal_grounder, top segment 10.0-20.0 confidence 0.470703125"
+          },
+          {
+            "operation": "INSERT_STEP",
+            "step_index": null,
+            "original": "",
+            "replacement": "Within that window, dense_captioner gives the earliest detailed action at 10.0s-10.5s as \"Holding the puzzle steady with both hands\" while the gold ring remains threaded through the wooden puzzle; this best matches (D) keep the left hand steady, at least as the initial stabilizing setup.",
+            "evidence_source": "TOOL_OUTPUTS Step 2 dense_captioner, caption span 10.0-10.5s"
+          },
+          {
+            "operation": "INSERT_STEP",
+            "step_index": null,
+            "original": "",
+            "replacement": "Next, dense_captioner at 10.5s-11.0s says \"The top wooden piece is slightly rotated\" and the puzzle is being manipulated; among the listed choices, that most directly matches (B) rotate the right diamond gently. The same 10.5s-11.0s caption also says the other piece is \"adjusted,\" which is the closest tool-grounded support for (A) push the right diamond slightly forward, but the caption does not explicitly say \"forward,\" so this part remains approximate.",
+            "evidence_source": "TOOL_OUTPUTS Step 2 dense_captioner, caption span 10.5-11.0s"
+          },
+          {
+            "operation": "INSERT_STEP",
+            "step_index": null,
+            "original": "",
+            "replacement": "Then dense_captioner at 11.0s-11.5s reports the top piece is \"pulled slightly upward\" while the bottom piece is pulled downward, showing a stronger reorientation move after the gentle rotation/adjustment; among the remaining options, this is the closest available evidence for (C) twist the right diamond shaped ring 90 degrees, though the tool does not explicitly confirm the angle \"90 degrees.\"",
+            "evidence_source": "TOOL_OUTPUTS Step 2 dense_captioner, caption span 11.0-11.5s"
+          },
+          {
+            "operation": "PATCH_ANSWER",
+            "step_index": null,
+            "original": "",
+            "replacement": "B. DABC",
+            "evidence_source": "TOOL_OUTPUTS Step 2 dense_captioner chronological captions in 10.0-11.5s, anchored by TOOL_OUTPUTS Step 1 temporal_grounder"
+          }
+        ],
+        "unresolved_issues": [
+          "The available tool evidence is only a coarse caption sequence from 10.0s-11.5s inside the broader 10.0s-20.0s solve interval; it does not explicitly identify left vs right diamond in each motion.",
+          "dense_captioner never explicitly states \"push forward\" or \"twist 90 degrees,\" so the mappings to (A) and especially (C) are approximate nearest matches rather than exact verbatim confirmations.",
+          "TOOL_OUTPUTS Step 3 action_recognizer is not useful for ordering because it reports a generic action over analyzed_range 0.0s-10.0s, which does not align with the localized 10.0s-20.0s interval."
+        ]
+      }
+    }
+  ]
+}

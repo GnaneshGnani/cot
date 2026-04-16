@@ -158,6 +158,7 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         self.segment_size_s = float(segment_size_s)
         self._segment_captions_cache = []
         self._segment_index = []
+        self._video_caption_summary = ""
         self.temporal_grounder_backend = (
             str(os.getenv("TEMPORAL_GROUNDER_BACKEND", "qwen")).strip().lower() or "qwen"
         )
@@ -358,6 +359,7 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         self._temporal_grounder_qwen_clip_embeddings_cache = None
         self._segment_captions_cache = []
         self._segment_index = []
+        self._video_caption_summary = ""
         self.duration = self._get_video_duration()
         self._video_fps = self._get_video_fps()
         self.dense_frame_fps = (
@@ -367,9 +369,8 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         )
         self._ensure_video_clip_embeddings()
         self.subtitles = self._extract_subtitles()
-        # Segment-level dense-caption preprocessing is intentionally disabled for
-        # artifact-free runs. Leave the segment caches empty when loading a new
-        # sample as well.
+        # Segment-level caption summaries are built lazily when the planner asks
+        # for full-video context, so keep the caches empty on sample load.
 
         print("✓ Sample loaded")
         print(f"  Video: {video_path}")
@@ -878,7 +879,7 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         return ''
 
     def _vlm_summarize_text(self, prompt: str) -> str:
-        """Text-only completion for segment summarization (Qwen3-VL-8B local or remote VLM API)."""
+        """Text-only completion for segment summarization via the shared local or remote VLM API."""
         prompt = (prompt or "").strip()
         if not prompt:
             return ""
@@ -1350,7 +1351,7 @@ def main():
         _write_json(out_dir / "meta.json", meta)
         return out_dir
 
-    for index, item in enumerate(data[23:24], start=1):
+    for index, item in enumerate(data[20:21], start=1):
         record = dict(item)
         video_path = str(item.get("video_path", "")).strip()
         question = str(item.get("question", "")).strip()

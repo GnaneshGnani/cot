@@ -1,8 +1,10 @@
+import ast
 import base64
 import gc
 import io
 import importlib.util
 import json
+import math
 import os
 import re
 import shutil
@@ -64,6 +66,7 @@ from refine_prompt import (
     chart_analyzer_prompt,
     counter_prompt,
     dense_captioner_prompt,
+    math_solver_prompt,
     ocr_prompt,
     spatial_grunder_prompt,
 )
@@ -1234,6 +1237,151 @@ class RefinerToolsMixin:
             return list(k)
         return list(getattr(self, "planner_api_keys", None) or [])
 
+    def _math_solver_effective_model_name(self):
+        model_name = str(os.getenv("MATH_SOLVER_MODEL_NAME", "") or "").strip()
+        if model_name:
+            return model_name
+        vlm_model_name = str(getattr(self, "vlm_model_name", "") or "").strip()
+        if vlm_model_name:
+            return vlm_model_name
+        local_vlm_model_name = str(getattr(self, "local_vlm_model_name", "") or "").strip()
+        if local_vlm_model_name:
+            return local_vlm_model_name
+        return "Qwen/Qwen3-VL-8B-Instruct"
+
+    def _math_solver_effective_api_bases(self):
+        raw = str(os.getenv("MATH_SOLVER_API_BASE", "") or "").strip()
+        if raw:
+            return [item.strip() for item in raw.split(",") if item.strip()]
+        return list(getattr(self, "planner_api_base", None) or [])
+
+    def _math_solver_effective_api_keys(self):
+        raw = str(os.getenv("MATH_SOLVER_API_KEY", "") or "").strip()
+        if raw:
+            return [item.strip() for item in raw.split(",") if item.strip()]
+        return list(getattr(self, "planner_api_keys", None) or [])
+
+    def _math_solver_has_explicit_backend(self) -> bool:
+        return bool(str(os.getenv("MATH_SOLVER_API_BASE", "") or "").strip())
+
+    def _math_solver_use_http(self, api_bases: list | None = None) -> bool:
+        return self._math_solver_has_explicit_backend()
+
+    def _call_math_solver_text(self, prompt: str) -> str:
+        model_name = self._math_solver_effective_model_name()
+        api_bases = self._math_solver_effective_api_bases()
+        api_keys = self._math_solver_effective_api_keys()
+
+        if self._math_solver_use_http(api_bases):
+            normalized_messages = [{"role": "user", "content": str(prompt or "")}]
+            pairs = list(zip(api_bases, api_keys))
+            if not pairs:
+                return ""
+
+            for base, key in pairs:
+                try:
+                    client = OpenAI(base_url=base.strip(), api_key=key.strip())
+                    request_kwargs = {
+                        "model": model_name,
+                        "messages": normalized_messages,
+                        **openai_chat_temperature_kwargs(model_name, 0.0),
+                        **openai_chat_completion_limit_kwargs(model_name, 2048),
+                    }
+                    try:
+                        completion = client.chat.completions.create(
+                            response_format={"type": "json_object"},
+                            **request_kwargs,
+                        )
+                    except Exception:
+                        completion = client.chat.completions.create(**request_kwargs)
+                    out = completion.choices[0].message.content
+                    return out if isinstance(out, str) else (out or "")
+                except Exception as e:
+                    print(f"[Math Solver] text call failed base={base} model={model_name}: {e}")
+            return ""
+
+        summarize = getattr(self, "_vlm_summarize_text", None)
+        if callable(summarize):
+            return summarize(prompt)
+        return ""
+
+    def _call_math_solver_with_frames(self, prompt: str, frame_paths: list, frame_timestamps: list) -> str:
+        frame_paths = [str(path).strip() for path in (frame_paths or []) if str(path).strip()]
+        if not frame_paths:
+            return ""
+
+        normalized_timestamps = []
+        for idx, path in enumerate(frame_paths):
+            ts = frame_timestamps[idx] if idx < len(frame_timestamps) else None
+            ts = self._safe_float(ts, None)
+            if ts is None:
+                try:
+                    ts = float(self._timestamp_from_dense_frame_path(path))
+                except Exception:
+                    ts = float(idx)
+            normalized_timestamps.append(float(ts))
+
+        model_name = self._math_solver_effective_model_name()
+        api_bases = self._math_solver_effective_api_bases()
+        api_keys = self._math_solver_effective_api_keys()
+
+        if self._math_solver_use_http(api_bases):
+            content = []
+            for frame_path in frame_paths:
+                if not os.path.exists(frame_path):
+                    continue
+                try:
+                    image = Image.open(frame_path)
+                    image.verify()
+                    image = Image.open(frame_path)
+                    width, height = image.size
+                    if max(width, height) > 768:
+                        if width > height:
+                            new_width = 768
+                            new_height = int(height * (768 / width))
+                        else:
+                            new_height = 768
+                            new_width = int(width * (768 / height))
+                        image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                    buf = io.BytesIO()
+                    image.convert("RGB").save(buf, format="JPEG", quality=85)
+                    b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+                    content.append(
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+                    )
+                except Exception as e:
+                    print(f"[Math Solver] skipping invalid frame {frame_path}: {e}")
+
+            if content:
+                content.append({"type": "text", "text": prompt})
+                messages = [{"role": "user", "content": content}]
+                for base, key in zip(api_bases, api_keys):
+                    try:
+                        client = OpenAI(base_url=base.strip(), api_key=key.strip())
+                        request_kwargs = {
+                            "model": model_name,
+                            "messages": messages,
+                            **openai_chat_temperature_kwargs(model_name, 0.0),
+                            **openai_chat_completion_limit_kwargs(model_name, 2048),
+                        }
+                        try:
+                            completion = client.chat.completions.create(
+                                response_format={"type": "json_object"},
+                                **request_kwargs,
+                            )
+                        except Exception:
+                            completion = client.chat.completions.create(**request_kwargs)
+                        out = completion.choices[0].message.content
+                        return out if isinstance(out, str) else (out or "")
+                    except Exception as e:
+                        print(f"[Math Solver] vision call failed base={base} model={model_name}: {e}")
+
+        outputs = self._batch_video2text([(prompt, frame_paths, normalized_timestamps)], force_local=False)
+        if not outputs:
+            return ""
+        out = outputs[0]
+        return out if isinstance(out, str) else str(out or "")
+
     def _score_chart_analysis_result(self, result: dict) -> float:
         if not isinstance(result, dict):
             return -1.0
@@ -1247,12 +1395,792 @@ class RefinerToolsMixin:
             score += 3.0
         if str(result.get("title", "") or "").strip():
             score += 1.0
-        score += float(len(result.get("series") or [])) * 3.0
-        score += float(len(result.get("key_observations") or []))
-        score += float(len(result.get("relationships") or []))
+        score += min(float(len(result.get("series") or [])) * 3.0, 9.0)
+        score += min(float(len(result.get("key_observations") or [])) * 0.75, 3.0)
+        score += min(float(len(result.get("relationships") or [])) * 0.5, 2.0)
+        score -= max(float(len(result.get("key_observations") or [])) - 6.0, 0.0) * 0.25
+        score -= max(float(len(result.get("relationships") or [])) - 4.0, 0.0) * 0.5
         if query_response:
-            score += 2.0
+            score += 1.0
+            if query_response.endswith((" and", " or", " to", " at", " of", ",", ":", ";")):
+                score -= 1.0
         return score
+
+    def _normalize_chart_text(self, value) -> str:
+        return " ".join(str(value or "").strip().lower().split())
+
+    def _chart_relationship_key(self, rel) -> tuple[str, str, str]:
+        if not isinstance(rel, dict):
+            return ("", "", "")
+        return (
+            self._normalize_chart_text(rel.get("from")),
+            self._normalize_chart_text(rel.get("to")),
+            self._normalize_chart_text(rel.get("label")),
+        )
+
+    def _is_diagram_label_claim(self, text: str) -> bool:
+        normalized = self._normalize_chart_text(text)
+        if not normalized:
+            return False
+        return any(
+            token in normalized
+            for token in (
+                " label ",
+                " labeled ",
+                " marked ",
+                " marking ",
+                " text label ",
+                " numeric label ",
+                " is labeled",
+                " are labeled",
+                " labeled with",
+                " marked with",
+            )
+        ) or normalized.startswith(("label ", "labels ", "labeled "))
+
+    def _filter_diagram_label_claims(self, observations: list[str]) -> tuple[list[str], int]:
+        kept = []
+        dropped = 0
+        for observation in observations or []:
+            text = str(observation or "").strip()
+            if not text:
+                continue
+            if self._is_diagram_label_claim(text):
+                dropped += 1
+                continue
+            kept.append(text)
+        return kept, dropped
+
+    def _sanitize_diagram_frame_results_for_consensus(
+        self,
+        frame_results: list[dict],
+        allowed_observations: list[str],
+        allowed_relationships: list[dict],
+    ) -> list[dict]:
+        allowed_obs_keys = {
+            self._normalize_chart_text(observation)
+            for observation in (allowed_observations or [])
+            if str(observation or "").strip()
+        }
+        allowed_rel_keys = {
+            self._chart_relationship_key(rel)
+            for rel in (allowed_relationships or [])
+            if isinstance(rel, dict)
+        }
+
+        sanitized = []
+        for frame_result in frame_results or []:
+            if not isinstance(frame_result, dict):
+                continue
+            safe_frame = dict(frame_result)
+            result = dict(safe_frame.get("result") or {})
+
+            result["key_observations"] = [
+                str(observation or "").strip()
+                for observation in (result.get("key_observations") or [])
+                if self._normalize_chart_text(observation) in allowed_obs_keys
+            ]
+            result["relationships"] = [
+                {
+                    "from": rel.get("from"),
+                    "to": rel.get("to"),
+                    "label": rel.get("label"),
+                }
+                for rel in (result.get("relationships") or [])
+                if self._chart_relationship_key(rel) in allowed_rel_keys
+            ]
+            result["query_response"] = None
+            safe_frame["result"] = result
+            sanitized.append(safe_frame)
+        return sanitized
+
+    def _quoted_or_numeric_label_tokens(self, text: str) -> list[str]:
+        tokens = []
+        for left, right in re.findall(r"'([^']+)'|\"([^\"]+)\"", str(text or "")):
+            token = (left or right or "").strip()
+            if token:
+                tokens.append(token)
+        if tokens:
+            return tokens
+        return re.findall(r"\b\d+(?:\.\d+)?\b", str(text or ""))
+
+    def _collect_text_fields(self, value) -> list[str]:
+        out = []
+        if isinstance(value, dict):
+            text = value.get("text")
+            if text is not None:
+                text = str(text).strip()
+                if text:
+                    out.append(text)
+            for child in value.values():
+                out.extend(self._collect_text_fields(child))
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                out.extend(self._collect_text_fields(child))
+        return out
+
+    def _sanitize_math_solver_evidence_items(self, evidence_items: list[str]) -> list[str]:
+        cleaned_items = [str(item or "").strip() for item in (evidence_items or []) if str(item or "").strip()]
+        support_chunks = []
+        for item in cleaned_items:
+            raw_item = str(item).strip()
+            parsed = None
+            if raw_item.startswith(("[", "{")):
+                try:
+                    parsed = json.loads(raw_item)
+                except Exception:
+                    try:
+                        parsed = ast.literal_eval(raw_item)
+                    except Exception:
+                        parsed = None
+            if parsed is None:
+                support_chunks.append(raw_item)
+            else:
+                support_chunks.extend(self._collect_text_fields(parsed))
+        ocr_support_text = self._normalize_chart_text("\n".join(support_chunks))
+        sanitized = []
+        dropped_label_claims = 0
+
+        for item in cleaned_items:
+            raw_item = str(item).strip()
+            parsed = None
+            if raw_item.startswith("["):
+                try:
+                    parsed = json.loads(raw_item)
+                except Exception:
+                    try:
+                        parsed = ast.literal_eval(raw_item)
+                    except Exception:
+                        parsed = None
+
+            if isinstance(parsed, (list, tuple)):
+                rewritten = []
+                for entry in parsed:
+                    text = str(entry or "").strip()
+                    if not text:
+                        continue
+                    if self._is_diagram_label_claim(text):
+                        tokens = [
+                            self._normalize_chart_text(token)
+                            for token in self._quoted_or_numeric_label_tokens(text)
+                            if self._normalize_chart_text(token)
+                        ]
+                        if not tokens or not all(token in ocr_support_text for token in tokens):
+                            dropped_label_claims += 1
+                            continue
+                    rewritten.append(text)
+                if rewritten:
+                    sanitized.append(json.dumps(rewritten, ensure_ascii=False))
+                continue
+
+            if self._is_diagram_label_claim(raw_item):
+                tokens = [
+                    self._normalize_chart_text(token)
+                    for token in self._quoted_or_numeric_label_tokens(raw_item)
+                    if self._normalize_chart_text(token)
+                ]
+                if not tokens or not all(token in ocr_support_text for token in tokens):
+                    dropped_label_claims += 1
+                    continue
+            sanitized.append(raw_item)
+
+        if dropped_label_claims > 0:
+            sanitized.append(
+                "Some diagram label-attachment or repeated-label claims from structured diagram reading "
+                "were omitted because OCR did not corroborate the exact visible label text."
+            )
+        return sanitized
+
+    def _strip_math_solver_answer_choice_text(self, text: str, choices: list[str] | None = None) -> str:
+        cleaned = str(text or "").strip()
+        if not cleaned:
+            return ""
+
+        normalized_choices = [str(choice or "").strip() for choice in (choices or []) if str(choice or "").strip()]
+        parsed = None
+        if cleaned.startswith(("[", "{")):
+            try:
+                parsed = json.loads(cleaned)
+            except Exception:
+                try:
+                    parsed = ast.literal_eval(cleaned)
+                except Exception:
+                    parsed = None
+
+        if isinstance(parsed, (list, tuple, dict)):
+            def _scrub_structured(value):
+                if isinstance(value, str):
+                    return self._strip_math_solver_answer_choice_text(value, normalized_choices)
+                if isinstance(value, dict):
+                    rewritten = {}
+                    for key, child in value.items():
+                        scrubbed_child = _scrub_structured(child)
+                        if scrubbed_child in ("", None, [], {}):
+                            continue
+                        rewritten[key] = scrubbed_child
+                    return rewritten
+                if isinstance(value, (list, tuple)):
+                    rewritten = []
+                    for child in value:
+                        scrubbed_child = _scrub_structured(child)
+                        if scrubbed_child in ("", None, [], {}):
+                            continue
+                        rewritten.append(scrubbed_child)
+                    return rewritten
+                return value
+
+            scrubbed = _scrub_structured(parsed)
+            if scrubbed in ("", None, [], {}):
+                return ""
+            return json.dumps(scrubbed, ensure_ascii=False)
+
+        marker_match = re.search(r"(?is)\b(?:answer\s+choices?|choices?|options?)\s*:", cleaned)
+        if marker_match:
+            cleaned = cleaned[:marker_match.start()].rstrip(" \t\r\n,;:-")
+
+        instruction_match = re.search(
+            r"(?is)\b(?:choose|select|pick|map)\b[^.\n]{0,140}\b(?:option|answer choice)s?\b.*$",
+            cleaned,
+        )
+        if instruction_match:
+            cleaned = cleaned[:instruction_match.start()].rstrip(" \t\r\n,;:-")
+
+        lowered = cleaned.lower()
+        choice_hits = []
+        for choice in normalized_choices:
+            position = lowered.find(choice.lower())
+            if position >= 0:
+                choice_hits.append(position)
+        if len(choice_hits) >= 2:
+            cleaned = cleaned[: min(choice_hits)].rstrip(" \t\r\n,;:-")
+        elif choice_hits and re.search(r"(?is)\b(?:option|answer choice)s?\b", cleaned):
+            cleaned = cleaned[: min(choice_hits)].rstrip(" \t\r\n,;:-")
+
+        return cleaned.strip()
+
+    def _split_answer_choice_label(self, choice: str) -> tuple[str | None, str]:
+        text = str(choice or "").strip()
+        if not text:
+            return None, ""
+
+        patterns = [
+            r"^\(?\s*([A-Z])\s*\)?[\.\):\-]\s*(.+?)\s*$",
+            r"^(?:option|choice)\s+([A-Z])\s*[:\-]?\s*(.+?)\s*$",
+        ]
+        for pattern in patterns:
+            match = re.match(pattern, text, flags=re.IGNORECASE)
+            if match:
+                return match.group(1).upper(), str(match.group(2) or "").strip()
+        return None, text
+
+    def _normalize_choice_match_text(self, text: str) -> str:
+        _, body = self._split_answer_choice_label(text)
+        normalized = " ".join(str(body or "").strip().lower().split())
+        return normalized.strip(" \t\r\n.,;:()[]{}")
+
+    def _normalize_numeric_expression(self, text: str) -> str:
+        expr = str(text or "").strip()
+        if not expr:
+            return ""
+
+        replacements = {
+            "−": "-",
+            "–": "-",
+            "—": "-",
+            "×": "*",
+            "÷": "/",
+            "π": "pi",
+        }
+        for old, new in replacements.items():
+            expr = expr.replace(old, new)
+
+        prev = None
+        while expr != prev:
+            prev = expr
+            expr = re.sub(r"\\frac\s*\{([^{}]+)\}\s*\{([^{}]+)\}", r"(\1)/(\2)", expr)
+            expr = re.sub(r"\\sqrt\s*\{([^{}]+)\}", r"sqrt(\1)", expr)
+
+        expr = re.sub(r"(?i)\bsqrt\s+(\d+(?:\.\d+)?)\b", r"sqrt(\1)", expr)
+        expr = expr.replace("^", "**")
+        return expr.strip("`$ ")
+
+    def _safe_numeric_eval_ast(self, node) -> float:
+        if isinstance(node, ast.Expression):
+            return self._safe_numeric_eval_ast(node.body)
+        if isinstance(node, ast.Constant):
+            if isinstance(node.value, (int, float)):
+                return float(node.value)
+            raise ValueError("Unsupported constant")
+        if isinstance(node, ast.Num):
+            return float(node.n)
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+            value = self._safe_numeric_eval_ast(node.operand)
+            return value if isinstance(node.op, ast.UAdd) else -value
+        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow)):
+            left = self._safe_numeric_eval_ast(node.left)
+            right = self._safe_numeric_eval_ast(node.right)
+            if isinstance(node.op, ast.Add):
+                return left + right
+            if isinstance(node.op, ast.Sub):
+                return left - right
+            if isinstance(node.op, ast.Mult):
+                return left * right
+            if isinstance(node.op, ast.Div):
+                return left / right
+            return left ** right
+        if isinstance(node, ast.Name):
+            if node.id == "pi":
+                return float(math.pi)
+            if node.id == "e":
+                return float(math.e)
+            raise ValueError("Unsupported symbol")
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            name = node.func.id
+            args = [self._safe_numeric_eval_ast(arg) for arg in node.args]
+            if name == "sqrt" and len(args) == 1:
+                return float(math.sqrt(args[0]))
+            if name == "abs" and len(args) == 1:
+                return float(abs(args[0]))
+            raise ValueError("Unsupported function")
+        raise ValueError("Unsupported expression")
+
+    def _extract_numeric_value(self, text: str):
+        expr = self._normalize_numeric_expression(text)
+        if not expr:
+            return None
+
+        candidates = []
+
+        def _add_candidate(value):
+            value = str(value or "").strip()
+            if value and value not in candidates:
+                candidates.append(value)
+
+        _add_candidate(expr)
+        for separator in ("=", "≈", "~"):
+            if separator in expr:
+                for part in reversed(expr.split(separator)):
+                    _add_candidate(part.strip(" \t\r\n,;:"))
+        for part in re.split(r"(?i)\b(?:approximately|approx\.?|about)\b", expr):
+            _add_candidate(part.strip(" \t\r\n,;:"))
+        for token in re.findall(r"[-+]?\d+(?:\.\d+)?(?:\s*/\s*[-+]?\d+(?:\.\d+)?)?", expr):
+            _add_candidate(token)
+
+        for candidate in candidates:
+            try:
+                value = self._safe_numeric_eval_ast(ast.parse(candidate, mode="eval"))
+            except Exception:
+                continue
+            if math.isfinite(value):
+                return float(value)
+        return None
+
+    def _coerce_answer_choice_hint(self, answer_choice: str | None, choices: list[str]) -> str | None:
+        normalized_hint = " ".join(str(answer_choice or "").strip().lower().split())
+        if not normalized_hint:
+            return None
+        for choice in choices or []:
+            original = str(choice or "").strip()
+            label, body = self._split_answer_choice_label(original)
+            variants = {
+                " ".join(original.lower().split()),
+                " ".join(str(body or "").lower().split()),
+            }
+            if label:
+                variants.update({label.lower(), f"option {label.lower()}", f"choice {label.lower()}"})
+            if normalized_hint in variants:
+                return original
+        return None
+
+    def _match_math_solver_answer_choice(
+        self,
+        result_value: str | None,
+        choices: list[str],
+        hinted_choice: str | None = None,
+        insufficient_information: bool = False,
+    ) -> str | None:
+        if insufficient_information or not choices:
+            return None
+
+        hinted = self._coerce_answer_choice_hint(hinted_choice, choices)
+        if hinted:
+            return hinted
+
+        target_text = str(result_value or "").strip()
+        if not target_text:
+            return None
+
+        normalized_target = self._normalize_choice_match_text(target_text)
+        if not normalized_target:
+            return None
+
+        prepared = []
+        for choice in choices:
+            original = str(choice or "").strip()
+            if not original:
+                continue
+            label, body = self._split_answer_choice_label(original)
+            prepared.append(
+                {
+                    "original": original,
+                    "label": label,
+                    "body": body,
+                    "normalized_original": " ".join(original.lower().split()),
+                    "normalized_body": " ".join(str(body or "").lower().split()),
+                    "numeric_value": self._extract_numeric_value(body or original),
+                }
+            )
+
+        for choice in prepared:
+            if normalized_target in {choice["normalized_original"], choice["normalized_body"]}:
+                return choice["original"]
+            if choice["label"] and normalized_target in {
+                choice["label"].lower(),
+                f"option {choice['label'].lower()}",
+                f"choice {choice['label'].lower()}",
+            }:
+                return choice["original"]
+
+        target_value = self._extract_numeric_value(target_text)
+        if target_value is not None:
+            best_choice = None
+            best_diff = None
+            for choice in prepared:
+                numeric_value = choice["numeric_value"]
+                if numeric_value is None:
+                    continue
+                diff = abs(float(numeric_value) - float(target_value))
+                if best_diff is None or diff < best_diff:
+                    best_diff = diff
+                    best_choice = choice["original"]
+            if best_choice is not None:
+                return best_choice
+
+        for choice in prepared:
+            normalized_body = choice["normalized_body"]
+            if normalized_body and (
+                normalized_body in normalized_target or normalized_target in normalized_body
+            ):
+                return choice["original"]
+        return None
+
+    def _consensus_chart_text_items(self, item_lists: list[list], threshold: int | None = None) -> tuple[list[str], int]:
+        if threshold is None:
+            threshold = max(1, (len(item_lists) // 2) + 1)
+        counts = {}
+        representatives = {}
+        order = {}
+        dropped = 0
+        for idx, items in enumerate(item_lists):
+            seen = set()
+            for item in items or []:
+                text = str(item or "").strip()
+                key = self._normalize_chart_text(text)
+                if not key or key in seen:
+                    continue
+                counts[key] = counts.get(key, 0) + 1
+                seen.add(key)
+                if key not in representatives or (text and len(text) < len(representatives[key])):
+                    representatives[key] = text
+                order.setdefault(key, (idx, len(order)))
+        kept = []
+        for key, count in counts.items():
+            if count >= threshold and representatives.get(key):
+                kept.append((order[key], representatives[key]))
+            else:
+                dropped += 1
+        kept.sort(key=lambda item: item[0])
+        return [text for _, text in kept], dropped
+
+    def _consensus_chart_relationships(
+        self,
+        relationship_lists: list[list],
+        threshold: int | None = None,
+    ) -> tuple[list[dict], int]:
+        if threshold is None:
+            threshold = max(1, (len(relationship_lists) // 2) + 1)
+        counts = {}
+        representatives = {}
+        order = {}
+        dropped = 0
+        for idx, relationships in enumerate(relationship_lists):
+            seen = set()
+            for rel in relationships or []:
+                if not isinstance(rel, dict):
+                    continue
+                key = (
+                    self._normalize_chart_text(rel.get("from")),
+                    self._normalize_chart_text(rel.get("to")),
+                    self._normalize_chart_text(rel.get("label")),
+                )
+                if key == ("", "", "") or key in seen:
+                    continue
+                counts[key] = counts.get(key, 0) + 1
+                seen.add(key)
+                if key not in representatives:
+                    representatives[key] = {
+                        "from": rel.get("from"),
+                        "to": rel.get("to"),
+                        "label": rel.get("label"),
+                    }
+                order.setdefault(key, (idx, len(order)))
+        kept = []
+        for key, count in counts.items():
+            if count >= threshold and representatives.get(key):
+                kept.append((order[key], representatives[key]))
+            else:
+                dropped += 1
+        kept.sort(key=lambda item: item[0])
+        return [rel for _, rel in kept], dropped
+
+    def _consensus_chart_query_response(self, frame_results: list[dict], threshold: int | None = None) -> str | None:
+        if threshold is None:
+            threshold = max(1, (len(frame_results) // 2) + 1)
+        counts = {}
+        representatives = {}
+        order = {}
+        for idx, frame_result in enumerate(frame_results):
+            result = frame_result.get("result") if isinstance(frame_result, dict) else {}
+            text = str((result or {}).get("query_response", "") or "").strip()
+            key = self._normalize_chart_text(text)
+            if not key:
+                continue
+            counts[key] = counts.get(key, 0) + 1
+            if key not in representatives or len(text) < len(representatives[key]):
+                representatives[key] = text
+            order.setdefault(key, (idx, len(order)))
+        kept = [
+            (order[key], representatives[key])
+            for key, count in counts.items()
+            if count >= threshold and representatives.get(key)
+        ]
+        if not kept:
+            return None
+        kept.sort(key=lambda item: item[0])
+        return kept[0][1]
+
+    def _merge_chart_analysis_frame_results(self, frame_results: list[dict]) -> dict:
+        if not frame_results:
+            return {}
+
+        best_frame = max(
+            frame_results,
+            key=lambda item: (item.get("score", -1.0), item.get("timestamp", 0.0)),
+        )
+        result = dict(best_frame.get("result") or {})
+        result["selected_frame"] = {
+            "frame_path": best_frame.get("frame_path"),
+            "timestamp": best_frame.get("timestamp"),
+            "score": best_frame.get("score"),
+        }
+        result["frame_results"] = frame_results
+        result["multi_frame_strategy"] = "consensus_merge"
+        chart_type = str(result.get("chart_type", "") or "").strip().lower()
+        consensus_threshold = (
+            len(frame_results)
+            if chart_type == "diagram" and len(frame_results) > 2
+            else max(1, (len(frame_results) // 2) + 1)
+        )
+
+        observations, dropped_observations = self._consensus_chart_text_items(
+            [
+                (frame_result.get("result") or {}).get("key_observations") or []
+                for frame_result in frame_results
+            ],
+            threshold=consensus_threshold,
+        )
+        dropped_label_claims = 0
+        if chart_type == "diagram":
+            observations, dropped_label_claims = self._filter_diagram_label_claims(observations)
+            dropped_observations += dropped_label_claims
+        if observations or chart_type == "diagram":
+            result["key_observations"] = observations
+
+        relationships, dropped_relationships = self._consensus_chart_relationships(
+            [
+                (frame_result.get("result") or {}).get("relationships") or []
+                for frame_result in frame_results
+            ],
+            threshold=consensus_threshold,
+        )
+        if relationships or chart_type == "diagram" or any(
+            ((frame_result.get("result") or {}).get("relationships") or [])
+            for frame_result in frame_results
+        ):
+            result["relationships"] = relationships
+
+        if chart_type == "diagram" and observations:
+            stable_relationship_text = " ".join(
+                self._normalize_chart_text(rel.get("label"))
+                for rel in (relationships or [])
+                if isinstance(rel, dict)
+            )
+            filtered_observations = []
+            for observation in observations:
+                normalized_observation = self._normalize_chart_text(observation)
+                needs_relation_support = (
+                    "tangent" in normalized_observation
+                    or "diameter" in normalized_observation
+                    or "determined by" in normalized_observation
+                    or "defined by" in normalized_observation
+                )
+                if needs_relation_support and not any(
+                    token in stable_relationship_text
+                    for token in ("tangent", "diameter", "determined", "defined")
+                ):
+                    dropped_observations += 1
+                    continue
+                filtered_observations.append(observation)
+            observations = filtered_observations
+            result["key_observations"] = observations
+
+        consensus_query_response = self._consensus_chart_query_response(
+            frame_results,
+            threshold=consensus_threshold,
+        )
+        if consensus_query_response:
+            result["query_response"] = consensus_query_response
+        elif chart_type == "diagram" and observations:
+            result["query_response"] = "Stable cross-frame diagram facts: " + "; ".join(observations[:4])
+        elif chart_type == "diagram":
+            result["query_response"] = (
+                "The provided matching frames do not support a stable enough cross-frame diagram "
+                "interpretation to answer the full query without ambiguity."
+            )
+
+        if chart_type == "diagram" and self._is_diagram_label_claim(str(result.get("query_response", "") or "")):
+            if observations:
+                result["query_response"] = "Stable cross-frame diagram facts: " + "; ".join(observations[:4])
+            else:
+                result["query_response"] = (
+                    "Visible label attachment claims require OCR corroboration and are omitted from "
+                    "the diagram summary."
+                )
+
+        if chart_type == "diagram":
+            result["frame_results"] = self._sanitize_diagram_frame_results_for_consensus(
+                frame_results,
+                observations,
+                relationships,
+            )
+
+        if (
+            chart_type == "diagram"
+            and (dropped_observations > 0 or dropped_relationships > 0)
+        ):
+            note = (
+                "Across the provided matching frames, some finer-grained diagram relations were not "
+                "stated consistently, so only the stable cross-frame primitives are preserved in the "
+                "merged summary."
+            )
+            existing = [
+                str(item or "").strip()
+                for item in (result.get("key_observations") or [])
+                if str(item or "").strip()
+            ]
+            if note not in existing:
+                existing.append(note)
+            result["key_observations"] = existing
+
+        if chart_type == "diagram" and dropped_label_claims > 0:
+            note = (
+                "Visible label-attachment or repeated-label claims are omitted from the diagram "
+                "summary and should be verified with OCR rather than chart_analyzer alone."
+            )
+            existing = [
+                str(item or "").strip()
+                for item in (result.get("key_observations") or [])
+                if str(item or "").strip()
+            ]
+            if note not in existing:
+                existing.append(note)
+            result["key_observations"] = existing
+
+        return result
+
+    def _geometry_evidence_conflicts(self, evidence) -> list[str]:
+        if isinstance(evidence, list):
+            text = "\n".join(str(item or "") for item in evidence)
+        else:
+            text = str(evidence or "")
+        normalized = self._normalize_chart_text(text)
+        conflicts = []
+
+        has_negative_tangency = (
+            "not tangent" in normalized
+            or "not by tangency" in normalized
+            or "not tangent to any of the inner arcs" in normalized
+        )
+        has_positive_tangency = (
+            " is tangent to " in f" {normalized} "
+            or " are tangent to " in f" {normalized} "
+            or " tangent at " in normalized
+            or " tangency to " in normalized
+        )
+        if has_negative_tangency and has_positive_tangency:
+            conflicts.append("The evidence does not consistently establish which curves are tangent.")
+
+        has_negative_semicircle = "not a full semicircle" in normalized
+        has_positive_semicircle = (
+            "is a semicircle" in normalized
+            or "are semicircles" in normalized
+            or "each curved arc is a semicircle" in normalized
+            or "each arc is a semicircle" in normalized
+        )
+        if has_negative_semicircle and has_positive_semicircle:
+            conflicts.append("The evidence does not consistently establish whether the curved piece is a full semicircle or a smaller arc.")
+
+        determined_by_vertices = (
+            "defined by the four vertices" in normalized
+            or "determined by the square's vertices" in normalized
+            or "passes through the four vertices" in normalized
+        )
+        determined_by_tangency = (
+            "determined by tangency" in normalized
+            or "by tangency to the inner arcs" in normalized
+        )
+        if determined_by_vertices and determined_by_tangency:
+            conflicts.append("The evidence gives incompatible rules for what determines the larger boundary.")
+
+        return conflicts
+
+    def _enforce_math_solver_consistency(self, evidence, result: dict) -> dict:
+        if not isinstance(result, dict):
+            return result
+
+        conflicts = self._geometry_evidence_conflicts(evidence)
+        if not conflicts or bool(result.get("insufficient_information")):
+            return result
+
+        enforced = dict(result)
+        enforced["insufficient_information"] = True
+        enforced["result"] = None
+        enforced["answer_choice"] = None
+        try:
+            enforced["confidence"] = min(float(enforced.get("confidence", 0.0) or 0.0), 0.35)
+        except (TypeError, ValueError):
+            enforced["confidence"] = 0.35
+
+        missing_facts = [
+            str(item or "").strip()
+            for item in (enforced.get("missing_facts") or [])
+            if str(item or "").strip()
+        ]
+        for conflict in conflicts:
+            if conflict not in missing_facts:
+                missing_facts.append(conflict)
+        enforced["missing_facts"] = missing_facts
+
+        derivation = [
+            str(item or "").strip()
+            for item in (enforced.get("derivation") or [])
+            if str(item or "").strip()
+        ]
+        note = "The provided evidence contains unresolved conflicting geometry descriptions, so a unique derivation is not justified."
+        if note not in derivation:
+            derivation.append(note)
+        enforced["derivation"] = derivation
+        return enforced
 
     def _resolve_frame_bundle(self, arguments: dict):
         raw_paths = arguments.get("frame_paths", arguments.get("frame_path"))
@@ -3939,22 +4867,145 @@ class RefinerToolsMixin:
                             "result": single_result,
                         }
                     )
-                best_frame = max(
-                    frame_results,
-                    key=lambda item: (item["score"], item["timestamp"]),
-                )
-                result = dict(best_frame["result"])
-                result["selected_frame"] = {
-                    "frame_path": best_frame["frame_path"],
-                    "timestamp": best_frame["timestamp"],
-                    "score": best_frame["score"],
-                }
-                result["frame_results"] = frame_results
-                result["multi_frame_strategy"] = "best_single_frame"
+                result = self._merge_chart_analysis_frame_results(frame_results)
             else:
                 result = _run_chart_analysis(frame_paths, frame_timestamps)
 
             results.append(self._format_refine_tool_result("chart_analyzer", arguments, result))
+
+        return "".join(results)
+
+    def _process_math_solver(self, output_text: str) -> str:
+        calls = self._get_refine_tool_calls(output_text, "math_solver")
+        if not calls:
+            return ""
+
+        print("\n[Tool] Math Solver")
+        results = []
+
+        for arguments in calls:
+            question = str(arguments.get("question", "") or getattr(self, "question", "") or "").strip()
+            answer_choices = arguments.get("answer_choices")
+            if isinstance(answer_choices, list):
+                choices = [str(item).strip() for item in answer_choices if str(item).strip()]
+            else:
+                choices = [str(item).strip() for item in (getattr(self, "options", None) or []) if str(item).strip()]
+            question = self._strip_math_solver_answer_choice_text(question, choices)
+
+            evidence = arguments.get("evidence", "")
+            if isinstance(evidence, list):
+                evidence_items = [str(item).strip() for item in evidence if str(item).strip()]
+            else:
+                text = str(evidence or "").strip()
+                evidence_items = [text] if text else []
+            evidence_items = [
+                cleaned
+                for cleaned in (
+                    self._strip_math_solver_answer_choice_text(item, choices)
+                    for item in evidence_items
+                )
+                if cleaned
+            ]
+            evidence_items = self._sanitize_math_solver_evidence_items(evidence_items)
+            frame_paths, frame_timestamps = self._resolve_frame_bundle(arguments)
+
+            default_result = {
+                "interpreted_facts": [],
+                "derivation": [],
+                "result": None,
+                "answer_choice": None,
+                "confidence": 0.0,
+                "insufficient_information": False,
+                "missing_facts": [],
+            }
+
+            evidence_block = "\n".join(
+                f"- {item}" for item in evidence_items
+            ) or "- (no grounded evidence provided)"
+            prompt = (
+                math_solver_prompt.strip()
+                + "\n\nQUESTION:\n"
+                + (question or "(missing)")
+                + "\n\nGROUNDED_EVIDENCE:\n"
+                + evidence_block
+            )
+
+            if frame_paths:
+                frame_block = "\n".join(
+                    f"- {float(ts):.3f}s: {os.path.basename(path)}"
+                    for path, ts in zip(frame_paths, frame_timestamps)
+                )
+                prompt += (
+                    "\n\nSUPPORTING_FRAMES:\n"
+                    + frame_block
+                    + "\nUse the attached frame(s) as supporting visual context for directly visible"
+                    + " labels, shapes, geometry relations, chart structure, and other plainly"
+                    + " visible premises. Prefer directly visible primitive facts from the attached"
+                    + " frame(s) for labels, shape type, attachment points, and intersections. If"
+                    + " a textual claim and the attached frame suggest different directly visible"
+                    + " primitives, treat that primitive as ambiguous rather than blindly preferring"
+                    + " either source. Never invent facts that are unclear or hidden."
+                )
+
+            raw_output = ""
+            if frame_paths:
+                raw_output = self._call_math_solver_with_frames(prompt, frame_paths, frame_timestamps)
+            if not raw_output:
+                raw_output = self._call_math_solver_text(prompt)
+            parsed = self._extract_json_payload(raw_output)
+
+            if isinstance(parsed, dict):
+                result = dict(default_result)
+                result.update(parsed)
+            else:
+                result = dict(default_result)
+                result["insufficient_information"] = True
+                result["missing_facts"] = ["math_solver returned malformed or non-JSON output"]
+                result["raw_output"] = str(raw_output or "").strip()
+
+            if not isinstance(result.get("interpreted_facts"), list):
+                result["interpreted_facts"] = [str(result.get("interpreted_facts", "")).strip()] if str(result.get("interpreted_facts", "")).strip() else []
+            else:
+                result["interpreted_facts"] = [str(item).strip() for item in result.get("interpreted_facts") if str(item).strip()]
+
+            if not isinstance(result.get("derivation"), list):
+                result["derivation"] = [str(result.get("derivation", "")).strip()] if str(result.get("derivation", "")).strip() else []
+            else:
+                result["derivation"] = [str(item).strip() for item in result.get("derivation") if str(item).strip()]
+
+            if not isinstance(result.get("missing_facts"), list):
+                result["missing_facts"] = [str(result.get("missing_facts", "")).strip()] if str(result.get("missing_facts", "")).strip() else []
+            else:
+                result["missing_facts"] = [str(item).strip() for item in result.get("missing_facts") if str(item).strip()]
+
+            try:
+                result["confidence"] = max(0.0, min(1.0, float(result.get("confidence", 0.0) or 0.0)))
+            except Exception:
+                result["confidence"] = 0.0
+
+            raw_insufficient = result.get("insufficient_information", False)
+            if isinstance(raw_insufficient, str):
+                result["insufficient_information"] = raw_insufficient.strip().lower() in {
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                }
+            else:
+                result["insufficient_information"] = bool(raw_insufficient)
+            if result.get("result") is not None:
+                result["result"] = str(result.get("result")).strip() or None
+            if result.get("answer_choice") is not None:
+                result["answer_choice"] = str(result.get("answer_choice")).strip() or None
+
+            result = self._enforce_math_solver_consistency(evidence, result)
+            result["answer_choice"] = self._match_math_solver_answer_choice(
+                result.get("result"),
+                choices,
+                hinted_choice=result.get("answer_choice"),
+                insufficient_information=bool(result.get("insufficient_information")),
+            )
+            results.append(self._format_refine_tool_result("math_solver", arguments, result))
 
         return "".join(results)
 

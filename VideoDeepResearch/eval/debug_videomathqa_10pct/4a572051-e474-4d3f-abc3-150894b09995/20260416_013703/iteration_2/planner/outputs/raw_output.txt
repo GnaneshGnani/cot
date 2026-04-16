@@ -1,0 +1,44 @@
+{
+  "strategy": "Reuse the already grounded static problem frames, but add one targeted diagram-interpretation pass that explicitly reads the shaded components and one targeted spatial pass that grounds the center/tangency relations needed for the radius derivation. This should replace the under-justified geometry step and allow a supported area computation mapped to an answer option.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "chart_analyzer",
+      "arguments": {
+        "frame_path": [
+          "frame_49.50.png",
+          "frame_61.00.png",
+          "frame_62.00.png"
+        ],
+        "timestamp": [
+          49.5,
+          61.0,
+          62.0
+        ],
+        "query": "Geometry diagram with one large circle and four equal inner circles: identify exactly which regions are shaded, whether the four smaller circles are filled or excluded from the shaded area, and describe the circle arrangement and tangencies needed to compute shaded area."
+      },
+      "purpose": "Get an explicit, structure-aware reading of the diagram that clarifies which pieces are shaded and whether the intended area is large circle minus four small circles or only the outer crescent regions.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "spatial_grounder",
+      "arguments": {
+        "frame_path": [
+          "frame_49.50.png",
+          "frame_61.00.png",
+          "frame_62.00.png"
+        ],
+        "timestamp": [
+          49.5,
+          61.0,
+          62.0
+        ],
+        "query": "Large outer circle and four equal inner circles arranged at top, bottom, left, and right: ground the five circles, indicate whether the four inner circle centers lie on the vertical and horizontal diameters through the large-circle center, and describe which circles are tangent to each other and to the large circle."
+      },
+      "purpose": "Directly support the geometric premises needed for the radius equation, instead of inferring exact center-distance relations from a broad symmetry description alone.",
+      "depends_on": []
+    }
+  ],
+  "refinement_instructions": "Keep the already supported OCR fact that the large circle's diameter is 84, so its radius is 42. Replace the old step 3 with a geometry derivation that cites step 2 explicitly: use the grounded fact that the four equal inner-circle centers lie on the horizontal/vertical diameters through the large-circle center and are tangent to adjacent inner circles and the outer circle. Use those grounded relations to justify the center-distance equation before solving for the small-circle radius. Also replace the old shading interpretation with the authoritative reading from step 1: if chart_analyzer specifies that only the outer crescent regions are shaded, compute that exact union; if it specifies that the four inner circles are the excluded orange regions, compute large-circle area minus four small-circle areas. Use frame-level results, not just any top-level summary, and preserve only claims that are explicitly supported by those outputs. If the recomputed value is approximate, explain the closest-option mapping clearly. Update the final answer to the option supported by the recomputation; do not leave the trace unresolved."
+}

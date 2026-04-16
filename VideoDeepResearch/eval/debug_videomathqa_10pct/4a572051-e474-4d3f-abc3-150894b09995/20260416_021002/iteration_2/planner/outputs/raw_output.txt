@@ -1,0 +1,34 @@
+{
+  "strategy": "Reuse the already-stable bottle frame bundle, but run a sharper spatial grounding query that directly asks for the liquid surface / blue liquid region rather than the combined cavity-plus-liquid box. This should supply a tool-grounded liquid-top boundary so the refiner can recompute the fill ratio and map it to the nearest option with explicit support.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "video",
+        "query": null,
+        "timestamps": [
+          1.2,
+          1.8,
+          2.4
+        ],
+        "num_frames": 3
+      },
+      "purpose": "Recreate the stable centered bottle frames after the illustration appears, so the next grounding step can inspect the same coherent candidate bundle instead of relying on the earlier approximate textual read.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "spatial_grounder",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null,
+        "query": "blue liquid inside the bottle, including the flat top surface of the liquid"
+      },
+      "purpose": "Directly ground the liquid region itself across the candidate frames so the trace can cite a tool-backed top boundary for the liquid instead of inferring it from a combined bottle-and-liquid bbox.",
+      "depends_on": [
+        1
+      ]
+    }
+  ],
+  "refinement_instructions": "Keep the earlier supported setup facts: the bottle appears after about 1.0s and the sampled post-appearance frames are the right stable evidence anchor. Replace the unsupported claim that the liquid top is at about y = 492 unless step 2 now provides frame-level grounding that explicitly supports a comparable top boundary. Use the step-2 per-frame results, not just any top-level summary, and choose the frame whose liquid detection is cleanest and most consistent with the centered bottle. Recompute the fill fraction by comparing the grounded liquid region's top-to-bottom extent against the previously grounded usable bottle interior height only if both quantities are tool-supported in the same frame state; otherwise state the remaining uncertainty. Update the option mapping only after citing the new grounded fraction, and explain the closest-option choice if the measured value is approximate. If the new grounded fraction contradicts answer A, update the final answer accordingly."}

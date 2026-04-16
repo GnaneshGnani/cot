@@ -408,7 +408,7 @@ def main():
     )
     parser.add_argument(
         "--caption-model",
-        default=os.environ.get("CAPTION_MODEL", "Qwen/Qwen3.5-397B-A17B"),
+        default=os.environ.get("CAPTION_MODEL", "Qwen/Qwen3-VL-72B-Instruct"),
         help="Nebius VLM for frame captioning",
     )
     parser.add_argument(
