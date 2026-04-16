@@ -1,0 +1,43 @@
+{
+  "strategy": "Ground the problem statement and the final computed probability directly from the static instructional slides. Since this is a geometry text/diagram video with no prior trace, use frame retrieval to capture the problem and solution frames, then OCR to read the exact givens and any displayed result.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "VIDEO",
+        "query": "static geometry problem slide showing two 20 cm squares inside a 100 cm square with probability of overlap text and diagram",
+        "timestamps": null,
+        "num_frames": 3
+      },
+      "purpose": "Retrieve candidate frames containing the main problem statement and possibly the displayed solution/result.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "ocr",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null
+      },
+      "purpose": "Read the on-screen text to extract the exact problem statement, dimensions, and any displayed probability or option text.",
+      "depends_on": [
+        1
+      ]
+    },
+    {
+      "step": 3,
+      "tool": "chart_analyzer",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null,
+        "query": "geometry diagram showing two equal squares inside a larger square, including side lengths, overlap region, and any labeled dimensions or regions relevant to computing overlap probability"
+      },
+      "purpose": "Interpret the geometric diagram structure in case the final probability is conveyed through the diagram/solution layout rather than plain OCR text alone.",
+      "depends_on": [
+        1
+      ]
+    }
+  ],
+  "refinement_instructions": "Write a complete first reasoning trace from scratch. Use OCR as authoritative for the exact problem statement, dimensions, and any visible answer choices or displayed final result. Use chart_analyzer only to support the geometric setup: identify the large square, the two 20x20 squares, their parallel orientation, and the overlap-feasible region implied by the bottom-left-corner positions. If OCR directly reveals the final probability or highlights the correct option, cite that directly and update the answer accordingly. If OCR does not show the final probability explicitly, use the grounded dimensions from OCR plus the diagram interpretation from chart_analyzer to build the geometric-probability derivation, but do not invent any givens not present on screen. Preserve tool provenance in the rewritten trace by attributing textual claims to OCR and structural diagram claims to chart_analyzer."
+}

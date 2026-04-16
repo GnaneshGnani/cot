@@ -1636,10 +1636,12 @@ Prefer this shape whenever the question allows it:
 4. final answer.
 
 Style constraints:
-- Prefer 3-6 steps total. Exceed 6 only when the question truly has multiple
-  independent subgoals or an unresolved branch that must be explained.
-- Prefer one main claim per step and keep each step short: usually 1-2
-  sentences, not a paragraph.
+- Prefer one main claim per step and keep each step short: usually 1
+  sentence, use 2 only when needed to pair evidence with the conclusion.
+- Include only answer-critical evidence, comparisons, or arithmetic in each
+  step. Omit filler, repeated setup, and obvious restatements.
+- When a detail matters, state it concretely in the shortest useful form
+  (tool + timestamp/frame/value) rather than explaining around it.
 - Start with the answer-critical anchor or decisive evidence, not with general
   search history.
 - Group multi-part questions by subgoal rather than by tool chronology, then
@@ -1937,8 +1939,13 @@ Self-contained means:
 
 Required style:
 - Keep the trace compact and reader-facing.
+- Prefer 1 sentence per step; use 2 only when needed to connect the evidence
+  to the conclusion.
+- Include only answer-critical details. Cut filler, repeated restatements, and
+  paragraph-style narration.
 - Keep each step self-contained.
-- Keep tool provenance inline where needed.
+- Keep tool provenance inline where needed, but in the shortest form that
+  preserves the evidence.
 - The last step should still be a crisp answer step.
 - If the trace must remain unresolved, state the unresolved evidence gap
   directly without referring to pipeline history.
@@ -2758,8 +2765,6 @@ When producing the final trace (type: "trace"):
   claim rather than a paragraph-length tool log
 - Do NOT prefix each string with "Step 1", "Step 2", etc.; the list order
   already defines the step order
-- Prefer 3-6 steps total. Exceed 6 only when the question truly has multiple
-  independent subgoals or an unresolved branch that must be explained
 - Use claim-first ordering when possible:
   1. answer-critical anchor,
   2. decisive evidence,

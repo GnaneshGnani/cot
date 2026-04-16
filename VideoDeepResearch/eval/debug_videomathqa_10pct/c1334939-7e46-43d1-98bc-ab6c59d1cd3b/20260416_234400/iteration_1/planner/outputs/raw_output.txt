@@ -1,0 +1,51 @@
+{
+  "strategy": "Resolve the failure by isolating the correct worksheet phase for figure 2 instead of reusing a mixed candidate bundle, then read the diagram structure from a small local timestamp sweep around the known worksheet frames. The goal is to determine the true shaded-to-total area ratio for figure 2 and map it to the listed option.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "video",
+        "query": null,
+        "timestamps": [
+          6.5,
+          7.0,
+          7.5,
+          32.0,
+          32.5,
+          33.0,
+          33.5
+        ],
+        "num_frames": 7
+      },
+      "purpose": "Sample the exact candidate worksheet moments already implicated by the prior disagreement, so the refiner can compare nearby states chronologically and avoid mixing a wrong or partial phase of figure 2 with the actual prompt frame.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "chart_analyzer",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null,
+        "query": "Figure 2 on the worksheet: identify the full diagram structure, the total number of congruent small regions, which regions are shaded, and any visible boundaries or partitions relevant to area probability."
+      },
+      "purpose": "Interpret the geometry diagram across the candidate frame bundle and recover frame-level structured readings, so the correct figure-2 shaded-region count can be selected from the actual worksheet state rather than a mixed bundle summary.",
+      "depends_on": [
+        1
+      ]
+    },
+    {
+      "step": 3,
+      "tool": "ocr",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null
+      },
+      "purpose": "Verify which sampled frame(s) visibly show the problem number, prompt, and figure 2 labeling together with the diagram, so the refiner can anchor the chart interpretation to the true question-bearing frame.",
+      "depends_on": [
+        1
+      ]
+    }
+  ],
+  "refinement_instructions": "Replace the old mixed-frame claim that figure 2 could not be determined. Use STEP 3 to identify which sampled frame(s) are the actual question-bearing worksheet view for problem 2, then use the corresponding frame-level result inside STEP 2.frame_results rather than the chart_analyzer top-level convenience summary if they differ. Preserve the already-supported OCR fact that the prompt asks for the probability a random point lies in the shaded region and that the options are A 0.43, B 0.60, C 0.67, D 0.75, E 0.62. In the rewritten trace, explicitly state the grounded diagram structure from the correct frame: total equal-area parts and shaded equal-area parts. Then compute shaded area / total area and select the nearest exact matching option only if the grounded ratio clearly supports it; if the ratio is an obvious common fraction rendered approximately, explain that mapping. Do not pool conflicting frame interpretations across different timestamps. If one sampled frame is clearly the prompt frame and another is a different worksheet state or different figure, treat that as superseding the earlier ambiguity and update the final answer accordingly."
+}

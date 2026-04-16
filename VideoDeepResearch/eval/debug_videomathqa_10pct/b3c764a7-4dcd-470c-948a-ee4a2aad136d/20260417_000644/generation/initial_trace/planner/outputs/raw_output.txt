@@ -1,0 +1,31 @@
+{
+  "strategy": "Use a single frame from the static video and directly ground the visible T-shirt and its openings. Since the scene is unchanged throughout, one representative frame plus object grounding is the cheapest sufficient evidence.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "VIDEO",
+        "query": "white T-shirt centered on screen against a blue background, showing all visible openings and tears",
+        "timestamps": null,
+        "num_frames": 1
+      },
+      "purpose": "Retrieve a representative frame of the static T-shirt image for direct visual inspection.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "spatial_grounder",
+      "arguments": {
+        "frame_path": "<STEP_1:frames[0].frame_path>",
+        "timestamp": "<STEP_1:frames[0].timestamp>",
+        "query": "all visible holes and openings in the white T-shirt, including neck opening, sleeve openings, bottom opening, and any tears in the fabric"
+      },
+      "purpose": "Ground the answer-critical visible openings/holes on the shirt so the refiner can count them explicitly rather than guessing.",
+      "depends_on": [
+        1
+      ]
+    }
+  ],
+  "refinement_instructions": "Write the first trace from scratch. Use the frame from step 1 as the visual anchor. In the rewritten reasoning, explicitly distinguish the visible shirt openings that count as holes: neck, two sleeves, bottom opening, plus any additional torn fabric holes detected in step 2. Base the final count on the grounded visible openings in the frame, not on generic assumptions. Cite step-2 detections/spatial description as the authoritative evidence for what openings are present. If step 2 shows the standard four openings plus two extra tears, update the final answer to E (6). If the detections differ, use the actually grounded count and map it to the provided option. Do not mention unsupported audio or temporal reasoning, since the video is static."
+}

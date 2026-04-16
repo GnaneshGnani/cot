@@ -1,0 +1,209 @@
+{
+  "trace_steps": [
+    "frame_retriever returns the unsolved geometry diagram at 27.0s as the strongest candidate (frame_27.00.png, relevance_score 0.6333), with nearby matching candidates at 26.5s and 28.0s, so these frames are the answer-critical visual phase.",
+    "On the same diagram, chart_analyzer's frame-level read for frame_26.50.png reports points A, B, C, D with A, B, D on one line, segments AC, BC, and CD drawn, ∠CAB marked 100°, AC = AD by matching double tick marks, and BC equal to AD; OCR across 26.5s/27.0s/28.0s confirms the printed givens 'AD = BC' and '100°' (avg detection confidence 0.9636).",
+    "From those givens, AD = BC and AC = AD imply AC = AD = BC, so triangle ACD is isosceles with AC = AD and triangle BCD is isosceles with BC = BD not actually grounded; the only directly grounded equalities are AC = AD and AD = BC, hence AC = AD = BC.",
+    "Using the grounded equalities, triangle ACD has vertex angle ∠CAD = 100° because chart_analyzer identifies the 100° angle at A between AC and the base line through A-B-D. Therefore the base angles of triangle ACD are (180° - 100°) / 2 = 40° each, so ∠CDA = 40°.",
+    "Since A, B, and D are collinear with B between A and D in the chart_analyzer frame-level read, ray DB is the same direction as ray DA at vertex D. Thus the asked green angle ∠BDC equals ∠CDA = 40°.",
+    "So the measure of angle BDC is 40°, which matches option D."
+  ],
+  "answer": "D. 40 degree",
+  "generation_rounds": [
+    {
+      "phase": "initial_trace_generation",
+      "diagnosis": {
+        "verdict": "FAIL",
+        "answer_correct": false,
+        "trace_quality_scores": {
+          "perceptual_correctness": 0.0,
+          "temporal_accuracy": 0.0,
+          "logical_coherence": 0.0,
+          "completeness": 0.0
+        },
+        "error_categories": [
+          {
+            "type": "INCOMPLETE_TRACE",
+            "step_index": null,
+            "description": "No initial reasoning trace or answer is available. Decompose the question into answer-critical subgoals, gather the minimal tool evidence needed to answer it from scratch, and prepare refinement instructions that let the refiner synthesize a complete first trace.",
+            "severity": "HIGH",
+            "suggested_tools": [],
+            "evidence": null
+          }
+        ],
+        "confidence": 1.0,
+        "summary": "Cold-start generation mode: ORIGINAL_TRACE and ORIGINAL_ANSWER are intentionally empty. Plan tool calls from the question alone, then synthesize the first tool-grounded trace.",
+        "generation_mode": "cold_start"
+      },
+      "planner_raw": "{\n  \"strategy\": \"Ground the original unsolved geometry diagram first, then use chart/diagram interpretation on that frame bundle to read the labeled angles and structural relations needed to compute angle BDC. Keep the plan minimal and avoid broad video understanding since the question is about a single static diagram near the start.\",\n  \"tool_calls\": [\n    {\n      \"step\": 1,\n      \"tool\": \"frame_retriever\",\n      \"arguments\": {\n        \"video_path\": \"VIDEO\",\n        \"query\": \"original geometry problem diagram with triangle labeled A B C and angle BDC marked in green, before any worked-solution annotations are added\",\n        \"timestamps\": null,\n        \"num_frames\": 3\n      },\n      \"purpose\": \"Retrieve candidate frames of the question-bearing geometry diagram in its unsolved state so later analysis reads the correct visual phase rather than an explanation frame.\",\n      \"depends_on\": []\n    },\n    {\n      \"step\": 2,\n      \"tool\": \"chart_analyzer\",\n      \"arguments\": {\n        \"frame_path\": \"<STEP_1:frames>\",\n        \"timestamp\": null,\n        \"query\": \"geometry diagram: identify all visible labeled points, angle markings, given angle values, equal-length marks, and which rays/segments form angle BDC marked in green\"\n      },\n      \"purpose\": \"Interpret the structured geometry figure and extract the exact labels, marked angles, and segment relationships needed for reasoning about angle BDC.\",\n      \"depends_on\": [\n        1\n      ]\n    },\n    {\n      \"step\": 3,\n      \"tool\": \"ocr\",\n      \"arguments\": {\n        \"frame_path\": \"<STEP_1:frames>\",\n        \"timestamp\": null\n      },\n      \"purpose\": \"Verify the visible text labels and numeric angle values on the same candidate frames in case the diagram interpreter misses or paraphrases small labels.\",\n      \"depends_on\": [\n        1\n      ]\n    }\n  ],\n  \"refinement_instructions\": \"Write a first trace from scratch. Use step 1 only to identify the correct unsolved diagram frame among the returned candidates; do not assume retrieval rank implies correctness. Then use the frame-level result from step 2 for the candidate frame that actually shows the original problem. Cite the diagram evidence explicitly: labeled points, equal-length marks, given angle values, and the rays that define green angle BDC. Use step 3 to confirm exact text/numbers/labels if any are small or ambiguous in step 2. In the rewritten trace, first describe the grounded diagram structure, then perform only the geometry derivation supported by those grounded givens, and finally map the computed angle to the matching option. If the verified value contradicts any tentative intuition, update the answer to the option matching the computed measure. If any label or value remains unreadable, state that uncertainty rather than guessing.\"\n}",
+      "planner_output": {
+        "strategy": "Ground the original unsolved geometry diagram first, then use chart/diagram interpretation on that frame bundle to read the labeled angles and structural relations needed to compute angle BDC. Keep the plan minimal and avoid broad video understanding since the question is about a single static diagram near the start.",
+        "tool_calls": [
+          {
+            "step": 1,
+            "tool": "frame_retriever",
+            "arguments": {
+              "video_path": "VIDEO",
+              "query": "original geometry problem diagram with triangle labeled A B C and angle BDC marked in green, before any worked-solution annotations are added",
+              "timestamps": null,
+              "num_frames": 3
+            },
+            "purpose": "Retrieve candidate frames of the question-bearing geometry diagram in its unsolved state so later analysis reads the correct visual phase rather than an explanation frame.",
+            "depends_on": []
+          },
+          {
+            "step": 2,
+            "tool": "chart_analyzer",
+            "arguments": {
+              "frame_path": "<STEP_1:frames>",
+              "timestamp": null,
+              "query": "geometry diagram: identify all visible labeled points, angle markings, given angle values, equal-length marks, and which rays/segments form angle BDC marked in green"
+            },
+            "purpose": "Interpret the structured geometry figure and extract the exact labels, marked angles, and segment relationships needed for reasoning about angle BDC.",
+            "depends_on": [
+              1
+            ]
+          },
+          {
+            "step": 3,
+            "tool": "ocr",
+            "arguments": {
+              "frame_path": "<STEP_1:frames>",
+              "timestamp": null
+            },
+            "purpose": "Verify the visible text labels and numeric angle values on the same candidate frames in case the diagram interpreter misses or paraphrases small labels.",
+            "depends_on": [
+              1
+            ]
+          }
+        ],
+        "refinement_instructions": "Write a first trace from scratch. Use step 1 only to identify the correct unsolved diagram frame among the returned candidates; do not assume retrieval rank implies correctness. Then use the frame-level result from step 2 for the candidate frame that actually shows the original problem. Cite the diagram evidence explicitly: labeled points, equal-length marks, given angle values, and the rays that define green angle BDC. Use step 3 to confirm exact text/numbers/labels if any are small or ambiguous in step 2. In the rewritten trace, first describe the grounded diagram structure, then perform only the geometry derivation supported by those grounded givens, and finally map the computed angle to the matching option. If the verified value contradicts any tentative intuition, update the answer to the option matching the computed measure. If any label or value remains unreadable, state that uncertainty rather than guessing."
+      },
+      "executed_tools": [
+        {
+          "step": 1,
+          "tool": "frame_retriever",
+          "arguments": {
+            "video_path": "VIDEO",
+            "query": "original geometry problem diagram with triangle labeled A B C and angle BDC marked in green, before any worked-solution annotations are added",
+            "num_frames": 3
+          },
+          "purpose": "Retrieve candidate frames of the question-bearing geometry diagram in its unsolved state so later analysis reads the correct visual phase rather than an explanation frame.",
+          "depends_on": [],
+          "output": "The tool results for frame_retriever({\"video_path\": \"VIDEO\", \"query\": \"original geometry problem diagram with triangle labeled A B C and angle BDC marked in green, before any worked-solution annotations are added\", \"num_frames\": 3}) are:\n{\"mode\": \"query\", \"frames\": [{\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/e77882ab-d34b-402c-b549-373fa2263179/frame_27.00.png\", \"timestamp\": 27.0, \"relevance_score\": 0.6333100199699402}, {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/e77882ab-d34b-402c-b549-373fa2263179/frame_26.50.png\", \"timestamp\": 26.5, \"relevance_score\": 0.6326868534088135}, {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/e77882ab-d34b-402c-b549-373fa2263179/frame_28.00.png\", \"timestamp\": 28.0, \"relevance_score\": 0.6303883194923401}]}"
+        },
+        {
+          "step": 2,
+          "tool": "chart_analyzer",
+          "arguments": {
+            "frame_path": [
+              {
+                "frame_path": "/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/e77882ab-d34b-402c-b549-373fa2263179/frame_26.50.png",
+                "timestamp": 26.5
+              },
+              {
+                "frame_path": "/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/e77882ab-d34b-402c-b549-373fa2263179/frame_27.00.png",
+                "timestamp": 27.0
+              },
+              {
+                "frame_path": "/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/e77882ab-d34b-402c-b549-373fa2263179/frame_28.00.png",
+                "timestamp": 28.0
+              }
+            ],
+            "query": "geometry diagram: identify all visible labeled points, angle markings, given angle values, equal-length marks, and which rays/segments form angle BDC marked in green"
+          },
+          "purpose": "Interpret the structured geometry figure and extract the exact labels, marked angles, and segment relationships needed for reasoning about angle BDC.",
+          "depends_on": [
+            1
+          ],
+          "output": "The tool results for chart_analyzer({\"frame_path\": [{\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/e77882ab-d34b-402c-b549-373fa2263179/frame_26.50.png\", \"timestamp\": 26.5}, {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/e77882ab-d34b-402c-b549-373fa2263179/frame_27.00.png\", \"timestamp\": 27.0}, {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/e77882ab-d34b-402c-b549-373fa2263179/frame_28.00.png\", \"timestamp\": 28.0}], \"query\": \"geometry diagram: identify all visible labeled points, angle markings, given angle values, equal-length marks, and which rays/segments form angle BDC marked in green\"}) are:\n{\"chart_type\": \"diagram\", \"title\": \"\", \"axes\": {}, \"series\": [], \"key_observations\": [\"The diagram shows a triangle-like structure with points A, B, C, and D on a line segment AD, with point C connected to A, B, and D.\", \"Angle at point A (∠CAB) is labeled as 100°.\", \"Segment AC has two short parallel tick marks indicating it is equal in length to another segment (likely BC, as implied by the text 'AD = BC').\", \"Segment AB has two short parallel tick marks, indicating it is equal in length to another segment (likely BD, as implied by the text 'AD = BC').\", \"Angle BDC is marked with a green shaded region and a question mark, indicating it is the unknown angle to be found.\", \"The text 'AD = BC' is visible, suggesting a length equality condition for the entire segments.\", \"The text '∠BDC = ?' is visible, indicating the problem is to find the measure of angle BDC.\"], \"relationships\": [{\"from\": \"Point C\", \"to\": \"Point A\", \"label\": \"Segment CA\"}, {\"from\": \"Point C\", \"to\": \"Point B\", \"label\": \"Segment CB\"}, {\"from\": \"Point C\", \"to\": \"Point D\", \"label\": \"Segment CD\"}, {\"from\": \"Point A\", \"to\": \"Point B\", \"label\": \"Segment AB\"}, {\"from\": \"Point B\", \"to\": \"Point D\", \"label\": \"Segment BD\"}], \"query_response\": \"Visible labeled points: A, B, C, D. Labeled angle: ∠CAB = 100°. Equal-length marks: AC and AB each have two tick marks. Angle BDC is formed by rays DB and DC, and is marked with a green shaded region and a question mark.\", \"selected_frame\": {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/e77882ab-d34b-402c-b549-373fa2263179/frame_27.00.png\", \"timestamp\": 27.0, \"score\": 8.25}, \"frame_results\": [{\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/e77882ab-d34b-402c-b549-373fa2263179/frame_26.50.png\", \"timestamp\": 26.5, \"score\": 8.0, \"result\": {\"chart_type\": \"diagram\", \"title\": \"\", \"axes\": {}, \"series\": [], \"key_observations\": [\"The diagram shows a triangle-like structure with points A, B, C, and D on a line segment AD, with point C connected to A, B, and D.\", \"Angle at point A (∠CAB) is marked as 100°.\", \"Segments AC and AD are marked with double hash marks, indicating they are equal in length.\", \"Segment BC is marked with a single hash mark, indicating it is equal in length to AD (which is equal to AC).\", \"Angle BDC is marked in green and labeled with a question mark, indicating it is the unknown angle to be found.\", \"The diagram includes the given condition: AD = BC.\"], \"relationships\": [{\"from\": \"Point A\", \"to\": \"Point C\", \"label\": \"Segment AC\"}, {\"from\": \"Point A\", \"to\": \"Point B\", \"label\": \"Segment AB\"}, {\"from\": \"Point A\", \"to\": \"Point D\", \"label\": \"Segment AD\"}, {\"from\": \"Point B\", \"to\": \"Point C\", \"label\": \"Segment BC\"}, {\"from\": \"Point B\", \"to\": \"Point D\", \"label\": \"Segment BD\"}, {\"from\": \"Point C\", \"to\": \"Point D\", \"label\": \"Segment CD\"}], \"query_response\": \"Visible labeled points: A, B, C, D. Angle markings: ∠CAB is marked as 100°, and ∠BDC is marked in green with a question mark. Equal-length marks: AC and AD are marked with double hash marks (AC = AD), and BC is marked with a single hash mark (BC = AD). The rays/segments forming angle BDC are BD and CD.\"}}, {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/e77882ab-d34b-402c-b549-373fa2263179/frame_27.00.png\", \"timestamp\": 27.0, \"score\": 8.25, \"result\": {\"chart_type\": \"diagram\", \"title\": \"\", \"axes\": {}, \"series\": [], \"key_observations\": [\"The diagram shows a triangle-like structure with points A, B, C, and D on a line segment AD, with point C connected to A, B, and D.\", \"Angle at point A (∠CAB) is labeled as 100°.\", \"Segment AC has two short parallel tick marks indicating it is equal in length to another segment (likely BC, as implied by the text 'AD = BC').\", \"Segment AB has two short parallel tick marks, indicating it is equal in length to another segment (likely BD, as implied by the text 'AD = BC').\", \"Angle BDC is marked with a green shaded region and a question mark, indicating it is the unknown angle to be found.\", \"The text 'AD = BC' is visible, suggesting a length equality condition for the entire segments.\", \"The text '∠BDC = ?' is visible, indicating the problem is to find the measure of angle BDC.\"], \"relationships\": [{\"from\": \"Point C\", \"to\": \"Point A\", \"label\": \"Segment CA\"}, {\"from\": \"Point C\", \"to\": \"Point B\", \"label\": \"Segment CB\"}, {\"from\": \"Point C\", \"to\": \"Point D\", \"label\": \"Segment CD\"}, {\"from\": \"Point A\", \"to\": \"Point B\", \"label\": \"Segment AB\"}, {\"from\": \"Point B\", \"to\": \"Point D\", \"label\": \"Segment BD\"}], \"query_response\": \"Visible labeled points: A, B, C, D. Labeled angle: ∠CAB = 100°. Equal-length marks: AC and AB each have two tick marks. Angle BDC is formed by rays DB and DC, and is marked with a green shaded region and a question mark.\"}}, {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/e77882ab-d34b-402c-b549-373fa2263179/frame_28.00.png\", \"timestamp\": 28.0, \"score\": 8.25, \"result\": {\"chart_type\": \"diagram\", \"title\": \"\", \"axes\": {}, \"series\": [], \"key_observations\": [\"The diagram shows a triangle-like structure with points A, B, C, and D on a line segment AD, with point C connected to A, B, and D.\", \"Angle at point A (∠CAB) is labeled as 100°.\", \"Segment AC has two short parallel tick marks indicating it is equal in length to another segment (likely BC, as implied by the text 'AD = BC').\", \"Segment AB has two short parallel tick marks, indicating it is equal in length to another segment (likely BD, as implied by the text 'AD = BC').\", \"Angle BDC is marked with a green shaded region and a question mark, indicating it is the unknown angle to be found.\", \"The text 'AD = BC' is visible, suggesting a length equality condition for the entire segment AD and segment BC.\", \"The text '∠BDC = ?' is visible, indicating the problem is to find the measure of angle BDC.\"], \"relationships\": [{\"from\": \"Point C\", \"to\": \"Point A\", \"label\": \"Segment CA\"}, {\"from\": \"Point C\", \"to\": \"Point B\", \"label\": \"Segment CB\"}, {\"from\": \"Point C\", \"to\": \"Point D\", \"label\": \"Segment CD\"}, {\"from\": \"Point A\", \"to\": \"Point B\", \"label\": \"Segment AB\"}, {\"from\": \"Point B\", \"to\": \"Point D\", \"label\": \"Segment BD\"}], \"query_response\": \"Visible labeled points: A, B, C, D. Labeled angle: ∠CAB = 100°. Equal-length marks: AC and AB each have two tick marks. Angle BDC is formed by rays DB and DC, and is marked with a green shaded region and a question mark.\"}}], \"multi_frame_strategy\": \"best_frame\", \"selection_reason\": \"Top-level fields mirror one high-salience candidate frame; inspect frame_results for all frame-level chart or diagram reads.\"}"
+        },
+        {
+          "step": 3,
+          "tool": "ocr",
+          "arguments": {
+            "frame_path": [
+              {
+                "frame_path": "/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/e77882ab-d34b-402c-b549-373fa2263179/frame_26.50.png",
+                "timestamp": 26.5
+              },
+              {
+                "frame_path": "/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/e77882ab-d34b-402c-b549-373fa2263179/frame_27.00.png",
+                "timestamp": 27.0
+              },
+              {
+                "frame_path": "/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/e77882ab-d34b-402c-b549-373fa2263179/frame_28.00.png",
+                "timestamp": 28.0
+              }
+            ],
+            "timestamp": null
+          },
+          "purpose": "Verify the visible text labels and numeric angle values on the same candidate frames in case the diagram interpreter misses or paraphrases small labels.",
+          "depends_on": [
+            1
+          ],
+          "output": "The tool results for ocr({\"frame_path\": [{\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/e77882ab-d34b-402c-b549-373fa2263179/frame_26.50.png\", \"timestamp\": 26.5}, {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/e77882ab-d34b-402c-b549-373fa2263179/frame_27.00.png\", \"timestamp\": 27.0}, {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/e77882ab-d34b-402c-b549-373fa2263179/frame_28.00.png\", \"timestamp\": 28.0}], \"timestamp\": null}) are:\n{\"source\": [\"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/e77882ab-d34b-402c-b549-373fa2263179/frame_26.50.png\", \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/e77882ab-d34b-402c-b549-373fa2263179/frame_27.00.png\", \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/e77882ab-d34b-402c-b549-373fa2263179/frame_28.00.png\"], \"detections\": [{\"text\": \"AD = BC\", \"bbox\": [620, 138, 788, 210], \"confidence\": 0.98, \"text_type\": \"digital_overlay\"}, {\"text\": \"∠BDC = ?\", \"bbox\": [620, 250, 788, 322], \"confidence\": 0.97, \"text_type\": \"digital_overlay\"}, {\"text\": \"MIND YOUR DECISIONS\", \"bbox\": [20, 888, 130, 910], \"confidence\": 0.96, \"text_type\": \"printed\"}, {\"text\": \"PRESH TALWALKAR\", \"bbox\": [20, 910, 130, 932], \"confidence\": 0.96, \"text_type\": \"printed\"}, {\"text\": \"AD = BC\", \"bbox\": [620, 138, 780, 208], \"confidence\": 0.98, \"text_type\": \"printed\"}, {\"text\": \"∠BDC = ?\", \"bbox\": [620, 240, 780, 310], \"confidence\": 0.97, \"text_type\": \"printed\"}, {\"text\": \"100°\", \"bbox\": [280, 580, 350, 650], \"confidence\": 0.96, \"text_type\": \"printed\"}, {\"text\": \"MIND YOUR DECISIONS\", \"bbox\": [20, 900, 130, 925], \"confidence\": 0.95, \"text_type\": \"printed\"}, {\"text\": \"PRESH TALWALKAR\", \"bbox\": [20, 925, 130, 950], \"confidence\": 0.95, \"text_type\": \"printed\"}, {\"text\": \"AD = BC\", \"bbox\": [620, 138, 780, 208], \"confidence\": 0.98, \"text_type\": \"printed\"}, {\"text\": \"∠BDC = ?\", \"bbox\": [620, 240, 780, 310], \"confidence\": 0.97, \"text_type\": \"printed\"}, {\"text\": \"100°\", \"bbox\": [280, 580, 350, 650], \"confidence\": 0.96, \"text_type\": \"printed\"}, {\"text\": \"MIND YOUR DECISIONS\", \"bbox\": [20, 900, 130, 930], \"confidence\": 0.95, \"text_type\": \"printed\"}, {\"text\": \"PRESH TALWALKAR\", \"bbox\": [20, 930, 130, 960], \"confidence\": 0.95, \"text_type\": \"printed\"}], \"full_text\": \"AD = BC\\n∠BDC = ?\\nMIND YOUR DECISIONS\\nPRESH TALWALKAR\\nAD = BC\\n∠BDC = ?\\n100°\\nMIND YOUR DECISIONS\\nPRESH TALWALKAR\\nAD = BC\\n∠BDC = ?\\n100°\\nMIND YOUR DECISIONS\\nPRESH TALWALKAR\", \"ocr_backend\": \"vlm\"}"
+        }
+      ],
+      "refiner_raw": "{\n  \"refined_trace\": [\n    \"frame_retriever returns the unsolved geometry diagram at 27.0s as the strongest candidate (frame_27.00.png, relevance_score 0.6333), with nearby matching candidates at 26.5s and 28.0s, so these frames are the answer-critical visual phase.\",\n    \"On the same diagram, chart_analyzer's frame-level read for frame_26.50.png reports points A, B, C, D with A, B, D on one line, segments AC, BC, and CD drawn, ∠CAB marked 100°, AC = AD by matching double tick marks, and BC equal to AD; OCR across 26.5s/27.0s/28.0s confirms the printed givens 'AD = BC' and '100°' (avg detection confidence 0.9636).\",\n    \"From those givens, AD = BC and AC = AD imply AC = AD = BC, so triangle ACD is isosceles with AC = AD and triangle BCD is isosceles with BC = BD not actually grounded; the only directly grounded equalities are AC = AD and AD = BC, hence AC = AD = BC.\",\n    \"Using the grounded equalities, triangle ACD has vertex angle ∠CAD = 100° because chart_analyzer identifies the 100° angle at A between AC and the base line through A-B-D. Therefore the base angles of triangle ACD are (180° - 100°) / 2 = 40° each, so ∠CDA = 40°.\",\n    \"Since A, B, and D are collinear with B between A and D in the chart_analyzer frame-level read, ray DB is the same direction as ray DA at vertex D. Thus the asked green angle ∠BDC equals ∠CDA = 40°.\",\n    \"So the measure of angle BDC is 40°, which matches option D.\"\n  ],\n  \"refined_answer\": \"D. 40 degree\",\n  \"answer_changed\": true,\n  \"changes_made\": [\n    {\n      \"operation\": \"INSERT_STEP\",\n      \"step_index\": null,\n      \"original\": \"\",\n      \"replacement\": \"frame_retriever returns the unsolved geometry diagram at 27.0s as the strongest candidate (frame_27.00.png, relevance_score 0.6333), with nearby matching candidates at 26.5s and 28.0s, so these frames are the answer-critical visual phase.\",\n      \"evidence_source\": \"TOOL_OUTPUTS Step 1 frame_retriever on frames 26.5s/27.0s/28.0s\"\n    },\n    {\n      \"operation\": \"INSERT_STEP\",\n      \"step_index\": null,\n      \"original\": \"\",\n      \"replacement\": \"On the same diagram, chart_analyzer's frame-level read for frame_26.50.png reports points A, B, C, D with A, B, D on one line, segments AC, BC, and CD drawn, ∠CAB marked 100°, AC = AD by matching double tick marks, and BC equal to AD; OCR across 26.5s/27.0s/28.0s confirms the printed givens 'AD = BC' and '100°' (avg detection confidence 0.9636).\",\n      \"evidence_source\": \"TOOL_OUTPUTS Step 2 chart_analyzer frame_results for frame_26.50.png and Step 3 ocr\"\n    },\n    {\n      \"operation\": \"INSERT_STEP\",\n      \"step_index\": null,\n      \"original\": \"\",\n      \"replacement\": \"From those givens, AD = BC and AC = AD imply AC = AD = BC, so triangle ACD is isosceles with AC = AD and triangle BCD is isosceles with BC = BD not actually grounded; the only directly grounded equalities are AC = AD and AD = BC, hence AC = AD = BC.\",\n      \"evidence_source\": \"TOOL_OUTPUTS Step 2 chart_analyzer frame_results for frame_26.50.png and Step 3 ocr\"\n    },\n    {\n      \"operation\": \"INSERT_STEP\",\n      \"step_index\": null,\n      \"original\": \"\",\n      \"replacement\": \"Using the grounded equalities, triangle ACD has vertex angle ∠CAD = 100° because chart_analyzer identifies the 100° angle at A between AC and the base line through A-B-D. Therefore the base angles of triangle ACD are (180° - 100°) / 2 = 40° each, so ∠CDA = 40°.\",\n      \"evidence_source\": \"TOOL_OUTPUTS Step 2 chart_analyzer frame_results for frame_26.50.png and Step 3 ocr\"\n    },\n    {\n      \"operation\": \"INSERT_STEP\",\n      \"step_index\": null,\n      \"original\": \"\",\n      \"replacement\": \"Since A, B, and D are collinear with B between A and D in the chart_analyzer frame-level read, ray DB is the same direction as ray DA at vertex D. Thus the asked green angle ∠BDC equals ∠CDA = 40°.\",\n      \"evidence_source\": \"TOOL_OUTPUTS Step 2 chart_analyzer frame_results for frame_26.50.png\"\n    },\n    {\n      \"operation\": \"PATCH_ANSWER\",\n      \"step_index\": null,\n      \"original\": \"\",\n      \"replacement\": \"D. 40 degree\",\n      \"evidence_source\": \"Derived from TOOL_OUTPUTS Step 2 chart_analyzer frame_results for frame_26.50.png and Step 3 ocr\"\n    }\n  ],\n  \"unresolved_issues\": [\n    \"The tool outputs do not fully ground every segment relationship in the diagram, and some chart_analyzer frame reads disagree about which segments carry matching tick marks. The solution above uses only the equalities directly supported together by frame_26.50.png and OCR: AC = AD and AD = BC, plus the 100° angle and collinearity of A-B-D.\"\n  ]\n}",
+      "refiner_output": {
+        "refined_trace": [
+          "frame_retriever returns the unsolved geometry diagram at 27.0s as the strongest candidate (frame_27.00.png, relevance_score 0.6333), with nearby matching candidates at 26.5s and 28.0s, so these frames are the answer-critical visual phase.",
+          "On the same diagram, chart_analyzer's frame-level read for frame_26.50.png reports points A, B, C, D with A, B, D on one line, segments AC, BC, and CD drawn, ∠CAB marked 100°, AC = AD by matching double tick marks, and BC equal to AD; OCR across 26.5s/27.0s/28.0s confirms the printed givens 'AD = BC' and '100°' (avg detection confidence 0.9636).",
+          "From those givens, AD = BC and AC = AD imply AC = AD = BC, so triangle ACD is isosceles with AC = AD and triangle BCD is isosceles with BC = BD not actually grounded; the only directly grounded equalities are AC = AD and AD = BC, hence AC = AD = BC.",
+          "Using the grounded equalities, triangle ACD has vertex angle ∠CAD = 100° because chart_analyzer identifies the 100° angle at A between AC and the base line through A-B-D. Therefore the base angles of triangle ACD are (180° - 100°) / 2 = 40° each, so ∠CDA = 40°.",
+          "Since A, B, and D are collinear with B between A and D in the chart_analyzer frame-level read, ray DB is the same direction as ray DA at vertex D. Thus the asked green angle ∠BDC equals ∠CDA = 40°.",
+          "So the measure of angle BDC is 40°, which matches option D."
+        ],
+        "refined_answer": "D. 40 degree",
+        "answer_changed": true,
+        "changes_made": [
+          {
+            "operation": "INSERT_STEP",
+            "step_index": null,
+            "original": "",
+            "replacement": "frame_retriever returns the unsolved geometry diagram at 27.0s as the strongest candidate (frame_27.00.png, relevance_score 0.6333), with nearby matching candidates at 26.5s and 28.0s, so these frames are the answer-critical visual phase.",
+            "evidence_source": "TOOL_OUTPUTS Step 1 frame_retriever on frames 26.5s/27.0s/28.0s"
+          },
+          {
+            "operation": "INSERT_STEP",
+            "step_index": null,
+            "original": "",
+            "replacement": "On the same diagram, chart_analyzer's frame-level read for frame_26.50.png reports points A, B, C, D with A, B, D on one line, segments AC, BC, and CD drawn, ∠CAB marked 100°, AC = AD by matching double tick marks, and BC equal to AD; OCR across 26.5s/27.0s/28.0s confirms the printed givens 'AD = BC' and '100°' (avg detection confidence 0.9636).",
+            "evidence_source": "TOOL_OUTPUTS Step 2 chart_analyzer frame_results for frame_26.50.png and Step 3 ocr"
+          },
+          {
+            "operation": "INSERT_STEP",
+            "step_index": null,
+            "original": "",
+            "replacement": "From those givens, AD = BC and AC = AD imply AC = AD = BC, so triangle ACD is isosceles with AC = AD and triangle BCD is isosceles with BC = BD not actually grounded; the only directly grounded equalities are AC = AD and AD = BC, hence AC = AD = BC.",
+            "evidence_source": "TOOL_OUTPUTS Step 2 chart_analyzer frame_results for frame_26.50.png and Step 3 ocr"
+          },
+          {
+            "operation": "INSERT_STEP",
+            "step_index": null,
+            "original": "",
+            "replacement": "Using the grounded equalities, triangle ACD has vertex angle ∠CAD = 100° because chart_analyzer identifies the 100° angle at A between AC and the base line through A-B-D. Therefore the base angles of triangle ACD are (180° - 100°) / 2 = 40° each, so ∠CDA = 40°.",
+            "evidence_source": "TOOL_OUTPUTS Step 2 chart_analyzer frame_results for frame_26.50.png and Step 3 ocr"
+          },
+          {
+            "operation": "INSERT_STEP",
+            "step_index": null,
+            "original": "",
+            "replacement": "Since A, B, and D are collinear with B between A and D in the chart_analyzer frame-level read, ray DB is the same direction as ray DA at vertex D. Thus the asked green angle ∠BDC equals ∠CDA = 40°.",
+            "evidence_source": "TOOL_OUTPUTS Step 2 chart_analyzer frame_results for frame_26.50.png"
+          },
+          {
+            "operation": "PATCH_ANSWER",
+            "step_index": null,
+            "original": "",
+            "replacement": "D. 40 degree",
+            "evidence_source": "Derived from TOOL_OUTPUTS Step 2 chart_analyzer frame_results for frame_26.50.png and Step 3 ocr"
+          }
+        ],
+        "unresolved_issues": [
+          "The tool outputs do not fully ground every segment relationship in the diagram, and some chart_analyzer frame reads disagree about which segments carry matching tick marks. The solution above uses only the equalities directly supported together by frame_26.50.png and OCR: AC = AD and AD = BC, plus the 100° angle and collinearity of A-B-D."
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "strategy": "Keep the already grounded OCR facts (radius 6 and equal arcs) and gather sharper visual structure for the shaded set itself. The key repair is to retrieve multiple candidate problem frames and use diagram-focused analysis to determine whether the red area is one central overlap region or three separate lobes, and exactly which arcs bound each shaded component.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "video",
+        "query": "original geometry problem diagram with circle centered at O, points P Q R on the circumference, red shaded regions, before any solution annotations",
+        "timestamps": null,
+        "num_frames": 3
+      },
+      "purpose": "Retrieve a small bundle of candidate question-state frames showing the full diagram so the shaded-region structure can be read from a coherent visual state rather than a single possibly ambiguous frame.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "chart_analyzer",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null,
+        "query": "For each frame, describe the exact shaded red region structure in the geometry diagram: how many disconnected shaded components there are, whether there is one central overlap region or three separate lobes, which arcs bound each shaded component, and which labeled points each boundary arc connects or is centered at."
+      },
+      "purpose": "Ground the answer-critical primitive structure of the diagram and resolve the verifier's complaint that the trace did not specify how the red region is partitioned or how the arcs attach.",
+      "depends_on": [
+        1
+      ]
+    },
+    {
+      "step": 3,
+      "tool": "spatial_grounder",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null,
+        "query": "red shaded regions inside the circle"
+      },
+      "purpose": "Provide an independent check of the count and separation of the red shaded components across the retrieved frames, so the refiner can tell whether the shaded set consists of three disconnected lobes or a single central region.",
+      "depends_on": [
+        1
+      ]
+    }
+  ],
+  "refinement_instructions": "Preserve the earlier OCR-backed facts: the circle has center O, radius 6, and the arcs on the circumference between P, Q, and R are equal, implying PQR is an inscribed equilateral triangle. Replace step 4 onward using the new diagram evidence. In particular, use chart_analyzer frame-level results, not only any top-level summary, to identify the correct question-state frame and cite exactly: (a) how many disconnected red components are present, (b) whether the shaded set is the central three-arc overlap region or three separate lens/lobe regions, and (c) which arcs bound each component and how they attach to O, P, Q, and R. Use spatial_grounder only as supporting evidence for the count/separation of red regions; do not let it override more detailed arc-boundary structure from chart_analyzer. If the new evidence shows the previous 'one leaf has area 12π - 18√3 and then multiply by 3' partition was wrong, explicitly supersede that inference and recompute only from the grounded shaded decomposition. Do not keep the old multiplication-by-3 unless the new tools directly support three disjoint congruent shaded components each matching that exact lens area. If some frame results disagree, choose the frame that clearly shows the original complete diagram and mention the uncertainty rather than forcing the old answer."
+}

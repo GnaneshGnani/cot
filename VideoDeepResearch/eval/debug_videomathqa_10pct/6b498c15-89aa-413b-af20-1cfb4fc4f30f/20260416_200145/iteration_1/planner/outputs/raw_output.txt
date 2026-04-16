@@ -1,42 +1,21 @@
 {
-  "strategy": "The failure is a diagram-structure ambiguity, not a missing-number problem. Re-anchor on the original unsolved geometry frame(s) and use a tighter diagram-reading pass plus text extraction on the same coherent frame bundle to resolve exactly where the semicircle sits relative to the triangle sides.",
+  "strategy": "Reuse the already grounded problem frames, but add one sharper diagram-reading pass to explicitly identify the petal boundaries, the 60° sector angles at P/Q/R, and the area decomposition of the three sectors into the central triangle plus the three red petals. This directly repairs the missing justification without restarting localization.",
   "tool_calls": [
     {
       "step": 1,
-      "tool": "frame_retriever",
-      "arguments": {
-        "video_path": "video",
-        "query": "original geometry problem screen with a right triangle and a semicircle, before any solution annotations, showing the full diagram and answer choices",
-        "timestamps": null,
-        "num_frames": 3
-      },
-      "purpose": "Retrieve a small bundle of candidate question-state frames that show the complete original diagram, since the prior retrieval/chart interpretation produced an internally inconsistent geometric description.",
-      "depends_on": []
-    },
-    {
-      "step": 2,
       "tool": "chart_analyzer",
       "arguments": {
-        "frame_path": "<STEP_1:frames>",
+        "frame_path": [
+          "frame_37.50.png",
+          "frame_33.50.png",
+          "frame_26.00.png"
+        ],
         "timestamp": null,
-        "query": "Describe the geometry diagram precisely: identify the triangle sides and right-angle vertex; state where the semicircle's straight edge and curved arc lie; which triangle sides or segments the semicircle touches or shares endpoints with; and which visible labels attach to which segments."
+        "query": "For the geometry diagram, identify for each red petal which two radii from the same center bound it, what angle those radii make at centers P, Q, and R, and whether the union of the three corresponding 60-degree sectors is exactly the central triangle PQR plus the three red petals with no overlap except shared boundaries."
       },
-      "purpose": "Obtain an answer-critical, internally coherent structural description of the diagram rather than a broad guess like 'inscribed semicircle' or 'diameter on the hypotenuse.'",
-      "depends_on": [
-        1
-      ]
-    },
-    {
-      "step": 3,
-      "tool": "ocr",
-      "arguments": {
-        "frame_path": "<STEP_1:frames>",
-        "timestamp": null
-      },
-      "purpose": "Verify the exact visible labels, including any option text and any segment/radius markers, on the same candidate frames used for diagram interpretation.",
-      "depends_on": [
-        1
-      ]
+      "purpose": "Get explicit structured evidence for the missing geometry primitives: each petal being a 60° sector-based segment at P/Q/R, and the exact decomposition needed to justify shaded area = three sectors minus triangle PQR.",
+      "depends_on": []
     }
   ],
-  "refinement_instructions": "Replace the unsupported inference that the semicircle radius equals the triangle's inradius. Use the frame-level results from chart_analyzer to select the candidate frame that gives the clearest, most self-consistent question-state diagram; do not rely only on the top-level selected summary if different frames disagree. Preserve the already supported numeric facts from OCR only if they still match the chosen frame. In the rewritten trace, first state the full grounded diagram structure: the 4 and 6 labels, the right triangle orientation, and exactly which side/segment the semicircle's diameter or arc aligns with and what it is tangent to or bounded by. Then derive the radius only from those grounded relations. If chart_analyzer and OCR still leave the semicircle placement ambiguous or contradictory, explicitly mark the geometry as unresolved and avoid forcing a final option from plausibility or closest-value matching."}
+  "refinement_instructions": "Keep the earlier supported facts from frame retrieval and OCR: the diagram shows circle center O, radius 6, and equal arcs/chords implying triangle PQR is equilateral. Replace the unsupported part of steps 4-5 with explicit chart_analyzer-backed claims about the diagram structure. In the rewritten trace, cite the frame-level chart_analyzer result that each red petal is bounded by two segments from one center to the other two vertices (for example PO and PR, or equivalently radii from P to the two boundary points O and the adjacent vertex), giving a 60° angle at each of P, Q, and R because triangle PQR is equilateral. Then state the decomposition explicitly: each such 60° sector consists of one red petal together with one copy of triangle PQR, so the union of the three sectors equals the three red petals plus triangle PQR, with interiors otherwise non-overlapping. Only after stating that decomposition should the trace compute total shaded area = 3*(60/360)*pi*6^2 - area(PQR) = 18pi - 27sqrt(3). If the new chart_analyzer output phrases the decomposition differently, preserve its exact grounded language rather than paraphrasing loosely. Update the final answer only if this new structural reading contradicts the current result."
+}
