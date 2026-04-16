@@ -1,0 +1,59 @@
+{
+  "strategy": "Localize the election-results chart or map state that shows Macomb County margins for both 2008 and 2012, then read the county-specific values directly and compute the change in Democratic margin. Use chart-focused interpretation rather than broad video summarization.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "temporal_grounder",
+      "arguments": {
+        "video_path": "VIDEO",
+        "query": "chart, map, or election graphic showing Macomb County presidential voting margins in 2008 and 2012"
+      },
+      "purpose": "Find the bounded interval where the video displays the election data needed for Macomb County across the two years mentioned in the question.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "VIDEO",
+        "query": null,
+        "timestamps": [
+          "<STEP_1:segments[0].start>",
+          "<STEP_1:segments[0].end>",
+          "<STEP_1:segments[1].start>"
+        ],
+        "num_frames": 3
+      },
+      "purpose": "Sample candidate frames from top localized intervals because the needed chart/map may animate or appear in slightly different states; this helps capture a fully legible frame containing Macomb County values.",
+      "depends_on": [
+        1
+      ]
+    },
+    {
+      "step": 3,
+      "tool": "chart_analyzer",
+      "arguments": {
+        "frame_path": "<STEP_2:frames>",
+        "timestamp": null,
+        "query": "county-level election graphic for Macomb County showing the Democratic margin in 2008 and in 2012, including the numeric values or percentages for both years"
+      },
+      "purpose": "Interpret the structured election graphic and extract the two Macomb County margins directly from the best candidate frame.",
+      "depends_on": [
+        2
+      ]
+    },
+    {
+      "step": 4,
+      "tool": "ocr",
+      "arguments": {
+        "frame_path": "<STEP_2:frames>",
+        "timestamp": null
+      },
+      "purpose": "Provide direct text backup for the county name, years, and any printed margin values in case chart interpretation leaves labels or numbers ambiguous.",
+      "depends_on": [
+        2
+      ]
+    }
+  ],
+  "refinement_instructions": "Write a fresh trace from scratch. Use step 3 as the primary evidence source to identify the Macomb County Democratic margin in 2008 and the margin four years later in 2012; use step 4 only to verify labels, years, and printed numbers if needed. In the rewritten trace, explicitly state the two grounded values, then compute the absolute change in the Democratic margin between 2008 and 2012, and finally map that computed difference to the closest matching option. Do not rely on the video summary alone. If step 3 frame-level results differ across candidate frames, select the frame_result that clearly shows both years for Macomb County in one coherent graphic or the clearest readable state corroborated by OCR. If the new evidence contradicts any implied prior guess, replace it fully and update the final answer accordingly."
+}

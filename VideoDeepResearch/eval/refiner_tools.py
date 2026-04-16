@@ -1438,62 +1438,6 @@ class RefinerToolsMixin:
             )
         ) or normalized.startswith(("label ", "labels ", "labeled "))
 
-    def _filter_diagram_label_claims(self, observations: list[str]) -> tuple[list[str], int]:
-        kept = []
-        dropped = 0
-        for observation in observations or []:
-            text = str(observation or "").strip()
-            if not text:
-                continue
-            if self._is_diagram_label_claim(text):
-                dropped += 1
-                continue
-            kept.append(text)
-        return kept, dropped
-
-    def _sanitize_diagram_frame_results_for_consensus(
-        self,
-        frame_results: list[dict],
-        allowed_observations: list[str],
-        allowed_relationships: list[dict],
-    ) -> list[dict]:
-        allowed_obs_keys = {
-            self._normalize_chart_text(observation)
-            for observation in (allowed_observations or [])
-            if str(observation or "").strip()
-        }
-        allowed_rel_keys = {
-            self._chart_relationship_key(rel)
-            for rel in (allowed_relationships or [])
-            if isinstance(rel, dict)
-        }
-
-        sanitized = []
-        for frame_result in frame_results or []:
-            if not isinstance(frame_result, dict):
-                continue
-            safe_frame = dict(frame_result)
-            result = dict(safe_frame.get("result") or {})
-
-            result["key_observations"] = [
-                str(observation or "").strip()
-                for observation in (result.get("key_observations") or [])
-                if self._normalize_chart_text(observation) in allowed_obs_keys
-            ]
-            result["relationships"] = [
-                {
-                    "from": rel.get("from"),
-                    "to": rel.get("to"),
-                    "label": rel.get("label"),
-                }
-                for rel in (result.get("relationships") or [])
-                if self._chart_relationship_key(rel) in allowed_rel_keys
-            ]
-            result["query_response"] = None
-            safe_frame["result"] = result
-            sanitized.append(safe_frame)
-        return sanitized
-
     def _quoted_or_numeric_label_tokens(self, text: str) -> list[str]:
         tokens = []
         for left, right in re.findall(r"'([^']+)'|\"([^\"]+)\"", str(text or "")):
@@ -1864,109 +1808,18 @@ class RefinerToolsMixin:
                 return choice["original"]
         return None
 
-    def _consensus_chart_text_items(self, item_lists: list[list], threshold: int | None = None) -> tuple[list[str], int]:
-        if threshold is None:
-            threshold = max(1, (len(item_lists) // 2) + 1)
-        counts = {}
-        representatives = {}
-        order = {}
-        dropped = 0
-        for idx, items in enumerate(item_lists):
-            seen = set()
-            for item in items or []:
-                text = str(item or "").strip()
-                key = self._normalize_chart_text(text)
-                if not key or key in seen:
-                    continue
-                counts[key] = counts.get(key, 0) + 1
-                seen.add(key)
-                if key not in representatives or (text and len(text) < len(representatives[key])):
-                    representatives[key] = text
-                order.setdefault(key, (idx, len(order)))
-        kept = []
-        for key, count in counts.items():
-            if count >= threshold and representatives.get(key):
-                kept.append((order[key], representatives[key]))
-            else:
-                dropped += 1
-        kept.sort(key=lambda item: item[0])
-        return [text for _, text in kept], dropped
-
-    def _consensus_chart_relationships(
-        self,
-        relationship_lists: list[list],
-        threshold: int | None = None,
-    ) -> tuple[list[dict], int]:
-        if threshold is None:
-            threshold = max(1, (len(relationship_lists) // 2) + 1)
-        counts = {}
-        representatives = {}
-        order = {}
-        dropped = 0
-        for idx, relationships in enumerate(relationship_lists):
-            seen = set()
-            for rel in relationships or []:
-                if not isinstance(rel, dict):
-                    continue
-                key = (
-                    self._normalize_chart_text(rel.get("from")),
-                    self._normalize_chart_text(rel.get("to")),
-                    self._normalize_chart_text(rel.get("label")),
-                )
-                if key == ("", "", "") or key in seen:
-                    continue
-                counts[key] = counts.get(key, 0) + 1
-                seen.add(key)
-                if key not in representatives:
-                    representatives[key] = {
-                        "from": rel.get("from"),
-                        "to": rel.get("to"),
-                        "label": rel.get("label"),
-                    }
-                order.setdefault(key, (idx, len(order)))
-        kept = []
-        for key, count in counts.items():
-            if count >= threshold and representatives.get(key):
-                kept.append((order[key], representatives[key]))
-            else:
-                dropped += 1
-        kept.sort(key=lambda item: item[0])
-        return [rel for _, rel in kept], dropped
-
-    def _consensus_chart_query_response(self, frame_results: list[dict], threshold: int | None = None) -> str | None:
-        if threshold is None:
-            threshold = max(1, (len(frame_results) // 2) + 1)
-        counts = {}
-        representatives = {}
-        order = {}
-        for idx, frame_result in enumerate(frame_results):
-            result = frame_result.get("result") if isinstance(frame_result, dict) else {}
-            text = str((result or {}).get("query_response", "") or "").strip()
-            key = self._normalize_chart_text(text)
-            if not key:
-                continue
-            counts[key] = counts.get(key, 0) + 1
-            if key not in representatives or len(text) < len(representatives[key]):
-                representatives[key] = text
-            order.setdefault(key, (idx, len(order)))
-        kept = [
-            (order[key], representatives[key])
-            for key, count in counts.items()
-            if count >= threshold and representatives.get(key)
-        ]
-        if not kept:
-            return None
-        kept.sort(key=lambda item: item[0])
-        return kept[0][1]
-
-    def _merge_chart_analysis_frame_results(self, frame_results: list[dict]) -> dict:
+    def _select_chart_analysis_frame_result(self, frame_results: list[dict]) -> dict:
         if not frame_results:
             return {}
 
-        best_frame = max(
+        ranked = sorted(
             frame_results,
-            key=lambda item: (item.get("score", -1.0), item.get("timestamp", 0.0)),
+            key=lambda item: (
+                -float(item.get("score", -1.0) or -1.0),
+                float(item.get("timestamp", 0.0) or 0.0),
+            ),
         )
+        best_frame = ranked[0]
         result = dict(best_frame.get("result") or {})
         result["selected_frame"] = {
             "frame_path": best_frame.get("frame_path"),
@@ -1974,128 +1827,11 @@ class RefinerToolsMixin:
             "score": best_frame.get("score"),
         }
         result["frame_results"] = frame_results
-        result["multi_frame_strategy"] = "consensus_merge"
-        chart_type = str(result.get("chart_type", "") or "").strip().lower()
-        consensus_threshold = (
-            len(frame_results)
-            if chart_type == "diagram" and len(frame_results) > 2
-            else max(1, (len(frame_results) // 2) + 1)
+        result["multi_frame_strategy"] = "best_frame"
+        result["selection_reason"] = (
+            "Top-level fields mirror one high-salience candidate frame; inspect "
+            "frame_results for all frame-level chart or diagram reads."
         )
-
-        observations, dropped_observations = self._consensus_chart_text_items(
-            [
-                (frame_result.get("result") or {}).get("key_observations") or []
-                for frame_result in frame_results
-            ],
-            threshold=consensus_threshold,
-        )
-        dropped_label_claims = 0
-        if chart_type == "diagram":
-            observations, dropped_label_claims = self._filter_diagram_label_claims(observations)
-            dropped_observations += dropped_label_claims
-        if observations or chart_type == "diagram":
-            result["key_observations"] = observations
-
-        relationships, dropped_relationships = self._consensus_chart_relationships(
-            [
-                (frame_result.get("result") or {}).get("relationships") or []
-                for frame_result in frame_results
-            ],
-            threshold=consensus_threshold,
-        )
-        if relationships or chart_type == "diagram" or any(
-            ((frame_result.get("result") or {}).get("relationships") or [])
-            for frame_result in frame_results
-        ):
-            result["relationships"] = relationships
-
-        if chart_type == "diagram" and observations:
-            stable_relationship_text = " ".join(
-                self._normalize_chart_text(rel.get("label"))
-                for rel in (relationships or [])
-                if isinstance(rel, dict)
-            )
-            filtered_observations = []
-            for observation in observations:
-                normalized_observation = self._normalize_chart_text(observation)
-                needs_relation_support = (
-                    "tangent" in normalized_observation
-                    or "diameter" in normalized_observation
-                    or "determined by" in normalized_observation
-                    or "defined by" in normalized_observation
-                )
-                if needs_relation_support and not any(
-                    token in stable_relationship_text
-                    for token in ("tangent", "diameter", "determined", "defined")
-                ):
-                    dropped_observations += 1
-                    continue
-                filtered_observations.append(observation)
-            observations = filtered_observations
-            result["key_observations"] = observations
-
-        consensus_query_response = self._consensus_chart_query_response(
-            frame_results,
-            threshold=consensus_threshold,
-        )
-        if consensus_query_response:
-            result["query_response"] = consensus_query_response
-        elif chart_type == "diagram" and observations:
-            result["query_response"] = "Stable cross-frame diagram facts: " + "; ".join(observations[:4])
-        elif chart_type == "diagram":
-            result["query_response"] = (
-                "The provided matching frames do not support a stable enough cross-frame diagram "
-                "interpretation to answer the full query without ambiguity."
-            )
-
-        if chart_type == "diagram" and self._is_diagram_label_claim(str(result.get("query_response", "") or "")):
-            if observations:
-                result["query_response"] = "Stable cross-frame diagram facts: " + "; ".join(observations[:4])
-            else:
-                result["query_response"] = (
-                    "Visible label attachment claims require OCR corroboration and are omitted from "
-                    "the diagram summary."
-                )
-
-        if chart_type == "diagram":
-            result["frame_results"] = self._sanitize_diagram_frame_results_for_consensus(
-                frame_results,
-                observations,
-                relationships,
-            )
-
-        if (
-            chart_type == "diagram"
-            and (dropped_observations > 0 or dropped_relationships > 0)
-        ):
-            note = (
-                "Across the provided matching frames, some finer-grained diagram relations were not "
-                "stated consistently, so only the stable cross-frame primitives are preserved in the "
-                "merged summary."
-            )
-            existing = [
-                str(item or "").strip()
-                for item in (result.get("key_observations") or [])
-                if str(item or "").strip()
-            ]
-            if note not in existing:
-                existing.append(note)
-            result["key_observations"] = existing
-
-        if chart_type == "diagram" and dropped_label_claims > 0:
-            note = (
-                "Visible label-attachment or repeated-label claims are omitted from the diagram "
-                "summary and should be verified with OCR rather than chart_analyzer alone."
-            )
-            existing = [
-                str(item or "").strip()
-                for item in (result.get("key_observations") or [])
-                if str(item or "").strip()
-            ]
-            if note not in existing:
-                existing.append(note)
-            result["key_observations"] = existing
-
         return result
 
     def _geometry_evidence_conflicts(self, evidence) -> list[str]:
@@ -2360,16 +2096,36 @@ class RefinerToolsMixin:
         depends_on: list,
         step_results: dict,
         step_tools: dict,
+        fallback_step_results=None,
+        fallback_step_tools=None,
     ) -> dict:
+        fallback_step_results = fallback_step_results or {}
+        fallback_step_tools = fallback_step_tools or {}
+        current_plan_steps = set(step_tools.keys())
+
+        def _get_dep_result(dep: int, expected_tool: str):
+            if step_tools.get(dep) == expected_tool:
+                result = step_results.get(dep)
+                return dep, result if isinstance(result, dict) else None
+            if dep in current_plan_steps:
+                return dep, None
+            if fallback_step_tools.get(dep) == expected_tool:
+                result = fallback_step_results.get(dep)
+                return dep, result if isinstance(result, dict) else None
+            return dep, None
+
         if tool_name == "frame_retriever":
             temporal_step = None
+            temporal_result = None
             for dep in depends_on:
-                if step_tools.get(dep) == "temporal_grounder" and isinstance(step_results.get(dep), dict):
-                    temporal_step = dep
+                dep_step, dep_result = _get_dep_result(dep, "temporal_grounder")
+                if dep_result is not None:
+                    temporal_step = dep_step
+                    temporal_result = dep_result
             if temporal_step is None:
                 return arguments
 
-            temporal_result = step_results.get(temporal_step) or {}
+            temporal_result = temporal_result or {}
             segments = [
                 seg for seg in (temporal_result.get("segments") or [])
                 if isinstance(seg, dict)
@@ -2423,25 +2179,31 @@ class RefinerToolsMixin:
             return arguments
 
         frame_step = None
+        frame_result = None
         for dep in depends_on:
-            if step_tools.get(dep) == "frame_retriever" and isinstance(step_results.get(dep), dict):
-                frame_step = dep
+            dep_step, dep_result = _get_dep_result(dep, "frame_retriever")
+            if dep_result is not None:
+                frame_step = dep_step
+                frame_result = dep_result
         if frame_step is None:
             return arguments
 
-        frame_result = step_results.get(frame_step) or {}
+        frame_result = frame_result or {}
         retrieved_frames = self._extract_retrieved_frames(frame_result)
         if not retrieved_frames:
             return arguments
 
         temporal_step = None
+        temporal_result = None
         for dep in depends_on:
-            if step_tools.get(dep) == "temporal_grounder" and isinstance(step_results.get(dep), dict):
-                temporal_step = dep
+            dep_step, dep_result = _get_dep_result(dep, "temporal_grounder")
+            if dep_result is not None:
+                temporal_step = dep_step
+                temporal_result = dep_result
         if temporal_step is not None:
             aligned_frames = self._select_frames_aligned_with_temporal_grounder(
                 frame_result,
-                step_results.get(temporal_step) or {},
+                temporal_result or {},
             )
             if not aligned_frames:
                 aligned_frames = retrieved_frames
@@ -3759,6 +3521,13 @@ class RefinerToolsMixin:
 
         execution_results = []
         step_results: dict = {}  # step_num (int) → parsed JSON output for dep resolution
+        fallback_step_results = dict(getattr(self, "_refinement_prev_step_results", {}) or {})
+        fallback_step_tools = dict(getattr(self, "_refinement_prev_step_tools", {}) or {})
+        current_plan_steps = {
+            int(call.get("step", 0) or 0)
+            for call in ordered_calls
+            if int(call.get("step", 0) or 0)
+        }
         ibase = getattr(self, "_refinement_debug_iter_dir", None)
 
         for call in ordered_calls:
@@ -3772,7 +3541,12 @@ class RefinerToolsMixin:
             ]
 
             # Resolve any <STEPN:json.path> references from prior step outputs
-            args_dict = self._resolve_step_refs(args_dict, step_results)
+            args_dict = self._resolve_step_refs(
+                args_dict,
+                step_results,
+                fallback_step_results=fallback_step_results,
+                blocked_steps=current_plan_steps - set(step_results.keys()),
+            )
             args_dict = self._align_visual_tool_arguments(
                 tool_name,
                 args_dict,
@@ -3780,6 +3554,8 @@ class RefinerToolsMixin:
                 depends_on,
                 step_results,
                 step_tools,
+                fallback_step_results=fallback_step_results,
+                fallback_step_tools=fallback_step_tools,
             )
 
             tool_out_dir = None
@@ -3841,6 +3617,8 @@ class RefinerToolsMixin:
                     "output": (output or "").strip(),
                 }
             )
+        self._refinement_prev_step_results = dict(step_results)
+        self._refinement_prev_step_tools = dict(step_tools)
         return execution_results
 
     def _get_asr_whisperx(self, start_time=None, end_time=None):
@@ -4867,7 +4645,7 @@ class RefinerToolsMixin:
                             "result": single_result,
                         }
                     )
-                result = self._merge_chart_analysis_frame_results(frame_results)
+                result = self._select_chart_analysis_frame_result(frame_results)
             else:
                 result = _run_chart_analysis(frame_paths, frame_timestamps)
 

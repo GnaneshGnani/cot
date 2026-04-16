@@ -1,0 +1,25 @@
+{
+  "strategy": "Keep the OCR-grounded radius evidence, but add direct visual grounding of the diagram structure on the same candidate problem frames. The missing premise is whether the pictured 'piece' is a sector formed by two radii and one outer arc when the circle is split into 12 equal parts.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "chart_analyzer",
+      "arguments": {
+        "frame_path": [
+          "frame_10.00.png",
+          "frame_10.50.png",
+          "frame_10.80.png"
+        ],
+        "timestamp": [
+          10.0,
+          10.5,
+          10.8
+        ],
+        "query": "geometry diagram structure: determine whether the circle is divided into 12 equal sector-like slices, and describe the boundary of one piece including whether it consists of two radii and one circular arc"
+      },
+      "purpose": "Interpret the geometry diagram itself rather than relying only on OCR text, so the trace can explicitly ground the sector model and the perimeter components of one piece.",
+      "depends_on": []
+    }
+  ],
+  "refinement_instructions": "Preserve the earlier OCR-backed fact that the diagram shows r = 1. Replace trace step 3 with a tool-attributed statement based on chart_analyzer's frame-level outputs: cite whichever of the analyzed frames clearly shows the circle partitioned into 12 equal sector slices and that one piece is bounded by two straight radii and one curved outer arc. Then keep the arithmetic only if that visual structure is explicitly supported by chart_analyzer. The rewritten trace should say that the perimeter is computed from two radii plus a 1/12 circumference arc because the diagram shows a sector-shaped piece, not because of an ungrounded assumption. If chart_analyzer does not clearly confirm that structure, the refiner must mark the reasoning incomplete rather than asserting the sector model."
+}

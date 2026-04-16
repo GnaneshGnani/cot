@@ -1,0 +1,189 @@
+{
+  "trace_steps": [
+    "frame_retriever returns frame_6.50.png at 6.5s as the strongest candidate for the full diagram (relevance_score 0.7394), and chart_analyzer on that specific frame reports two rectangles meeting at a corner plus a shaded triangle inside the figure.",
+    "OCR on the retrieved frames reads the prompt text \"If the area of each rectangle is 10 squared units\" and also shows the overlay \"A(□) = 10\" / \"A(\\square) = 10\" (avg detection confidence 0.9780), so each rectangle is given area 10 square units.",
+    "Using the answer-critical frame rather than the earlier incomplete frames, chart_analyzer on frame_6.50.png reports that the shaded region is a triangle and that this triangle is half the area of the horizontal rectangle; since that rectangle's area is 10, the shaded area is 10 ÷ 2 = 5 square units.",
+    "Therefore the shaded area is 5 square units, which matches option E."
+  ],
+  "answer": "E. 5 sq units",
+  "generation_rounds": [
+    {
+      "phase": "initial_trace_generation",
+      "diagnosis": {
+        "verdict": "FAIL",
+        "answer_correct": false,
+        "trace_quality_scores": {
+          "perceptual_correctness": 0.0,
+          "temporal_accuracy": 0.0,
+          "logical_coherence": 0.0,
+          "completeness": 0.0
+        },
+        "error_categories": [
+          {
+            "type": "INCOMPLETE_TRACE",
+            "step_index": null,
+            "description": "No initial reasoning trace or answer is available. Decompose the question into answer-critical subgoals, gather the minimal tool evidence needed to answer it from scratch, and prepare refinement instructions that let the refiner synthesize a complete first trace.",
+            "severity": "HIGH",
+            "suggested_tools": [],
+            "evidence": null
+          }
+        ],
+        "confidence": 1.0,
+        "summary": "Cold-start generation mode: ORIGINAL_TRACE and ORIGINAL_ANSWER are intentionally empty. Plan tool calls from the question alone, then synthesize the first tool-grounded trace.",
+        "generation_mode": "cold_start"
+      },
+      "planner_raw": "{\n  \"strategy\": \"The video appears to show a single static geometry diagram with on-screen instructional text. Retrieve the diagram frame directly, then use OCR to capture any labels/text and chart-style structural analysis to interpret the rectangle arrangement and the shaded region needed to compute the area.\",\n  \"tool_calls\": [\n    {\n      \"step\": 1,\n      \"tool\": \"frame_retriever\",\n      \"arguments\": {\n        \"video_path\": \"VIDEO\",\n        \"query\": \"static geometry diagram showing two white-outlined rectangles arranged in an L-shape on a black background, with a shaded region and math problem text\",\n        \"timestamps\": null,\n        \"num_frames\": 3\n      },\n      \"purpose\": \"Get the key frame(s) containing the full problem diagram in a stable state before reading text or interpreting the geometry.\",\n      \"depends_on\": []\n    },\n    {\n      \"step\": 2,\n      \"tool\": \"ocr\",\n      \"arguments\": {\n        \"frame_path\": \"<STEP_1:frames>\",\n        \"timestamp\": null\n      },\n      \"purpose\": \"Read any on-screen problem text, labels, dimensions, or answer choices visible in the retrieved diagram frames.\",\n      \"depends_on\": [\n        1\n      ]\n    },\n    {\n      \"step\": 3,\n      \"tool\": \"chart_analyzer\",\n      \"arguments\": {\n        \"frame_path\": \"<STEP_1:frames>\",\n        \"timestamp\": null,\n        \"query\": \"geometry diagram with two rectangles and a shaded region; identify the component shapes, how the shaded region relates to the rectangles, and any visible dimensions or equalities needed to compute the shaded area\"\n      },\n      \"purpose\": \"Interpret the structured diagram: determine the rectangle configuration, what region is shaded, and what geometric relationships are needed for the area calculation.\",\n      \"depends_on\": [\n        1\n      ]\n    }\n  ],\n  \"refinement_instructions\": \"Build the first trace from scratch using the retrieved diagram evidence. Use OCR as authoritative for any visible text, labels, dimensions, and answer options. Use chart_analyzer as authoritative for the diagram structure: which rectangles are present, how they share edges, and exactly which subregion is shaded. In the rewritten trace, first describe the full visible setup, then state the area facts implied by 'each rectangle is 10 square units,' then compute the shaded area only from diagram-grounded relationships. Do not infer an option by plausibility alone. If OCR or chart_analyzer reveals dimensions or partitions, cite those explicitly. If multiple retrieved frames differ, use the frame-level results and pick the frame that shows the most complete diagram state; do not merge inconsistent details across frames. Update the final answer to the option whose area matches the verified computation.\"\n}",
+      "planner_output": {
+        "strategy": "The video appears to show a single static geometry diagram with on-screen instructional text. Retrieve the diagram frame directly, then use OCR to capture any labels/text and chart-style structural analysis to interpret the rectangle arrangement and the shaded region needed to compute the area.",
+        "tool_calls": [
+          {
+            "step": 1,
+            "tool": "frame_retriever",
+            "arguments": {
+              "video_path": "VIDEO",
+              "query": "static geometry diagram showing two white-outlined rectangles arranged in an L-shape on a black background, with a shaded region and math problem text",
+              "timestamps": null,
+              "num_frames": 3
+            },
+            "purpose": "Get the key frame(s) containing the full problem diagram in a stable state before reading text or interpreting the geometry.",
+            "depends_on": []
+          },
+          {
+            "step": 2,
+            "tool": "ocr",
+            "arguments": {
+              "frame_path": "<STEP_1:frames>",
+              "timestamp": null
+            },
+            "purpose": "Read any on-screen problem text, labels, dimensions, or answer choices visible in the retrieved diagram frames.",
+            "depends_on": [
+              1
+            ]
+          },
+          {
+            "step": 3,
+            "tool": "chart_analyzer",
+            "arguments": {
+              "frame_path": "<STEP_1:frames>",
+              "timestamp": null,
+              "query": "geometry diagram with two rectangles and a shaded region; identify the component shapes, how the shaded region relates to the rectangles, and any visible dimensions or equalities needed to compute the shaded area"
+            },
+            "purpose": "Interpret the structured diagram: determine the rectangle configuration, what region is shaded, and what geometric relationships are needed for the area calculation.",
+            "depends_on": [
+              1
+            ]
+          }
+        ],
+        "refinement_instructions": "Build the first trace from scratch using the retrieved diagram evidence. Use OCR as authoritative for any visible text, labels, dimensions, and answer options. Use chart_analyzer as authoritative for the diagram structure: which rectangles are present, how they share edges, and exactly which subregion is shaded. In the rewritten trace, first describe the full visible setup, then state the area facts implied by 'each rectangle is 10 square units,' then compute the shaded area only from diagram-grounded relationships. Do not infer an option by plausibility alone. If OCR or chart_analyzer reveals dimensions or partitions, cite those explicitly. If multiple retrieved frames differ, use the frame-level results and pick the frame that shows the most complete diagram state; do not merge inconsistent details across frames. Update the final answer to the option whose area matches the verified computation."
+      },
+      "executed_tools": [
+        {
+          "step": 1,
+          "tool": "frame_retriever",
+          "arguments": {
+            "video_path": "VIDEO",
+            "query": "static geometry diagram showing two white-outlined rectangles arranged in an L-shape on a black background, with a shaded region and math problem text",
+            "num_frames": 3
+          },
+          "purpose": "Get the key frame(s) containing the full problem diagram in a stable state before reading text or interpreting the geometry.",
+          "depends_on": [],
+          "output": "The tool results for frame_retriever({\"video_path\": \"VIDEO\", \"query\": \"static geometry diagram showing two white-outlined rectangles arranged in an L-shape on a black background, with a shaded region and math problem text\", \"num_frames\": 3}) are:\n{\"mode\": \"query\", \"frames\": [{\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/6b498c15-89aa-413b-af20-1cfb4fc4f30f/frame_6.50.png\", \"timestamp\": 6.5, \"relevance_score\": 0.7393534183502197}, {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/6b498c15-89aa-413b-af20-1cfb4fc4f30f/frame_3.50.png\", \"timestamp\": 3.5, \"relevance_score\": 0.6852890253067017}, {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/6b498c15-89aa-413b-af20-1cfb4fc4f30f/frame_3.00.png\", \"timestamp\": 3.0, \"relevance_score\": 0.6781793832778931}]}"
+        },
+        {
+          "step": 2,
+          "tool": "ocr",
+          "arguments": {
+            "frame_path": [
+              {
+                "frame_path": "/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/6b498c15-89aa-413b-af20-1cfb4fc4f30f/frame_3.00.png",
+                "timestamp": 3.0
+              },
+              {
+                "frame_path": "/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/6b498c15-89aa-413b-af20-1cfb4fc4f30f/frame_3.50.png",
+                "timestamp": 3.5
+              },
+              {
+                "frame_path": "/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/6b498c15-89aa-413b-af20-1cfb4fc4f30f/frame_6.50.png",
+                "timestamp": 6.5
+              }
+            ],
+            "timestamp": null
+          },
+          "purpose": "Read any on-screen problem text, labels, dimensions, or answer choices visible in the retrieved diagram frames.",
+          "depends_on": [
+            1
+          ],
+          "output": "The tool results for ocr({\"frame_path\": [{\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/6b498c15-89aa-413b-af20-1cfb4fc4f30f/frame_3.00.png\", \"timestamp\": 3.0}, {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/6b498c15-89aa-413b-af20-1cfb4fc4f30f/frame_3.50.png\", \"timestamp\": 3.5}, {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/6b498c15-89aa-413b-af20-1cfb4fc4f30f/frame_6.50.png\", \"timestamp\": 6.5}], \"timestamp\": null}) are:\n{\"source\": [\"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/6b498c15-89aa-413b-af20-1cfb4fc4f30f/frame_3.00.png\", \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/6b498c15-89aa-413b-af20-1cfb4fc4f30f/frame_3.50.png\", \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/6b498c15-89aa-413b-af20-1cfb4fc4f30f/frame_6.50.png\"], \"detections\": [{\"text\": \"If the area of each rectangle is 10 squared units,\", \"bbox\": [175, 627, 825, 692], \"confidence\": 0.99, \"text_type\": \"printed\"}, {\"text\": \"A(□) = 10\", \"bbox\": [342, 527, 656, 570], \"confidence\": 0.98, \"text_type\": \"digital_overlay\"}, {\"text\": \"If the area of each rectangle is 10 squared units,\", \"bbox\": [175, 640, 825, 700], \"confidence\": 0.97, \"text_type\": \"digital_overlay\"}, {\"text\": \"A(\\\\square) = 10\", \"bbox\": [312, 512, 686, 562], \"confidence\": 0.98, \"text_type\": \"digital_overlay\"}, {\"text\": \"What is this shaded area?\", \"bbox\": [220, 648, 778, 688], \"confidence\": 0.97, \"text_type\": \"digital_overlay\"}], \"full_text\": \"If the area of each rectangle is 10 squared units,\\nA(□) = 10\\nIf the area of each rectangle is 10 squared units,\\nA(\\\\square) = 10\\nWhat is this shaded area?\", \"ocr_backend\": \"vlm\"}"
+        },
+        {
+          "step": 3,
+          "tool": "chart_analyzer",
+          "arguments": {
+            "frame_path": [
+              {
+                "frame_path": "/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/6b498c15-89aa-413b-af20-1cfb4fc4f30f/frame_3.00.png",
+                "timestamp": 3.0
+              },
+              {
+                "frame_path": "/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/6b498c15-89aa-413b-af20-1cfb4fc4f30f/frame_3.50.png",
+                "timestamp": 3.5
+              },
+              {
+                "frame_path": "/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/6b498c15-89aa-413b-af20-1cfb4fc4f30f/frame_6.50.png",
+                "timestamp": 6.5
+              }
+            ],
+            "query": "geometry diagram with two rectangles and a shaded region; identify the component shapes, how the shaded region relates to the rectangles, and any visible dimensions or equalities needed to compute the shaded area"
+          },
+          "purpose": "Interpret the structured diagram: determine the rectangle configuration, what region is shaded, and what geometric relationships are needed for the area calculation.",
+          "depends_on": [
+            1
+          ],
+          "output": "The tool results for chart_analyzer({\"frame_path\": [{\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/6b498c15-89aa-413b-af20-1cfb4fc4f30f/frame_3.00.png\", \"timestamp\": 3.0}, {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/6b498c15-89aa-413b-af20-1cfb4fc4f30f/frame_3.50.png\", \"timestamp\": 3.5}, {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/6b498c15-89aa-413b-af20-1cfb4fc4f30f/frame_6.50.png\", \"timestamp\": 6.5}], \"query\": \"geometry diagram with two rectangles and a shaded region; identify the component shapes, how the shaded region relates to the rectangles, and any visible dimensions or equalities needed to compute the shaded area\"}) are:\n{\"chart_type\": \"diagram\", \"title\": \"\", \"axes\": {}, \"series\": [], \"key_observations\": [\"The diagram contains two distinct rectangles of equal area, each labeled with area 10 square units.\", \"The two rectangles are arranged adjacent to each other, sharing a common side, forming an L-shape.\", \"There is no shaded region visible in the diagram; the entire figure is outlined in white against a black background.\", \"No dimensions (lengths or widths) are labeled on any of the rectangles.\", \"No explicit equalities or measurements are provided that would allow computation of the shaded area, as no shaded region exists.\"], \"relationships\": [], \"query_response\": \"The diagram shows two rectangles, each with area 10 square units, arranged to form an L-shape. There is no shaded region visible, so no shaded area can be computed from this diagram.\", \"selected_frame\": {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/6b498c15-89aa-413b-af20-1cfb4fc4f30f/frame_3.50.png\", \"timestamp\": 3.5, \"score\": 7.0}, \"frame_results\": [{\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/6b498c15-89aa-413b-af20-1cfb4fc4f30f/frame_3.00.png\", \"timestamp\": 3.0, \"score\": 6.0, \"result\": {\"chart_type\": \"diagram\", \"title\": \"\", \"axes\": {}, \"series\": [], \"key_observations\": [\"The diagram consists of two white-outlined rectangles arranged in an L-shape, sharing a common edge.\", \"The shaded region is not visible in the provided frame; the entire diagram is rendered in white lines on a black background.\", \"No numerical dimensions, tick marks, or labeled equalities are visible in the frame.\", \"The area of each rectangle is stated as 10 squared units, but no visual dimension labels are present to confirm this or to compute the shaded area.\"], \"relationships\": [], \"query_response\": null}}, {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/6b498c15-89aa-413b-af20-1cfb4fc4f30f/frame_3.50.png\", \"timestamp\": 3.5, \"score\": 7.0, \"result\": {\"chart_type\": \"diagram\", \"title\": \"\", \"axes\": {}, \"series\": [], \"key_observations\": [\"The diagram contains two distinct rectangles of equal area, each labeled with area 10 square units.\", \"The two rectangles are arranged adjacent to each other, sharing a common side, forming an L-shape.\", \"There is no shaded region visible in the diagram; the entire figure is outlined in white against a black background.\", \"No dimensions (lengths or widths) are labeled on any of the rectangles.\", \"No explicit equalities or measurements are provided that would allow computation of the shaded area, as no shaded region exists.\"], \"relationships\": [], \"query_response\": \"The diagram shows two rectangles, each with area 10 square units, arranged to form an L-shape. There is no shaded region visible, so no shaded area can be computed from this diagram.\"}}, {\"frame_path\": \"/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/data/dense_frames/6b498c15-89aa-413b-af20-1cfb4fc4f30f/frame_6.50.png\", \"timestamp\": 6.5, \"score\": 7.0, \"result\": {\"chart_type\": \"diagram\", \"title\": \"\", \"axes\": {}, \"series\": [], \"key_observations\": [\"The diagram contains two rectangles: one horizontal and one vertical, sharing a common corner point.\", \"The shaded region is a triangle formed by the diagonal of the horizontal rectangle and the vertical side of the vertical rectangle.\", \"The area of the horizontal rectangle is labeled as 10.\", \"The shaded triangle is formed by connecting the top-right corner of the horizontal rectangle to the top-left corner of the vertical rectangle, and down to the bottom-right corner of the horizontal rectangle.\"], \"relationships\": [], \"query_response\": \"The shaded region is a triangle. The horizontal rectangle has area 10. The shaded triangle is half the area of the horizontal rectangle.\"}}], \"multi_frame_strategy\": \"best_frame\", \"selection_reason\": \"Top-level fields mirror one high-salience candidate frame; inspect frame_results for all frame-level chart or diagram reads.\"}"
+        }
+      ],
+      "refiner_raw": "{\n  \"refined_trace\": [\n    \"frame_retriever returns frame_6.50.png at 6.5s as the strongest candidate for the full diagram (relevance_score 0.7394), and chart_analyzer on that specific frame reports two rectangles meeting at a corner plus a shaded triangle inside the figure.\",\n    \"OCR on the retrieved frames reads the prompt text \\\"If the area of each rectangle is 10 squared units\\\" and also shows the overlay \\\"A(□) = 10\\\" / \\\"A(\\\\square) = 10\\\" (avg detection confidence 0.9780), so each rectangle is given area 10 square units.\",\n    \"Using the answer-critical frame rather than the earlier incomplete frames, chart_analyzer on frame_6.50.png reports that the shaded region is a triangle and that this triangle is half the area of the horizontal rectangle; since that rectangle's area is 10, the shaded area is 10 ÷ 2 = 5 square units.\",\n    \"Therefore the shaded area is 5 square units, which matches option E.\"\n  ],\n  \"refined_answer\": \"E. 5 sq units\",\n  \"answer_changed\": true,\n  \"changes_made\": [\n    {\n      \"operation\": \"INSERT_STEP\",\n      \"step_index\": null,\n      \"original\": \"\",\n      \"replacement\": \"frame_retriever returns frame_6.50.png at 6.5s as the strongest candidate for the full diagram (relevance_score 0.7394), and chart_analyzer on that specific frame reports two rectangles meeting at a corner plus a shaded triangle inside the figure.\",\n      \"evidence_source\": \"TOOL_OUTPUTS Step 1 frame_retriever; TOOL_OUTPUTS Step 3 chart_analyzer frame_results for frame_6.50.png\"\n    },\n    {\n      \"operation\": \"INSERT_STEP\",\n      \"step_index\": null,\n      \"original\": \"\",\n      \"replacement\": \"OCR on the retrieved frames reads the prompt text \\\"If the area of each rectangle is 10 squared units\\\" and also shows the overlay \\\"A(□) = 10\\\" / \\\"A(\\\\square) = 10\\\" (avg detection confidence 0.9780), so each rectangle is given area 10 square units.\",\n      \"evidence_source\": \"TOOL_OUTPUTS Step 2 ocr\"\n    },\n    {\n      \"operation\": \"INSERT_STEP\",\n      \"step_index\": null,\n      \"original\": \"\",\n      \"replacement\": \"Using the answer-critical frame rather than the earlier incomplete frames, chart_analyzer on frame_6.50.png reports that the shaded region is a triangle and that this triangle is half the area of the horizontal rectangle; since that rectangle's area is 10, the shaded area is 10 ÷ 2 = 5 square units.\",\n      \"evidence_source\": \"TOOL_OUTPUTS Step 3 chart_analyzer frame_results for frame_6.50.png\"\n    },\n    {\n      \"operation\": \"PATCH_ANSWER\",\n      \"step_index\": null,\n      \"original\": \"\",\n      \"replacement\": \"E. 5 sq units\",\n      \"evidence_source\": \"TOOL_OUTPUTS Step 2 ocr; TOOL_OUTPUTS Step 3 chart_analyzer frame_results for frame_6.50.png\"\n    }\n  ],\n  \"unresolved_issues\": []\n}",
+      "refiner_output": {
+        "refined_trace": [
+          "frame_retriever returns frame_6.50.png at 6.5s as the strongest candidate for the full diagram (relevance_score 0.7394), and chart_analyzer on that specific frame reports two rectangles meeting at a corner plus a shaded triangle inside the figure.",
+          "OCR on the retrieved frames reads the prompt text \"If the area of each rectangle is 10 squared units\" and also shows the overlay \"A(□) = 10\" / \"A(\\square) = 10\" (avg detection confidence 0.9780), so each rectangle is given area 10 square units.",
+          "Using the answer-critical frame rather than the earlier incomplete frames, chart_analyzer on frame_6.50.png reports that the shaded region is a triangle and that this triangle is half the area of the horizontal rectangle; since that rectangle's area is 10, the shaded area is 10 ÷ 2 = 5 square units.",
+          "Therefore the shaded area is 5 square units, which matches option E."
+        ],
+        "refined_answer": "E. 5 sq units",
+        "answer_changed": true,
+        "changes_made": [
+          {
+            "operation": "INSERT_STEP",
+            "step_index": null,
+            "original": "",
+            "replacement": "frame_retriever returns frame_6.50.png at 6.5s as the strongest candidate for the full diagram (relevance_score 0.7394), and chart_analyzer on that specific frame reports two rectangles meeting at a corner plus a shaded triangle inside the figure.",
+            "evidence_source": "TOOL_OUTPUTS Step 1 frame_retriever; TOOL_OUTPUTS Step 3 chart_analyzer frame_results for frame_6.50.png"
+          },
+          {
+            "operation": "INSERT_STEP",
+            "step_index": null,
+            "original": "",
+            "replacement": "OCR on the retrieved frames reads the prompt text \"If the area of each rectangle is 10 squared units\" and also shows the overlay \"A(□) = 10\" / \"A(\\square) = 10\" (avg detection confidence 0.9780), so each rectangle is given area 10 square units.",
+            "evidence_source": "TOOL_OUTPUTS Step 2 ocr"
+          },
+          {
+            "operation": "INSERT_STEP",
+            "step_index": null,
+            "original": "",
+            "replacement": "Using the answer-critical frame rather than the earlier incomplete frames, chart_analyzer on frame_6.50.png reports that the shaded region is a triangle and that this triangle is half the area of the horizontal rectangle; since that rectangle's area is 10, the shaded area is 10 ÷ 2 = 5 square units.",
+            "evidence_source": "TOOL_OUTPUTS Step 3 chart_analyzer frame_results for frame_6.50.png"
+          },
+          {
+            "operation": "PATCH_ANSWER",
+            "step_index": null,
+            "original": "",
+            "replacement": "E. 5 sq units",
+            "evidence_source": "TOOL_OUTPUTS Step 2 ocr; TOOL_OUTPUTS Step 3 chart_analyzer frame_results for frame_6.50.png"
+          }
+        ],
+        "unresolved_issues": []
+      }
+    }
+  ]
+}

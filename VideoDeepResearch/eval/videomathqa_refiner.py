@@ -290,10 +290,10 @@ def main():
         print(f"Using local VLM model: {vlm_model_name}")
 
     demo = None
-    dataset_folder = str((Path(_eval_dir) / "data").resolve())
+cot/VideoDeepResearch/__pycache__    dataset_folder = str((Path(_eval_dir) / "data").resolve())
     debug_root = str(DEFAULT_DEBUG_DIR.resolve())
 
-    for index, item in enumerate(sampled_data, start=1):
+    for index, item in enumerate(sampled_data[25:], start=1):
         record = dict(item)
         video_path = str(item.get("video_path", "")).strip()
         question = str(item.get("question", "")).strip()

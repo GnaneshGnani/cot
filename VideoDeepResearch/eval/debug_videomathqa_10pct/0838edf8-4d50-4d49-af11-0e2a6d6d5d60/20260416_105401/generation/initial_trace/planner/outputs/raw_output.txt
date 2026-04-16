@@ -1,0 +1,59 @@
+{
+  "strategy": "Localize the Walmart FY24 income-statement Sankey diagram, then retrieve a few timestamped frames from that bounded interval and read the chart values needed for the computation: total revenue, taxes, and interest. Use those grounded values to compute the combined percentage and map it to the closest option.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "temporal_grounder",
+      "arguments": {
+        "video_path": "<VIDEO_PATH>",
+        "query": "Walmart FY24 income statement Sankey diagram showing revenue, expenses, taxes, and interest"
+      },
+      "purpose": "Find the time window where the answer-critical financial chart appears before reading values from frames.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "<VIDEO_PATH>",
+        "query": null,
+        "timestamps": [
+          "<STEP_1:segments[0].start>",
+          "<STEP_1:segments[0].end>",
+          "<STEP_1:segments[1].start>"
+        ],
+        "num_frames": 3
+      },
+      "purpose": "Sample candidate frames from top chart intervals to capture a fully rendered Sankey/chart state rather than relying on one ranked interval or partial animation state.",
+      "depends_on": [
+        1
+      ]
+    },
+    {
+      "step": 3,
+      "tool": "chart_analyzer",
+      "arguments": {
+        "frame_path": "<STEP_2:frames>",
+        "timestamp": null,
+        "query": "Read the Walmart FY24 income statement Sankey diagram and identify total revenue plus the values for taxes and interest"
+      },
+      "purpose": "Extract the structured financial values from the chart needed to compute taxes-and-interest as a percentage of total revenue.",
+      "depends_on": [
+        2
+      ]
+    },
+    {
+      "step": 4,
+      "tool": "ocr",
+      "arguments": {
+        "frame_path": "<STEP_2:frames>",
+        "timestamp": null
+      },
+      "purpose": "Verify the chart text labels and numbers directly in case chart interpretation leaves any ambiguity about the revenue, taxes, or interest figures.",
+      "depends_on": [
+        2
+      ]
+    }
+  ],
+  "refinement_instructions": "Build the first reasoning trace from scratch. In the rewritten trace, cite the frame-level evidence from steps 3 and 4, not just any top-level selected-frame summary. First identify which retrieved frame actually shows the complete Walmart FY24 income statement Sankey diagram with readable values. Then extract three answer-critical fields only: total revenue, taxes, and interest. Use OCR to confirm the exact numeric labels and that the categories are truly 'taxes' and 'interest' rather than another expense bucket. Compute (taxes + interest) / total revenue × 100, state the approximate percentage, and then map that value to the closest listed option. If step 3 and step 4 disagree, prefer the frame where labels are most legible and preserve the disagreement explicitly rather than guessing. Update the final answer based only on the grounded chart values; do not use broad video-summary context or unsupported financial assumptions."
+}

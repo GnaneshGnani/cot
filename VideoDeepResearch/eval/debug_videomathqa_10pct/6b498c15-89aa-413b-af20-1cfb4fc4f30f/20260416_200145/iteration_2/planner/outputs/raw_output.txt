@@ -1,0 +1,40 @@
+{
+  "strategy": "Use a narrowly targeted diagram-reading pass on the already localized static geometry frames to ground the missing region decomposition directly: which exact regions the blue overlap occupies relative to the two quarter circles, and whether the question wording is simply imprecise relative to the displayed figure. This avoids redoing broad retrieval and focuses on the unsupported geometric premise behind the area formula.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "video",
+        "timestamps": [30.5, 31.0, 31.5],
+        "query": null,
+        "num_frames": 3
+      },
+      "purpose": "Recover the same static diagram frames explicitly by timestamp so downstream analysis can inspect the exact shaded overlap region across a coherent frame bundle rather than relying on prior summary text.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "chart_analyzer",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null,
+        "query": "Geometry diagram with a square of side 4, two quarter-circle arcs centered at adjacent vertices, and a blue shaded overlap region. Identify exactly which shapes are drawn, which arc endpoints and centers define the shaded region, whether the blue region is the intersection of the two quarter circles, and what sector-and-triangle pieces bound that intersection region."
+      },
+      "purpose": "Ground the answer-critical geometric structure that was previously inferred rather than shown: whether the shaded blue lens is the intersection of the two radius-4 quarter circles and how that intersection can be decomposed in terms of sectors and triangles.",
+      "depends_on": [1]
+    },
+    {
+      "step": 3,
+      "tool": "chart_analyzer",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null,
+        "query": "In this geometry diagram, determine whether the displayed figure corresponds to the wording 'quarter circle and semicircle' or instead shows two quarter circles forming an overlap. State any visible mismatch between the text prompt and the drawn structure."
+      },
+      "purpose": "Directly resolve the wording-vs-diagram alignment issue so the repaired trace can justify why the solution should follow the displayed geometry rather than the possibly imprecise wording.",
+      "depends_on": [1]
+    }
+  ],
+  "refinement_instructions": "Keep the earlier supported fact that the displayed square side length is 4 from OCR. Replace the old step-4 derivation unless step 2 explicitly grounds the missing premise that the blue region is the intersection of the two quarter circles and identifies the relevant sector/triangle decomposition of that exact intersection region. In the rewritten trace, cite chart_analyzer frame_results, not just the top-level summary, and preserve provenance such as 'chart_analyzer reports...'. Use step 2 only for structural claims it explicitly supports: arc centers, endpoints, intersection status, and bounded pieces of the shaded region. Use step 3 to either resolve or explicitly state the mismatch between the wording and the drawn figure; if step 3 confirms the diagram shows two quarter circles rather than a quarter circle plus semicircle, the trace must say the answer is based on the displayed diagram and note that the wording appears imprecise. Do not keep the prior claim that the overlap equals 'two full sectors minus two triangles' unless step 2 directly supports that exact decomposition of the shaded region. If the new analysis instead supports a different decomposition or leaves the region relation ambiguous, update the reasoning and answer accordingly rather than forcing option C."
+}

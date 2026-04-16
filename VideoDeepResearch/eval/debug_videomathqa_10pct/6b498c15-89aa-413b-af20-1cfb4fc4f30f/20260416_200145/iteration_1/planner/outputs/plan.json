@@ -1,0 +1,55 @@
+{
+  "strategy": "The failure is a diagram-structure ambiguity, not a missing-number problem. Re-anchor on the original unsolved geometry frame(s) and use a tighter diagram-reading pass plus text extraction on the same coherent frame bundle to resolve exactly where the semicircle sits relative to the triangle sides. Because the planner does not see the video, this plan first temporally grounds the chart interval before frame retrieval so animated or partially rendered chart states do not silently contaminate chart_analyzer.",
+  "tool_calls": [
+    {
+      "tool": "temporal_grounder",
+      "arguments": {
+        "video_path": "video",
+        "query": "segment where the relevant chart or infographic appears on screen for: Describe the geometry diagram precisely: identify the triangle sides and right-angle vertex; state where the semicircle's straight edge and curved arc lie; which triangle sides or segments the semicircle touches or shares endpoints with; and which visible labels attach to which segments"
+      },
+      "purpose": "Localize the chart / infographic interval before frame retrieval so downstream chart reading uses temporally grounded frames instead of raw query-ranked hits that may reflect a partial or animated state.",
+      "depends_on": [],
+      "step": 1
+    },
+    {
+      "step": 2,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "video",
+        "query": "original geometry problem screen with a right triangle and a semicircle, before any solution annotations, showing the full diagram and answer choices",
+        "timestamps": null,
+        "num_frames": 3
+      },
+      "purpose": "Retrieve a small bundle of candidate question-state frames that show the complete original diagram, since the prior retrieval/chart interpretation produced an internally inconsistent geometric description.",
+      "depends_on": [
+        1
+      ]
+    },
+    {
+      "step": 3,
+      "tool": "chart_analyzer",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null,
+        "query": "Describe the geometry diagram precisely: identify the triangle sides and right-angle vertex; state where the semicircle's straight edge and curved arc lie; which triangle sides or segments the semicircle touches or shares endpoints with; and which visible labels attach to which segments."
+      },
+      "purpose": "Obtain an answer-critical, internally coherent structural description of the diagram rather than a broad guess like 'inscribed semicircle' or 'diameter on the hypotenuse.'",
+      "depends_on": [
+        2
+      ]
+    },
+    {
+      "step": 4,
+      "tool": "ocr",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null
+      },
+      "purpose": "Verify the exact visible labels, including any option text and any segment/radius markers, on the same candidate frames used for diagram interpretation.",
+      "depends_on": [
+        2
+      ]
+    }
+  ],
+  "refinement_instructions": "Replace the unsupported inference that the semicircle radius equals the triangle's inradius. Use the frame-level results from chart_analyzer to select the candidate frame that gives the clearest, most self-consistent question-state diagram; do not rely only on the top-level selected summary if different frames disagree. Preserve the already supported numeric facts from OCR only if they still match the chosen frame. In the rewritten trace, first state the full grounded diagram structure: the 4 and 6 labels, the right triangle orientation, and exactly which side/segment the semicircle's diameter or arc aligns with and what it is tangent to or bounded by. Then derive the radius only from those grounded relations. If chart_analyzer and OCR still leave the semicircle placement ambiguous or contradictory, explicitly mark the geometry as unresolved and avoid forcing a final option from plausibility or closest-value matching. Use the temporally grounded frame bundle as the chart-reading evidence anchor. Do not treat a raw query-ranked chart frame as guaranteed complete when the task needs full chart contents, multiple metrics, or cross-metric comparison."
+}

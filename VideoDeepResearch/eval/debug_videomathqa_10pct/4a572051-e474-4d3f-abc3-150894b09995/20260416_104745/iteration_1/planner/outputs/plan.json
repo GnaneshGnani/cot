@@ -1,0 +1,31 @@
+{
+  "strategy": "Keep the already grounded text fact r = 1, but add direct visual grounding for the diagram structure so the trace can justify that one piece is a sector bounded by two radii and one outer arc. Use a focused re-retrieval of the geometry problem frame and a diagram-reading tool rather than redoing OCR broadly.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "video",
+        "query": "original geometry problem screen showing a circle divided into equal wedge-shaped pieces, with the single piece and radius label visible, before any worked-solution annotations",
+        "timestamps": null,
+        "num_frames": 3
+      },
+      "purpose": "Retrieve a small coherent bundle of candidate problem-state frames that clearly show the circle diagram, not just the text label.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "chart_analyzer",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null,
+        "query": "describe the geometry diagram structure: whether the circle is partitioned into equal sector-like wedges, and for one piece identify its visible boundaries such as two straight radii and one curved outer arc"
+      },
+      "purpose": "Ground the missing answer-critical structural interpretation of the pictured single piece from the diagram itself.",
+      "depends_on": [
+        1
+      ]
+    }
+  ],
+  "refinement_instructions": "Preserve the already supported OCR fact that the visible label is r = 1. Replace the unsupported step that assumed the piece is a simple sector from the question text alone with a tool-attributed description from chart_analyzer of the diagram structure. In the rewritten trace, explicitly cite the relevant frame-level chart_analyzer result showing that the circle is divided into equal wedge/sector pieces and that one piece is bounded by two radii and one circular arc. Only then reuse the perimeter formula 2r + (1/12)(2πr), compute the value, and remap to the closest answer choice. If chart_analyzer does not clearly confirm the sector structure in any returned frame, the refiner should state that the structural premise remains ungrounded rather than asserting it."
+}

@@ -1,0 +1,38 @@
+{
+  "strategy": "Reuse the already localized final-puzzle phase, but gather direct frame-level evidence for the option layouts so the trace can explicitly compare A versus D instead of inferring by elimination. A small timestamp sweep around the end-of-video puzzle state plus a structured diagram reading step should resolve which option is the L-shaped footprint.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "<video_path>",
+        "query": null,
+        "timestamps": [
+          144.2,
+          144.5,
+          144.8,
+          145.0,
+          145.2,
+          145.5
+        ],
+        "num_frames": 6
+      },
+      "purpose": "Sample a tight chronological bundle around the previously identified final puzzle so at least one frame cleanly shows the last left-side structure and all right-side answer options before or during the answer-marking overlays.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "chart_analyzer",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null,
+        "query": "multiple-choice diagram showing a 3D block structure on the left and four 2D top-view answer options A, B, C, and D on the right; describe the square layout of each option, especially options A and D, and identify which option has an L-shaped three-square footprint"
+      },
+      "purpose": "Read the structured option grids directly from the candidate frames and obtain concrete per-frame descriptions of A and D so the answer can be grounded by direct comparison rather than elimination.",
+      "depends_on": [
+        1
+      ]
+    }
+  ],
+  "refinement_instructions": "Keep the previously supported claim that the final left structure’s top-down footprint is an L-shaped three-square arrangement, and keep the end-of-video temporal anchor. Replace the under-supported step that jumped from 'B and C are crossed out' to 'therefore A' with explicit option-layout evidence from Step 2. Inspect Step 2's frame_results (not just any top-level selected frame) and cite the frame(s) where all options are readable; use the chart_analyzer description of options A and D to state which one actually shows the L-shaped three-square footprint and which one does not. If Step 2 shows D, not A, as the L-shape, update the final answer accordingly. Do not rely on remaining-option elimination unless the same frame-level result also directly describes A and D."
+}

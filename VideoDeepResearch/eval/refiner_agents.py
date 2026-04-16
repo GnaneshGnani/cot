@@ -5,10 +5,38 @@ from pathlib import Path
 from typing import Any, Dict
 
 import refiner_debug
-from refine_prompt import planner_prompt, refiner_prompt, trace_generator_prompt, verifier_prompt
+from refine_prompt import (
+    planner_prompt,
+    refiner_prompt,
+    self_contained_trace_prompt,
+    trace_generator_prompt,
+    verifier_prompt,
+)
 
 
 class RefinerAgentsMixin:
+    _NON_STANDALONE_TRACE_PATTERNS = [
+        re.compile(r"\boriginal trace\b", flags=re.IGNORECASE),
+        re.compile(r"\boriginal answer\b", flags=re.IGNORECASE),
+        re.compile(r"\bprevious answer\b", flags=re.IGNORECASE),
+        re.compile(r"\bprevious jump\b", flags=re.IGNORECASE),
+        re.compile(r"\bearlier supported\b", flags=re.IGNORECASE),
+        re.compile(r"\bearlier supported evidence\b", flags=re.IGNORECASE),
+        re.compile(r"\battempted repair\b", flags=re.IGNORECASE),
+        re.compile(r"\btool_outputs\b", flags=re.IGNORECASE),
+        re.compile(r"\bchanges_made\b", flags=re.IGNORECASE),
+        re.compile(r"\bunresolved_issues\b", flags=re.IGNORECASE),
+        re.compile(r"\bplanner\b", flags=re.IGNORECASE),
+        re.compile(r"\bverifier\b", flags=re.IGNORECASE),
+        re.compile(r"\brefiner\b", flags=re.IGNORECASE),
+        re.compile(
+            r"\b(?:temporal_grounder|frame_retriever|asr|audio_grounder|ocr|"
+            r"spatial_grounder|counter|dense_captioner|action_recognizer|chart_analyzer)"
+            r"\s+Step\s+\d+\b",
+            flags=re.IGNORECASE,
+        ),
+    ]
+
     def _retry_malformed_json_response(
         self,
         raw_output: str,
@@ -45,89 +73,8 @@ class RefinerAgentsMixin:
         parsed = self._extract_json_payload_with_schema(tail, model_cls=Dict[str, Any])
         return parsed if isinstance(parsed, dict) else None
 
-    def _normalize_tool_text(self, value) -> str:
-        return " ".join(str(value or "").strip().lower().split())
-
-    def _tool_relationship_key(self, rel) -> tuple[str, str, str]:
-        if not isinstance(rel, dict):
-            return ("", "", "")
-        return (
-            self._normalize_tool_text(rel.get("from")),
-            self._normalize_tool_text(rel.get("to")),
-            self._normalize_tool_text(rel.get("label")),
-        )
-
     def _sanitize_tool_output_for_refiner(self, tool_name: str, output_str: str) -> str:
-        if str(tool_name or "").strip() != "chart_analyzer" or "are:\n" not in str(output_str or ""):
-            return output_str
-        parsed = self._parse_tool_result_json(output_str)
-        if not isinstance(parsed, dict):
-            return output_str
-        if self._normalize_tool_text(parsed.get("chart_type")) != "diagram":
-            return output_str
-        if not isinstance(parsed.get("frame_results"), list):
-            return output_str
-
-        allowed_observations = {
-            self._normalize_tool_text(observation)
-            for observation in (parsed.get("key_observations") or [])
-            if str(observation or "").strip()
-        }
-        allowed_relationships = {
-            self._tool_relationship_key(rel)
-            for rel in (parsed.get("relationships") or [])
-            if isinstance(rel, dict)
-        }
-
-        sanitized_frame_results = []
-        changed = False
-        for frame_result in parsed.get("frame_results") or []:
-            if not isinstance(frame_result, dict):
-                sanitized_frame_results.append(frame_result)
-                continue
-            safe_frame = dict(frame_result)
-            result = dict(safe_frame.get("result") or {})
-
-            original_observations = list(result.get("key_observations") or [])
-            original_relationships = list(result.get("relationships") or [])
-            original_query_response = result.get("query_response")
-
-            result["key_observations"] = [
-                str(observation or "").strip()
-                for observation in original_observations
-                if self._normalize_tool_text(observation) in allowed_observations
-            ]
-            result["relationships"] = [
-                {
-                    "from": rel.get("from"),
-                    "to": rel.get("to"),
-                    "label": rel.get("label"),
-                }
-                for rel in original_relationships
-                if self._tool_relationship_key(rel) in allowed_relationships
-            ]
-            result["query_response"] = None
-
-            if (
-                result["key_observations"] != original_observations
-                or result["relationships"] != original_relationships
-                or original_query_response not in {None, ""}
-            ):
-                changed = True
-
-            safe_frame["result"] = result
-            sanitized_frame_results.append(safe_frame)
-
-        if not changed:
-            return output_str
-
-        parsed["frame_results"] = sanitized_frame_results
-        parsed["refiner_safety_note"] = (
-            "For diagram outputs, per-frame details are restricted to primitives that also survive "
-            "the top-level merged summary."
-        )
-        prefix = output_str.split("are:\n", 1)[0] + "are:\n"
-        return prefix + json.dumps(parsed, ensure_ascii=False)
+        return output_str
 
     def _extract_tool_confidence(self, tool_name: str, result: dict) -> float:
         if not isinstance(result, dict):
@@ -1021,6 +968,77 @@ class RefinerAgentsMixin:
             return out if out else [raw]
         return list(fallback)
 
+    def _trace_needs_self_contained_rewrite(self, trace_steps) -> bool:
+        normalized = self._normalize_refined_trace(trace_steps, [])
+        for step in normalized:
+            text = str(step or "").strip()
+            if not text:
+                continue
+            for pattern in self._NON_STANDALONE_TRACE_PATTERNS:
+                if pattern.search(text):
+                    return True
+        return False
+
+    def _build_self_contained_trace_prompt(
+        self,
+        trace_steps: list,
+        trace_answer: str,
+        executed_tools: list,
+    ) -> str:
+        tool_lines = []
+        for item in executed_tools or []:
+            if not isinstance(item, dict):
+                continue
+            tool_name = item.get("tool", "")
+            safe_output = self._sanitize_tool_output_for_refiner(tool_name, item.get("output", ""))
+            tool_lines.append(
+                f"Step {item.get('step')}: {tool_name} — {item.get('purpose', '')}\n{safe_output}"
+            )
+        tools_block = "\n".join(tool_lines) if tool_lines else "(no tool outputs)"
+        return (
+            self_contained_trace_prompt.strip()
+            + "\n\nQUESTION:\n"
+            + self._format_question_with_options()
+            + "\n\nCURRENT_REFINED_TRACE:\n"
+            + self._format_trace_steps(trace_steps)
+            + "\n\nCURRENT_REFINED_ANSWER:\n"
+            + str(trace_answer or "").strip()
+            + "\n\nTOOL_OUTPUTS:\n"
+            + tools_block
+        )
+
+    def _rewrite_trace_self_contained(
+        self,
+        trace_steps: list,
+        trace_answer: str,
+        executed_tools: list,
+    ):
+        ibase = getattr(self, "_refinement_debug_iter_dir", None)
+        out_dir = None
+        if ibase:
+            out_dir = refiner_debug.ensure_outputs_dir(Path(ibase) / "refiner_self_contained")
+
+        prompt = self._build_self_contained_trace_prompt(trace_steps, trace_answer, executed_tools)
+        messages = [{"role": "user", "content": prompt}]
+        if out_dir:
+            refiner_debug.write_json(
+                out_dir,
+                "model_input.json",
+                {"model": self.planner_model_name, "input": messages},
+            )
+
+        raw_output = self._text2text(
+            messages, self.planner_model_name, self.planner_api_base, self.planner_api_keys
+        )
+        if out_dir:
+            refiner_debug.write_text(out_dir, "raw_output.txt", raw_output or "")
+
+        parsed = self._extract_json_payload(raw_output)
+        parsed_dict = parsed if isinstance(parsed, dict) else None
+        if out_dir and parsed_dict is not None:
+            refiner_debug.write_json(out_dir, "parsed.json", parsed_dict)
+        return raw_output, parsed_dict
+
     def _build_refiner_prompt(
         self,
         trace_steps: list,
@@ -1119,6 +1137,39 @@ class RefinerAgentsMixin:
                 refiner_debug.write_text(r_out_dir, "repair_raw_output.txt", repair_raw_output or "")
             parsed_output = self._extract_refiner_payload(repair_raw_output)
         parsed_dict = parsed_output if isinstance(parsed_output, dict) else None
+        if parsed_dict is not None:
+            current_refined_trace = self._normalize_refined_trace(
+                parsed_dict.get("refined_trace"),
+                trace_steps,
+            )
+            if self._trace_needs_self_contained_rewrite(current_refined_trace):
+                rewrite_raw, rewrite_dict = self._rewrite_trace_self_contained(
+                    current_refined_trace,
+                    parsed_dict.get("refined_answer", trace_answer),
+                    executed_tools,
+                )
+                if r_out_dir:
+                    refiner_debug.write_text(
+                        r_out_dir,
+                        "self_contained_rewrite_raw_output.txt",
+                        rewrite_raw or "",
+                    )
+                    if isinstance(rewrite_dict, dict):
+                        refiner_debug.write_json(
+                            r_out_dir,
+                            "self_contained_rewrite_parsed.json",
+                            rewrite_dict,
+                        )
+                if isinstance(rewrite_dict, dict):
+                    rewritten_trace = self._normalize_refined_trace(
+                        rewrite_dict.get("refined_trace"),
+                        current_refined_trace,
+                    )
+                    rewritten_answer = rewrite_dict.get("refined_answer")
+                    if rewritten_trace and not self._trace_needs_self_contained_rewrite(rewritten_trace):
+                        parsed_dict["refined_trace"] = rewrite_dict.get("refined_trace")
+                        if rewritten_answer is not None and str(rewritten_answer).strip():
+                            parsed_dict["refined_answer"] = str(rewritten_answer).strip()
         if r_out_dir and parsed_dict is not None:
             refiner_debug.write_json(r_out_dir, "parsed.json", parsed_dict)
 

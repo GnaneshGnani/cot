@@ -531,13 +531,16 @@ clearest set of tool calls that will collect the missing evidence.
    USE WHEN: trace describes actions incorrectly or action verification is needed.
 
 10. chart_analyzer(frame_path: str | list[str] | list[dict] | null, timestamp: float | list[float] | null, query: str | null)
-   -> {chart_type: str, title: str, axes: dict, series: list, key_observations: list, relationships: list, query_response: str | null}
+   -> {chart_type: str, title: str, axes: dict, series: list, key_observations: list, relationships: list, query_response: str | null, frame_results?: list, selected_frame?: dict}
    Interprets charts, graphs, plots, flowcharts, and diagrams by grounding
    visible structure, labels, values, and local relationships.
    USE WHEN: trace references chart data, graph readings, plot trends, table
    values, or diagram / flowchart structure. Use it to understand the visual
-   evidence, not to solve the full problem end-to-end. Prefer over ocr for any
-   frame where the question involves interpreting a structured visual.
+   evidence, not to solve the full problem end-to-end. When multiple frames are
+   provided, inspect `frame_results` directly; the top-level fields mirror one
+   selected candidate frame and are not a merged cross-frame consensus. Prefer
+   over ocr for any frame where the question involves interpreting a structured
+   visual.
 
 ━━━ You will receive ━━━
 - QUESTION: The original question
@@ -1647,6 +1650,37 @@ Style constraints:
   attempts out of refined_trace unless those comparisons are themselves
   answer-critical.
 
+━━━ Self-Contained Final Trace Requirement ━━━
+The final trace must stand on its own. A reader should be able to understand
+the reasoning without seeing ORIGINAL_TRACE, ORIGINAL_ANSWER, DIAGNOSIS,
+TOOL_OUTPUTS, changes_made, unresolved_issues, or iteration history.
+
+Therefore, refined_trace must NOT:
+- refer to "the original trace", "the original answer", "the previous answer",
+  "the previous jump", "the earlier claim", "the earlier supported evidence",
+  "the attempted repair", or similar pipeline-history wording;
+- mention planner/verifier/refiner bookkeeping such as "TOOL_OUTPUTS Step 3",
+  "changes_made", "unresolved_issues", "planner", "verifier", or "refiner";
+- cite execution-plan step numbers like "chart_analyzer Step 3" or
+  "computed from Steps 3 and 6" when those numbers refer to tool calls rather
+  than the reasoning itself.
+
+Instead, restate the actual evidence directly inside the trace step:
+- name the tool,
+- name the timestamp / frame / bbox / quoted text / reported value,
+- state the resulting claim directly.
+
+Good:
+- "dense_captioner on 7.0s-9.0s reports that the left platform shows a sheep
+  and a frog, so that line is sheep + frog = 10 kg."
+- "OCR on frame_12.00.png reads '24 kg' on the lower line."
+
+Bad:
+- "The earlier supported pairing evidence is still ..."
+- "Based on the original trace ..."
+- "TOOL_OUTPUTS Step 1 spatial_grounder returned ..."
+- "The previous jump to 28 kg is not justified."
+
 ━━━ Confidence-Carrying Evidence Requirement ━━━
 When a cited tool output exposes a numeric support field, include it inline in
 the step that relies on that evidence.
@@ -1826,11 +1860,10 @@ the list order already defines the step order.
   the only usable evidence when the frame-level results contain the real basis
   for choosing the answer.
 - Special rule for multi-frame diagram / chart_analyzer outputs: if the tool
-  exposes a top-level merged summary plus per-frame `frame_results`, do not
-  cite a per-frame diagram primitive unless that same primitive also survives in
-  the top-level merged `key_observations`, `relationships`, or `query_response`.
-  Per-frame diagram details that do not survive the merged summary must be
-  treated as unresolved rather than reintroduced into the trace.
+  exposes `frame_results`, treat those per-frame reads as the primary evidence.
+  Cite the specific frame(s) you rely on, and treat the top-level fields as a
+  convenience mirror of one selected candidate frame rather than a merged
+  cross-frame truth.
 - For diagram label text or attachment, do not cite chart_analyzer alone as the
   basis for claims like "the side is labeled 1" or "each side is labeled 1".
   Require OCR or another explicit text-grounding tool to support the exact
@@ -1879,6 +1912,48 @@ the list order already defines the step order.
   like "TOOL_OUTPUTS Step 2 chart_analyzer on frames 165.0s/165.5s" over generic
   references like "tool output".
 - Unsupported changes are forbidden.
+"""
+
+self_contained_trace_prompt = """
+You are rewriting a refined reasoning trace into a final standalone trace.
+
+Goal:
+- Rewrite CURRENT_REFINED_TRACE so it is fully self-contained and reader-facing.
+- Preserve the same supported conclusions, uncertainty, and answer.
+- Do NOT add new facts.
+
+Self-contained means:
+- The rewritten trace must make sense without ORIGINAL_TRACE, DIAGNOSIS,
+  TOOL_OUTPUTS step numbers, changes_made, unresolved_issues, planner output,
+  verifier output, or iteration history.
+- Do NOT mention phrases like:
+  "original trace", "original answer", "previous answer", "previous jump",
+  "earlier supported evidence", "attempted repair", "TOOL_OUTPUTS Step N",
+  "planner", "verifier", "refiner", "changes_made", or "unresolved_issues".
+- Do NOT cite execution-plan step numbers such as "chart_analyzer Step 3" or
+  "computed from Steps 3 and 6". Replace those with the real evidence anchors:
+  tool name, timestamp/range, frame id, bbox, quoted OCR/ASR text, and the
+  actual reported value.
+
+Required style:
+- Keep the trace compact and reader-facing.
+- Keep each step self-contained.
+- Keep tool provenance inline where needed.
+- The last step should still be a crisp answer step.
+- If the trace must remain unresolved, state the unresolved evidence gap
+  directly without referring to pipeline history.
+
+You will receive:
+- QUESTION
+- CURRENT_REFINED_TRACE
+- CURRENT_REFINED_ANSWER
+- TOOL_OUTPUTS
+
+Return JSON ONLY:
+{
+  "refined_trace": ["step1", "step2", "..."],
+  "refined_answer": "<answer>"
+}
 """
 
 action_recognizer_prompt='''
@@ -2591,11 +2666,14 @@ extra text before or after the JSON.
    USE WHEN: need to identify or verify specific actions or activities.
 
 10. chart_analyzer(frame_path: str | list[str] | null, timestamp: float | list[float] | null, query: str | null)
-    -> {chart_type, title, axes, series, key_observations, query_response}
+    -> {chart_type, title, axes, series, key_observations, query_response, frame_results?, selected_frame?}
     Interprets charts, graphs, plots, flowcharts, and diagrams by extracting
     grounded structure, labels, values, and local relations.
     USE WHEN: need to read chart data, graph values, or diagram structure.
     Use its output as evidence for later reasoning, not as the final solver.
+    When multiple frames are provided, inspect `frame_results` directly; the
+    top-level fields mirror one selected candidate frame and are not a merged
+    cross-frame consensus.
 
 ━━━ Strategy Guidelines ━━━
 

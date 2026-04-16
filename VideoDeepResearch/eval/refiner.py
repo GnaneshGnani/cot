@@ -159,6 +159,8 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         self._segment_captions_cache = []
         self._segment_index = []
         self._video_caption_summary = ""
+        self._refinement_prev_step_results = {}
+        self._refinement_prev_step_tools = {}
         self.temporal_grounder_backend = (
             str(os.getenv("TEMPORAL_GROUNDER_BACKEND", "qwen")).strip().lower() or "qwen"
         )
@@ -1065,6 +1067,8 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         generated_trace_info = None
         trace_steps = list(trace_steps or [])
         iteration_history = []
+        self._refinement_prev_step_results = {}
+        self._refinement_prev_step_tools = {}
 
         # Cold-start generation: produce a trace from scratch if none provided
         if not trace_steps:

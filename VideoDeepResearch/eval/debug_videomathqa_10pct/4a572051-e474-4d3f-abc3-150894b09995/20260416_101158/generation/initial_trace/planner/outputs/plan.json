@@ -1,0 +1,30 @@
+{
+  "strategy": "This is a cold-start geometry/diagram question, so first verify whether the needed numeric givens are visible on-screen in a question frame, then read those values directly and compute the perimeter of one sector piece from the grounded measurements. Use the lightest visual-text pipeline: retrieve likely problem frames, then OCR them.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "video",
+        "query": "math problem screen showing a circle divided into 12 equal pieces with labels or measurements for the circle",
+        "timestamps": null,
+        "num_frames": 3
+      },
+      "purpose": "Retrieve candidate frames containing the actual geometry problem statement/diagram rather than the intro screen described in the coarse caption summary.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "ocr",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null
+      },
+      "purpose": "Extract the visible problem text and any numeric labels such as radius, diameter, circumference, arc length, or other givens needed to compute the perimeter of one of the 12 equal pieces.",
+      "depends_on": [
+        1
+      ]
+    }
+  ],
+  "refinement_instructions": "Write the first trace from scratch. Use the frame_retriever result to identify which retrieved frame actually shows the problem, and use OCR as the authoritative source for the on-screen text/numbers. In the rewritten trace, explicitly state the grounded givens from OCR before doing any geometry. Then compute the perimeter of one piece as the sum of the two straight radii and the sector's outer arc length, where the arc is one-twelfth of the full circumference unless the on-screen text gives an equivalent direct measure. Match the computed value to the closest option only after showing the arithmetic. Do not invent missing measurements; if OCR does not reveal the needed numeric givens clearly, keep the trace explicit about that uncertainty rather than guessing. Update the final answer to the option supported by the OCR-grounded calculation."
+}

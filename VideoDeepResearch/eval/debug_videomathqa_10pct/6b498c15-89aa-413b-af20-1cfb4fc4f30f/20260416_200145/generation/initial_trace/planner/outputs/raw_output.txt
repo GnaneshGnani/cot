@@ -1,0 +1,43 @@
+{
+  "strategy": "Ground the problem screen directly by retrieving frames from the intro segment where the geometry diagram is likely shown, then use chart/diagram interpretation plus OCR to read the visible givens needed to compute the semicircle's radius. This is a static educational diagram task, so a small frame bundle is the cheapest sufficient evidence.",
+  "tool_calls": [
+    {
+      "step": 1,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "VIDEO",
+        "query": "problem screen showing a geometry diagram with a semicircle and given measurements, before any worked-solution annotations are added",
+        "timestamps": null,
+        "num_frames": 3
+      },
+      "purpose": "Retrieve candidate frames containing the actual math problem statement and diagram rather than the title card.",
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "chart_analyzer",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null,
+        "query": "geometry diagram showing a semicircle and surrounding shapes or labeled lengths; identify all visible components, labels, numeric values, and which lengths or segments attach to the semicircle"
+      },
+      "purpose": "Interpret the structured diagram so the refiner knows the figure layout, the semicircle's role, and the labeled quantities needed for the radius calculation.",
+      "depends_on": [
+        1
+      ]
+    },
+    {
+      "step": 3,
+      "tool": "ocr",
+      "arguments": {
+        "frame_path": "<STEP_1:frames>",
+        "timestamp": null
+      },
+      "purpose": "Read any exact numbers, variable labels, and option text that may be too fine-grained or omitted in the diagram interpretation.",
+      "depends_on": [
+        1
+      ]
+    }
+  ],
+  "refinement_instructions": "Write the first trace from scratch. Use the frame-level results from step 1 to identify which retrieved frame actually shows the full problem diagram; do not assume the first returned frame is correct without checking timestamps/content. Use step 2 as the authoritative source for the diagram structure: what shapes/arcs/segments are present, where the semicircle sits, and which labeled lengths or values connect to it. Use step 3 to quote the exact visible numbers/labels/options. Reconstruct the geometry reasoning only from labels and relationships explicitly grounded by steps 2 and 3; do not infer missing givens. If chart_analyzer and OCR disagree, preserve the exact OCR text for labels/numbers and use chart_analyzer mainly for spatial attachment and structure. The rewritten trace should explicitly state the grounded givens, perform the calculation leading to the radius, and then map that computed value to the matching multiple-choice option. Update the final answer accordingly; if the required numeric givens are still not legible in any retrieved frame, keep the trace explicit about that uncertainty rather than guessing."
+}

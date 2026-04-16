@@ -1,7 +1,7 @@
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Set, Union
 
 import torch
 
@@ -551,7 +551,13 @@ class RefinerUtilsMixin:
                         return result
         return None
 
-    def _resolve_step_refs(self, value, step_results: dict):
+    def _resolve_step_refs(
+        self,
+        value,
+        step_results: dict,
+        fallback_step_results: Optional[Dict[int, Any]] = None,
+        blocked_steps: Optional[Set[int]] = None,
+    ):
         """Recursively substitute <STEP_N:json.path> templates with their resolved values.
 
         step_results maps step number (int) to the parsed JSON output dict of that step.
@@ -559,25 +565,48 @@ class RefinerUtilsMixin:
         Embedded templates inside a larger string are replaced with their str() representation.
         Unresolvable references are left unchanged.
         """
+        fallback_step_results = fallback_step_results or {}
+        blocked_steps = blocked_steps or set()
+
+        def _lookup(step_num: int, path: str):
+            resolved = self._resolve_json_ref(step_results.get(step_num), path)
+            if resolved is not None:
+                return resolved
+            if step_num in blocked_steps:
+                return None
+            return self._resolve_json_ref(fallback_step_results.get(step_num), path)
+
         if isinstance(value, str):
             full = self._STEP_REF_RE.fullmatch(value.strip())
             if full:
-                resolved = self._resolve_json_ref(
-                    step_results.get(int(full.group(1))), full.group(2)
-                )
+                resolved = _lookup(int(full.group(1)), full.group(2))
                 return resolved if resolved is not None else value
 
             def _sub(m):
-                resolved = self._resolve_json_ref(
-                    step_results.get(int(m.group(1))), m.group(2)
-                )
+                resolved = _lookup(int(m.group(1)), m.group(2))
                 return str(resolved) if resolved is not None else m.group(0)
 
             return self._STEP_REF_RE.sub(_sub, value)
         if isinstance(value, dict):
-            return {k: self._resolve_step_refs(v, step_results) for k, v in value.items()}
+            return {
+                k: self._resolve_step_refs(
+                    v,
+                    step_results,
+                    fallback_step_results=fallback_step_results,
+                    blocked_steps=blocked_steps,
+                )
+                for k, v in value.items()
+            }
         if isinstance(value, list):
-            return [self._resolve_step_refs(item, step_results) for item in value]
+            return [
+                self._resolve_step_refs(
+                    item,
+                    step_results,
+                    fallback_step_results=fallback_step_results,
+                    blocked_steps=blocked_steps,
+                )
+                for item in value
+            ]
         return value
 
     def _extract_json_payload(self, text):
