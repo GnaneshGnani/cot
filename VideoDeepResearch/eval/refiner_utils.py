@@ -7,6 +7,7 @@ import torch
 
 from pydantic import BaseModel, Field, ValidationError, parse_obj_as, root_validator, validator
 
+from answer_utils import answers_match, resolve_mcq_answer_text
 from video_utils import extract_subtitles, robust_eval, timestamp_to_clip_path
 
 
@@ -27,6 +28,31 @@ def _coerce_float_list(value):
     elif not isinstance(value, list):
         value = [value]
     return [float(item) for item in value]
+
+
+def _json_safe(value):
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        return [_json_safe(item) for item in sorted(value, key=repr)]
+    if isinstance(value, torch.Tensor):
+        tensor = value.detach().cpu()
+        if tensor.ndim == 0:
+            return tensor.item()
+        return tensor.tolist()
+    tolist = getattr(value, "tolist", None)
+    if callable(tolist):
+        try:
+            return _json_safe(tolist())
+        except Exception:
+            pass
+    return str(value)
 
 
 class FrameBundleItemModel(BaseModel):
@@ -268,10 +294,44 @@ class PlannerOutputModel(BaseModel):
 
 
 class VerifierTraceQualityScoresModel(BaseModel):
-    perceptual_correctness: float = 0.0
-    temporal_accuracy: float = 0.0
+    factual_correctness: float = 0.0
+    reasoning_order: float = 0.0
     logical_coherence: float = 0.0
     completeness: float = 0.0
+
+    @root_validator(pre=True)
+    def _normalize_verifier_scores(cls, values):
+        raw = dict(values or {})
+        legacy_map = {
+            "perceptual_correctness": "factual_correctness",
+            "temporal_accuracy": "reasoning_order",
+        }
+        for legacy_key, current_key in legacy_map.items():
+            if current_key not in raw and legacy_key in raw:
+                raw[current_key] = raw.get(legacy_key)
+        for key in ("factual_correctness", "reasoning_order", "logical_coherence", "completeness"):
+            if raw.get(key) in (None, ""):
+                raw[key] = 0.0
+        return raw
+
+
+class VerifierEvidenceGapModel(BaseModel):
+    step_index: Optional[int] = None
+    summary: str = ""
+    scope: str = ""
+
+    @validator("step_index", pre=True)
+    def _normalize_evidence_gap_step_index(cls, value):
+        if value in (None, ""):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @validator("summary", "scope", pre=True)
+    def _normalize_evidence_gap_fields(cls, value):
+        return str(value or "").strip()
 
 
 class VerifierErrorCategoryModel(BaseModel):
@@ -311,6 +371,7 @@ class VerifierOutputModel(BaseModel):
         default_factory=VerifierTraceQualityScoresModel
     )
     error_categories: List[VerifierErrorCategoryModel] = Field(default_factory=list)
+    evidence_gaps: List[VerifierEvidenceGapModel] = Field(default_factory=list)
     confidence: float = 0.0
     summary: str = ""
 
@@ -322,6 +383,15 @@ class VerifierOutputModel(BaseModel):
     @validator("summary", pre=True)
     def _normalize_summary(cls, value):
         return str(value or "").strip()
+
+    @validator("confidence", pre=True)
+    def _normalize_confidence(cls, value):
+        if value in (None, ""):
+            return 0.0
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
 
 
 class RefinerChangeModel(BaseModel):
@@ -700,6 +770,61 @@ class RefinerUtilsMixin:
         except (ValidationError, TypeError, ValueError):
             return None
 
+    def _extract_top_level_json_candidates(self, text: str) -> List[str]:
+        if not isinstance(text, str):
+            return []
+
+        candidates: List[str] = []
+        start_idx = None
+        stack: List[str] = []
+        in_string = False
+        escape = False
+
+        closing_for = {"{": "}", "[": "]"}
+        opening_for = {"}": "{", "]": "["}
+
+        for idx, ch in enumerate(text):
+            if start_idx is None:
+                if ch in closing_for:
+                    start_idx = idx
+                    stack = [ch]
+                    in_string = False
+                    escape = False
+                continue
+
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                continue
+
+            if ch == '"':
+                in_string = True
+                continue
+
+            if ch in closing_for:
+                stack.append(ch)
+                continue
+
+            if ch in opening_for:
+                if not stack or stack[-1] != opening_for[ch]:
+                    start_idx = None
+                    stack = []
+                    in_string = False
+                    escape = False
+                    continue
+                stack.pop()
+                if not stack:
+                    candidates.append(text[start_idx : idx + 1])
+                    start_idx = None
+                    in_string = False
+                    escape = False
+
+        return candidates
+
     def _extract_json_payload_with_schema(self, text, model_cls=None, repair_placeholders: bool = False):
         if isinstance(text, (dict, list)):
             return self._validate_json_payload(text, model_cls)
@@ -710,7 +835,8 @@ class RefinerUtilsMixin:
         if not text:
             return None
 
-        candidates = re.findall(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.DOTALL)
+        candidates = self._extract_top_level_json_candidates(text)
+        candidates.extend(re.findall(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.DOTALL))
         candidates.append(text)
         starts = [idx for idx in (text.find("{"), text.find("[")) if idx != -1]
         if starts:
@@ -870,6 +996,27 @@ class RefinerUtilsMixin:
         video_id = Path(str(self.video_path)).stem
         return Path(self.dataset_folder) / "dense_captions" / video_id / f"segment_captions_{float(segment_size_s)}s.json"
 
+    def _load_cached_segment_dense_captions(self, segment_size_s: float) -> None:
+        if getattr(self, "_segment_captions_cache", None):
+            return
+        cache_path = self._segment_dense_captions_cache_path(segment_size_s)
+        if not cache_path.is_file():
+            return
+        try:
+            raw = json.loads(cache_path.read_text(encoding="utf-8"))
+            if (
+                abs(float(raw.get("segment_size_s", 0)) - float(segment_size_s)) < 1e-6
+                and str(raw.get("video_path", "")) == str(self.video_path)
+            ):
+                self._segment_captions_cache = list(raw.get("segments") or [])
+                print(f"  Loaded segment captions cache → {cache_path}")
+        except Exception as ex:
+            print(f"  segment captions cache read failed: {ex}")
+
+    def _video_caption_summary_cache_path(self, segment_size_s: float) -> Path:
+        video_id = Path(str(self.video_path)).stem
+        return Path(self.dataset_folder) / "dense_captions" / video_id / f"video_caption_summary_{float(segment_size_s)}s.txt"
+
     def _format_dense_caption_evidence(self, dense: Any) -> str:
         if not isinstance(dense, dict):
             return str(dense)[:4000]
@@ -959,7 +1106,8 @@ class RefinerUtilsMixin:
             )
             t += segment_size_s
 
-        self._segment_captions_cache = segments
+        safe_segments = _json_safe(segments)
+        self._segment_captions_cache = safe_segments
         try:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             cache_path.write_text(
@@ -967,7 +1115,7 @@ class RefinerUtilsMixin:
                     {
                         "segment_size_s": segment_size_s,
                         "video_path": str(self.video_path),
-                        "segments": segments,
+                        "segments": safe_segments,
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -983,10 +1131,21 @@ class RefinerUtilsMixin:
         if summary:
             return summary
 
+        segment_size_s = float(getattr(self, "segment_size_s", 30.0) or 30.0)
+        cache_path = self._video_caption_summary_cache_path(segment_size_s)
+        if cache_path.is_file():
+            try:
+                cached_summary = cache_path.read_text(encoding="utf-8").strip()
+                if cached_summary:
+                    self._video_caption_summary = cached_summary
+                    return cached_summary
+            except Exception as ex:
+                print(f"  [_get_video_caption_summary] cache read failed: {ex}")
+
         cache = list(getattr(self, "_segment_captions_cache", None) or [])
         if not cache:
             try:
-                self._build_segment_dense_captions(getattr(self, "segment_size_s", 30.0) or 30.0)
+                self._build_segment_dense_captions(segment_size_s)
             except Exception as ex:
                 print(f"  [_get_video_caption_summary] segment caption build failed: {ex}")
             cache = list(getattr(self, "_segment_captions_cache", None) or [])
@@ -1027,6 +1186,12 @@ class RefinerUtilsMixin:
             summary = " ".join(sentences[:8]).strip()
 
         self._video_caption_summary = summary
+        if summary:
+            try:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                cache_path.write_text(summary, encoding="utf-8")
+            except Exception as ex:
+                print(f"  [_get_video_caption_summary] cache write failed: {ex}")
         return summary
 
     def _build_segment_index(self, segment_size_s: float = 30.0) -> None:
@@ -1178,7 +1343,22 @@ class RefinerUtilsMixin:
             "subtitle_error": subtitle_error,
         }
 
-    def _get_preprocessed_artifacts(self) -> dict:
+    def _get_preprocessed_artifacts(self, build_missing: bool = True) -> dict:
+        segment_size_s = float(getattr(self, "segment_size_s", 30.0) or 30.0)
+        if not getattr(self, "_segment_captions_cache", None):
+            if build_missing:
+                try:
+                    self._build_segment_dense_captions(segment_size_s)
+                except Exception as ex:
+                    print(f"  [_get_preprocessed_artifacts] segment caption build failed: {ex}")
+            else:
+                self._load_cached_segment_dense_captions(segment_size_s)
+        if not getattr(self, "_segment_index", None) and getattr(self, "_segment_captions_cache", None):
+            try:
+                self._build_segment_index(segment_size_s)
+            except Exception as ex:
+                print(f"  [_get_preprocessed_artifacts] segment index build failed: {ex}")
+
         asr_result = self._get_asr_result_from_subtitles()
         out: Dict[str, Any] = {
             "asr_transcript": asr_result.get("full_transcript", ""),
@@ -1215,29 +1395,10 @@ class RefinerUtilsMixin:
         return re.sub(r"\s+", " ", str(answer)).strip().lower()
 
     def _resolve_mcq_answer(self, answer: str, options: list = None) -> str:
-        """If *answer* is a bare MCQ letter (e.g. "A", "(B)", "C."), expand it to
-        the full option text so that downstream comparisons work correctly."""
-        ans = (answer or "").strip()
-        opts = list(options if options is not None else (self.options or []))
-        if not opts or not ans:
-            return ans
-        letter_match = re.match(r'^\(?([A-Za-z])\)?\.?$', ans)
-        if not letter_match:
-            return ans
-        letter = letter_match.group(1).upper()
-        for opt in opts:
-            opt_str = str(opt).strip()
-            if re.match(rf'^\(?{letter}[.):\s]', opt_str, re.IGNORECASE):
-                # Strip the leading "A. " / "A) " / "(A) " prefix and return the text
-                text_part = re.sub(r'^\(?[A-Za-z][.):\s]+', '', opt_str).strip()
-                return text_part if text_part else opt_str
-        return ans  # no matching option found — return as-is
+        return resolve_mcq_answer_text(answer, options=options if options is not None else self.options)
 
     def _answers_match(self, predicted: str, gold: str, options: list = None) -> bool:
-        """Normalised equality check.  MCQ letters in *predicted* are first
-        resolved to full option text so "A" matches "The man is walking"."""
-        resolved = self._resolve_mcq_answer(predicted, options)
-        return self._normalize_answer(resolved) == self._normalize_answer(gold)
+        return answers_match(predicted, gold, options=options if options is not None else self.options)
 
     def _format_question_with_options(self) -> str:
         if not self.options:

@@ -9,7 +9,7 @@ _eval_dir = os.path.dirname(os.path.abspath(__file__))
 if _eval_dir not in sys.path:
     sys.path.insert(0, _eval_dir)
 
-from refiner import VideoQADemo
+from refiner import VideoQADemo, _result_subdir
 
 
 DEFAULT_VIDEOMATHQA_ROOT = Path("/nfs-stor/ghazi.ahmad/VideoMathQA")
@@ -156,6 +156,9 @@ def _save_result_dir(record, video_path, out_dir: Path, sample_ratio: float, sam
                 "final_trace": rr.get("final_trace"),
                 "final_answer": rr.get("final_answer"),
                 "is_correct": rr.get("is_correct"),
+                "terminal_stage": rr.get("terminal_stage"),
+                "final_verifier_raw": rr.get("final_verifier_raw", rr.get("verifier_raw")),
+                "final_verifier_output": rr.get("final_verifier_output", rr.get("verifier_output")),
                 "max_iterations": rr.get("max_iterations"),
                 "refinement_debug_root": rr.get("refinement_debug_root"),
             }
@@ -302,8 +305,7 @@ def main():
         input_answer = item.get("answer")
         pipeline_answer = None
 
-        video_stem = Path(video_path).stem if video_path else "unknown"
-        out_dir = results_dir / video_stem
+        out_dir = results_dir / _result_subdir(video_path, question, item)
 
         print(
             f"\n[{index}/{len(sampled_data)}] {Path(video_path).name or '<missing video>'} "

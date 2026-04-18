@@ -352,9 +352,6 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         return self._refinement_debug_session_base
 
     def load_sample(self, video_path: str, question: str, answer: str = None, options: list = None):
-        # Release the resident frame embedder so the new video's frames are
-        # re-embedded with a fresh cache on first frame_retriever call.
-        self._release_frame_embedder()
         self.video_path = str(video_path)
         self.set_task(question, answer=answer, options=options)
         self._temporal_grounder_video_info_cache = None
@@ -712,6 +709,8 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
             key=lambda p: p.name,
         )
         if frame_paths:
+            emb_path, paths_path = self._dense_frame_embed_cache_paths()
+            cache_already_present = emb_path.is_file() and paths_path.is_file()
             frame_items = []
             for fp in frame_paths:
                 try:
@@ -723,12 +722,13 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
                 self._precompute_frame_embeddings_cache(frame_items)
             except Exception as e:
                 print(f"  Warning: frame embedding precompute failed: {e}")
-            # Ensure the embedder is warm in GPU memory now (cache hit path skips
-            # embedding but we still need the model resident before tool calls).
-            try:
-                self._get_or_load_frame_embedder()
-            except Exception as e:
-                print(f"  Warning: frame embedder warm-up failed: {e}")
+            if not cache_already_present:
+                # Precompute already had to load the embedder, so keep that
+                # resident instance around for the rest of the batch.
+                try:
+                    self._get_or_load_frame_embedder()
+                except Exception as e:
+                    print(f"  Warning: frame embedder warm-up failed: {e}")
     
     def _get_video_duration(self):
         try:
@@ -1099,6 +1099,9 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
 
         final_verifier_raw = None
         final_verifier_output = None
+        last_verified_trace = None
+        last_verified_answer = None
+        completed_refinement_iterations = 0
 
         debug_resolved = self._ensure_refinement_debug_session_base()
 
@@ -1123,6 +1126,8 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
                 max_iterations=max_iterations,
             )
             final_verifier_raw, final_verifier_output = verifier_raw, verifier_output
+            last_verified_trace = list(current_trace)
+            last_verified_answer = current_answer
             print(f"\n[Verifier Output]\n{verifier_raw}\n")
 
             if isinstance(verifier_output, dict) and verifier_output.get("verdict") == "PASS":
@@ -1166,6 +1171,7 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
                 iteration, verifier_output, refiner_output, executed_tools
             )
             iteration_history.append(summary)
+            completed_refinement_iterations += 1
             iteration_record = {
                 "iteration": iteration + 1,
                 "verifier_raw": verifier_raw,
@@ -1180,14 +1186,32 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
 
         self._refinement_debug_iter_dir = None
 
-        # Release the persistent frame embedder now that the pipeline is done.
-        # This frees the ~16 GB it occupies on GPU 1.
-        self._release_frame_embedder()
+        if (
+            last_verified_trace is None
+            or list(last_verified_trace) != list(current_trace)
+            or str(last_verified_answer or "").strip() != str(current_answer or "").strip()
+        ):
+            print("[Verifier] Running terminal verification on final trace...")
+            terminal_iteration = max(0, int(max_iterations) - 1)
+            final_verifier_raw, final_verifier_output = self._call_verifier(
+                current_trace,
+                current_answer,
+                question_text=question_text,
+                iteration=terminal_iteration,
+                history=iteration_history,
+                max_iterations=max_iterations,
+            )
+
+        terminal_stage = "initial"
+        if generated_trace_info is not None:
+            terminal_stage = "generated"
+        if completed_refinement_iterations > 0:
+            terminal_stage = f"ref{completed_refinement_iterations}"
 
         # Resolve bare MCQ letters (e.g. "A") to full option text so that
         # downstream comparisons work correctly for MCQ questions.
         resolved_answer = self._resolve_mcq_answer(current_answer)
-        is_correct = self._answers_match(resolved_answer, self.answer or "") if self.answer else None
+        is_correct = self._answers_match(resolved_answer, self.answer or "", options=self.options) if self.answer else None
 
         return {
             "trace_generated": generated_trace_info is not None,
@@ -1196,11 +1220,29 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
             "final_trace": {"steps": current_trace},
             "final_answer": resolved_answer,
             "is_correct": is_correct,
+            "terminal_stage": terminal_stage,
             "verifier_raw": final_verifier_raw,
             "verifier_output": final_verifier_output,
+            "final_verifier_raw": final_verifier_raw,
+            "final_verifier_output": final_verifier_output,
             "max_iterations": max_iterations,
             "refinement_debug_root": debug_resolved,
         }
+
+
+def _fs_safe_segment(name: str) -> str:
+    s = "".join(c if c.isalnum() or c in "-._" else "_" for c in str(name))
+    return s[:200] if len(s) > 200 else s
+
+
+def _result_subdir(video_path: str, question: str, item: dict) -> str:
+    stem = Path(video_path).stem if video_path else "unknown"
+    qid = item.get("question_id")
+    if qid is not None and str(qid).strip() != "":
+        return f"{stem}__qid{_fs_safe_segment(qid)}"
+    q = (question or "").strip()
+    h = hashlib.sha256(q.encode("utf-8")).hexdigest()[:12]
+    return f"{stem}__{h}"
 
 
 def main():
@@ -1249,7 +1291,7 @@ def main():
     results_dir = (
         Path(args.output).expanduser().resolve()
         if args.output
-        else Path(_eval_dir) / "results_generated_full_context"
+        else Path(_eval_dir) / "results_omnivideobench"
     )
     results_dir.mkdir(parents=True, exist_ok=True)
     data = _load_annotations(annotation_path)
@@ -1346,6 +1388,9 @@ def main():
                     "final_trace": rr.get("final_trace"),
                     "final_answer": rr.get("final_answer"),
                     "is_correct": rr.get("is_correct"),
+                    "terminal_stage": rr.get("terminal_stage"),
+                    "final_verifier_raw": rr.get("final_verifier_raw", rr.get("verifier_raw")),
+                    "final_verifier_output": rr.get("final_verifier_output", rr.get("verifier_output")),
                     "max_iterations": rr.get("max_iterations"),
                     "refinement_debug_root": rr.get("refinement_debug_root"),
                 }
@@ -1355,7 +1400,7 @@ def main():
         _write_json(out_dir / "meta.json", meta)
         return out_dir
 
-    for index, item in enumerate(data[20:21], start=1):
+    for index, item in enumerate(data, start=1):
         record = dict(item)
         video_path = str(item.get("video_path", "")).strip()
         question = str(item.get("question", "")).strip()
@@ -1366,8 +1411,7 @@ def main():
         # answer to the pipeline. We still score against the input answer after the run.
         pipeline_answer = None
 
-        video_stem = Path(video_path).stem if video_path else "unknown"
-        out_dir = results_dir / video_stem
+        out_dir = results_dir / _result_subdir(video_path, question, item)
 
         print(f"\n[{index}/{len(data)}] {Path(video_path).name or '<missing video>'}")
         if item.get("initial_trace_steps"):
@@ -1445,6 +1489,9 @@ def main():
 
         _save_result_dir(record, video_path, out_dir)
         print(f"  ✓ Saved: {out_dir}")
+
+    if demo is not None:
+        demo._release_frame_embedder()
 
     print(f"\n✓ Results saved to: {results_dir}")
 

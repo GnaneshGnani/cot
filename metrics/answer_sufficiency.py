@@ -5,16 +5,35 @@ import re
 import sys
 from pathlib import Path
 
-os.environ.setdefault("HF_HOME", "/nfs-stor/ghazi.ahmad/HF_HOME")
+os.environ.setdefault("HF_HOME", "/fs/nexus-scratch/gnanesh/.cache/huggingface")
 os.environ.setdefault("VLLM_PLUGINS", "")
+os.environ.setdefault("VLLM_USE_MODELSCOPE", "false")
+os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
-import torch
+try:
+    import torch
+except ImportError:
+    class _TorchShim(object):
+        @staticmethod
+        def inference_mode():
+            def _decorator(fn):
+                return fn
 
-EVAL_DIR = "/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval"
-if EVAL_DIR not in sys.path:
-    sys.path.insert(0, EVAL_DIR)
+            return _decorator
 
-from refiner import VideoQADemo
+    torch = _TorchShim()
+
+_EVAL_DIR = str(Path(__file__).resolve().parents[1] / "VideoDeepResearch" / "eval")
+if _EVAL_DIR not in sys.path:
+    sys.path.insert(0, _EVAL_DIR)
+from stage_loader import load_stage_samples
+from stage_metrics_common import (
+    build_stage_record,
+    parse_answer_source_overrides,
+    parse_csv_arg,
+    results_dir_default_output,
+    sorted_stage_names,
+)
 
 
 SYSTEM_PROMPT = """You are a strict evaluator for reasoning-trace answer sufficiency.
@@ -54,68 +73,6 @@ USER_PROMPT = """## Question
 Is the reasoning trace sufficient to support the proposed answer?
 Reply with exactly one word: Yes or No."""
 
-TRACE_FIELDS = (
-    "final_trace",
-    "trace",
-    "reasoning_trace",
-    "initial_trace_steps",
-    "reasoning_steps",
-)
-
-ANSWER_FIELDS = (
-    "final_answer",
-    "predicted_answer",
-    "initial_answer",
-    "answer",
-)
-
-
-def load_data(path, max_samples=None):
-    path = Path(path)
-    if path.is_dir():
-        return load_meta_dir(path, max_samples=max_samples)
-
-    if path.suffix == ".jsonl":
-        rows = []
-        with path.open() as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                row = json.loads(line)
-                row["_source_file"] = str(path)
-                rows.append(row)
-                if max_samples is not None and len(rows) >= max_samples:
-                    break
-        return rows
-
-    with path.open() as f:
-        data = json.load(f)
-
-    if isinstance(data, list):
-        rows = data[:max_samples] if max_samples is not None else data
-        for row in rows:
-            if isinstance(row, dict):
-                row.setdefault("_source_file", str(path))
-        return rows
-
-    if isinstance(data, dict):
-        data["_source_file"] = str(path)
-        return [data]
-
-    return []
-
-
-def load_meta_dir(root, max_samples=None):
-    rows = []
-    for meta_path in sorted(Path(root).rglob("meta.json")):
-        with meta_path.open() as f:
-            row = json.load(f)
-        row["_source_file"] = str(meta_path)
-        rows.append(row)
-        if max_samples is not None and len(rows) >= max_samples:
-            break
-    return rows
-
 
 def extract_assistant_response(full_output):
     text = str(full_output or "").strip()
@@ -125,145 +82,6 @@ def extract_assistant_response(full_output):
         if marker in text:
             text = text.split(marker)[0].strip()
     return text
-
-
-def normalize_options(options):
-    if options is None:
-        return []
-    if isinstance(options, dict):
-        return [str(options[k]).strip() for k in sorted(options.keys(), key=lambda x: str(x)) if str(options[k]).strip()]
-    if isinstance(options, (list, tuple)):
-        return [str(option).strip() for option in options if str(option).strip()]
-    value = str(options).strip()
-    return [value] if value else []
-
-
-def extract_choice_letter(text):
-    match = re.search(r"\b([A-Z])\b", str(text or "").upper())
-    return match.group(1) if match else None
-
-
-def normalize_answer_text(text, options=None):
-    text = str(text or "").strip()
-    if not text:
-        return ""
-
-    letter = extract_choice_letter(text)
-    if letter:
-        return letter
-
-    lowered = text.lower()
-    for idx, option in enumerate(options or []):
-        option_text = str(option).strip()
-        if not option_text:
-            continue
-        if "." in option_text:
-            option_text = option_text.split(".", 1)[1].strip()
-        if option_text and option_text.lower() == lowered:
-            return chr(ord("A") + idx)
-    return lowered
-
-
-def answers_match(proposed_answer, reference_answer, options=None):
-    if not proposed_answer or not reference_answer:
-        return None
-    return normalize_answer_text(proposed_answer, options) == normalize_answer_text(reference_answer, options)
-
-
-def step_to_text(step):
-    if step is None:
-        return ""
-    if isinstance(step, str):
-        return step.strip()
-    if isinstance(step, dict):
-        if isinstance(step.get("step"), str) and step.get("step").strip():
-            return step["step"].strip()
-
-        evidence = (
-            step.get("evidence")
-            or step.get("evidece")
-            or step.get("evience")
-            or step.get("evodence")
-            or step.get("nevidence")
-            or ""
-        )
-        inference = (
-            step.get("inference")
-            or step.get("Inference")
-            or step.get("infefence")
-            or ""
-        )
-        text = f"Evidence: {evidence}. Inference: {inference}".strip()
-        return text if text != "Evidence: . Inference:" else ""
-    return str(step).strip()
-
-
-def normalize_trace_steps(trace_value):
-    if isinstance(trace_value, dict):
-        trace_value = trace_value.get("steps", trace_value)
-
-    if isinstance(trace_value, list):
-        return [step_to_text(step) for step in trace_value if step_to_text(step)]
-
-    if trace_value is None:
-        return []
-
-    text = str(trace_value).strip()
-    if not text:
-        return []
-    return [text]
-
-
-def format_trace(steps):
-    if not steps:
-        return "(missing trace)"
-    return "\n".join(f"{idx + 1}. {step}" for idx, step in enumerate(steps))
-
-
-def get_trace_steps(sample):
-    for field in TRACE_FIELDS:
-        if field not in sample:
-            continue
-        steps = normalize_trace_steps(sample.get(field))
-        if steps:
-            return steps, field
-    return [], None
-
-
-def get_proposed_answer(sample):
-    for field in ANSWER_FIELDS:
-        value = sample.get(field)
-        if value is None:
-            continue
-        text = str(value).strip()
-        if text:
-            return text, field
-    return "", None
-
-
-def build_prompt(sample):
-    question = str(sample.get("question") or "").strip()
-    options = normalize_options(sample.get("options"))
-    options_block = "\n".join(options) if options else "(none)"
-    trace_steps, trace_field = get_trace_steps(sample)
-    proposed_answer, answer_field = get_proposed_answer(sample)
-
-    return {
-        "question": question,
-        "options": options,
-        "trace_steps": trace_steps,
-        "trace_field": trace_field,
-        "trace_text": format_trace(trace_steps),
-        "proposed_answer": proposed_answer,
-        "answer_field": answer_field,
-        "reference_answer": str(sample.get("answer") or "").strip(),
-        "prompt": USER_PROMPT.format(
-            question=question or "(missing question)",
-            options_block=options_block,
-            proposed_answer=proposed_answer or "(missing proposed answer)",
-            trace_text=format_trace(trace_steps),
-        ),
-    }
 
 
 def parse_yes_no(text):
@@ -282,11 +100,35 @@ def parse_yes_no(text):
     return None
 
 
+def build_prompt(stage_record):
+    question = str(stage_record.get("question") or "").strip()
+    options = stage_record.get("options") or []
+    options_block = "\n".join(str(option) for option in options) if options else "(none)"
+    trace_steps = list(stage_record.get("trace_steps") or [])
+    trace_text = "\n".join(f"{index + 1}. {step}" for index, step in enumerate(trace_steps)) if trace_steps else "(missing trace)"
+    proposed_answer = str(stage_record.get("proposed_answer") or "").strip()
+    return {
+        "question": question,
+        "options": options,
+        "trace_steps": trace_steps,
+        "trace_text": trace_text,
+        "proposed_answer": proposed_answer,
+        "prompt": USER_PROMPT.format(
+            question=question or "(missing question)",
+            options_block=options_block,
+            proposed_answer=proposed_answer or "(missing proposed answer)",
+            trace_text=trace_text,
+        ),
+    }
+
+
 def build_judge_text(prompt_data):
     return f"{SYSTEM_PROMPT}\n\n{prompt_data['prompt']}"
 
 
 def load_qwen_judge(model_name):
+    from refiner import VideoQADemo
+
     judge = VideoQADemo.__new__(VideoQADemo)
     judge.vlm_tensor_parallel_size = int(os.environ.get("VLM_TENSOR_PARALLEL_SIZE", "1"))
     judge.vlm_api_base = []
@@ -307,99 +149,136 @@ def load_qwen_judge(model_name):
 
 
 @torch.inference_mode()
-def compute_metric(sample, judge):
-    prompt_data = build_prompt(sample)
-    if not prompt_data["question"] or not prompt_data["proposed_answer"] or not prompt_data["trace_steps"]:
+def compute_stage_metric(stage_record, judge):
+    if not stage_record.get("available"):
         return {
-            **prompt_data,
-            "model_response": "(missing question, proposed answer, or trace)",
-            "is_sufficient": False,
-            "sufficiency_score": 0.0,
-            "answer_matches_reference": answers_match(
-                prompt_data["proposed_answer"],
-                prompt_data["reference_answer"],
-                prompt_data["options"],
-            ),
+            "applicable": False,
+            "sufficiency_score": None,
+            "is_sufficient": None,
+            "skipped_reason": "stage_unavailable",
+            "model_response": None,
+        }
+
+    prompt_data = build_prompt(stage_record)
+    if not prompt_data["trace_steps"]:
+        return {
+            "applicable": False,
+            "sufficiency_score": None,
+            "is_sufficient": None,
+            "skipped_reason": "missing_trace",
+            "model_response": None,
+        }
+    if not prompt_data["proposed_answer"]:
+        return {
+            "applicable": False,
+            "sufficiency_score": None,
+            "is_sufficient": None,
+            "skipped_reason": "missing_proposed_answer",
+            "model_response": None,
+        }
+    if not prompt_data["question"]:
+        return {
+            "applicable": False,
+            "sufficiency_score": None,
+            "is_sufficient": None,
+            "skipped_reason": "missing_question",
+            "model_response": None,
         }
 
     model_response = extract_assistant_response(judge._vlm_summarize_text(build_judge_text(prompt_data)))
     verdict = parse_yes_no(model_response)
-
     return {
-        **prompt_data,
-        "model_response": model_response,
-        "is_sufficient": bool(verdict),
+        "applicable": True,
         "sufficiency_score": 1.0 if verdict else 0.0,
-        "answer_matches_reference": answers_match(
-            prompt_data["proposed_answer"],
-            prompt_data["reference_answer"],
-            prompt_data["options"],
-        ),
+        "is_sufficient": bool(verdict),
+        "skipped_reason": None,
+        "model_response": model_response,
     }
 
 
-def default_output_path(input_path):
-    input_path = Path(input_path)
-    if input_path.is_dir():
-        return input_path / "answer_sufficiency.jsonl"
-    if input_path.suffix == ".jsonl":
-        return input_path.with_name(f"{input_path.stem}_answer_sufficiency.jsonl")
-    return input_path.with_name("answer_sufficiency.jsonl")
+def collect_metric_rows(samples, judge, stage_filter=None, answer_source_overrides=None):
+    stage_filter = set(parse_csv_arg(stage_filter)) if stage_filter else None
+    rows = []
+
+    for sample in samples:
+        stage_names = sorted_stage_names(sample.get("stages", {}).keys())
+        for stage_name in stage_names:
+            if stage_filter and stage_name not in stage_filter:
+                continue
+            stage_record = build_stage_record(
+                sample,
+                stage_name,
+                answer_source_overrides=answer_source_overrides,
+            )
+            metric = compute_stage_metric(stage_record, judge)
+            rows.append(
+                {
+                    "sample_id": stage_record["sample_id"],
+                    "source_dir": stage_record["source_dir"],
+                    "video_path": stage_record["video_path"],
+                    "question": stage_record["question"],
+                    "question_id": stage_record["question_id"],
+                    "stage": stage_name,
+                    "is_terminal": stage_record["is_terminal"],
+                    "proposed_answer_source": stage_record["proposed_answer_source"],
+                    "proposed_answer": stage_record["proposed_answer"],
+                    "gold_answer": stage_record["gold_answer"],
+                    "is_correct": stage_record["is_correct"],
+                    **metric,
+                }
+            )
+    return rows
 
 
 def main():
-    default_input = "/nfs-stor/ghazi.ahmad/cot/VideoDeepResearch/eval/results_generated_full_context"
-    input_path = Path(os.environ.get("DATA_PATH") or default_input)
-    output_path = Path(os.environ.get("OUTPUT_PATH") or default_output_path(input_path))
+    default_input = os.environ.get("DATA_PATH")
 
-    model_name = os.environ.get("QWEN_MODEL", "Qwen/Qwen3.5-9B")
+    import argparse
 
-    max_samples = None
-    if os.environ.get("MAX_SAMPLES"):
-        try:
-            max_samples = int(os.environ["MAX_SAMPLES"])
-        except ValueError:
-            pass
+    parser = argparse.ArgumentParser(description="Compute answer sufficiency over normalized stages.")
+    parser.add_argument("input_path", nargs="?", default=default_input)
+    parser.add_argument("--output", type=str, default=None)
+    parser.add_argument("--stages", type=str, default=os.environ.get("STAGES"))
+    parser.add_argument("--generic-stage", type=str, default=os.environ.get("GENERIC_STAGE", "initial"))
+    parser.add_argument(
+        "--answer-sources",
+        type=str,
+        default=os.environ.get("ANSWER_SOURCE_OVERRIDES"),
+        help="Comma-separated overrides like initial=benchmark,generated=stage_local",
+    )
+    parser.add_argument("--max-samples", type=int, default=None)
+    args = parser.parse_args()
+    if not args.input_path:
+        raise SystemExit("Set DATA_PATH or pass an input path explicitly.")
 
-    print(f"Loading data from {input_path}...")
-    samples = load_data(input_path, max_samples=max_samples)
+    input_path = Path(args.input_path).expanduser().resolve()
+    output_path = Path(args.output) if args.output else results_dir_default_output(input_path, "answer_sufficiency.jsonl")
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    print(f"Loading {model_name}...")
+    model_name = os.environ.get("QWEN_MODEL", "Qwen/Qwen3-VL-8B-Instruct")
+    answer_source_overrides = parse_answer_source_overrides(args.answer_sources)
+
+    print(f"Loading samples from {input_path}...")
+    samples = load_stage_samples(input_path, generic_stage=args.generic_stage, max_samples=args.max_samples)
+
+    print(f"Loading sufficiency judge: {model_name}")
     judge = load_qwen_judge(model_name)
 
-    results = []
-    for idx, sample in enumerate(samples):
-        result = compute_metric(sample, judge)
-        row = {
-            "source_file": sample.get("_source_file", ""),
-            "video_path": sample.get("video_path", ""),
-            "question": result["question"],
-            "options": result["options"],
-            "trace_field": result["trace_field"],
-            "answer_field": result["answer_field"],
-            "proposed_answer": result["proposed_answer"],
-            "reference_answer": result["reference_answer"],
-            "answer_matches_reference": result["answer_matches_reference"],
-            "model_response": result["model_response"],
-            "is_sufficient": result["is_sufficient"],
-            "sufficiency_score": result["sufficiency_score"],
-        }
-        results.append(row)
+    rows = collect_metric_rows(
+        samples,
+        judge,
+        stage_filter=args.stages,
+        answer_source_overrides=answer_source_overrides,
+    )
 
-        if (idx + 1) % 10 == 0:
-            print(f"Processed {idx + 1} samples")
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        gc.collect()
+    with output_path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
-    n = len(results)
-    avg_score = sum(row["sufficiency_score"] for row in results) / n if n else 0.0
-    sufficient_rate = sum(1 for row in results if row["is_sufficient"]) / n if n else 0.0
-    comparable = [row for row in results if row["answer_matches_reference"] is not None]
-    agreement_rate = (
-        sum(1 for row in comparable if row["answer_matches_reference"]) / len(comparable)
-        if comparable else 0.0
+    applicable_rows = [row for row in rows if row.get("applicable")]
+    avg_score = (
+        sum(row.get("sufficiency_score", 0.0) for row in applicable_rows) / len(applicable_rows)
+        if applicable_rows else 0.0
     )
 
     summary = {
@@ -407,23 +286,19 @@ def main():
         "metric": "answer_sufficiency",
         "model": model_name,
         "input_path": str(input_path),
-        "total_samples": n,
-        "average_sufficiency_score": avg_score,
-        "sufficient_rate": sufficient_rate,
-        "answer_reference_agreement_rate": agreement_rate,
-        "comparable_answer_count": len(comparable),
+        "total_stage_rows": len(rows),
+        "applicable_stage_rows": len(applicable_rows),
+        "average_sufficiency_score": round(avg_score, 4),
     }
-
-    with output_path.open("w") as out:
-        for row in results:
-            out.write(json.dumps(row, ensure_ascii=False) + "\n")
-        out.write(json.dumps(summary, ensure_ascii=False) + "\n")
+    with output_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(summary, ensure_ascii=False) + "\n")
 
     print(f"Done. Output: {output_path}")
     print(
-        f"Overall: avg_sufficiency_score={avg_score:.4f}, "
-        f"sufficient_rate={sufficient_rate:.4f}, n={n}"
+        f"Overall: avg_sufficiency_score={summary['average_sufficiency_score']:.4f}, "
+        f"applicable={summary['applicable_stage_rows']}, rows={summary['total_stage_rows']}"
     )
+    gc.collect()
 
 
 if __name__ == "__main__":
