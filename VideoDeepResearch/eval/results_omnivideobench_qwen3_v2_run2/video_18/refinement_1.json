@@ -1,0 +1,251 @@
+{
+  "iteration": 1,
+  "verifier_raw": "{\n  \"verdict\": \"FAIL\",\n  \"answer_correct\": false,\n  \"trace_quality_scores\": {\n    \"logical_coherence\": 4,\n    \"completeness\": 4,\n    \"factual_correctness\": null,\n    \"reasoning_order\": 6\n  },\n  \"error_categories\": [\n    {\n      \"type\": \"INFERENCE_ERROR\",\n      \"step_index\": 4,\n      \"description\": \"The final conclusion overrules the 47.0 s tool-reported count of 1 phone-holder by asserting that later frames are 'decisive,' but the trace provides no justified rule that the asked moment must correspond to the later sampled frames rather than the earlier candidate within the same localized exit interval. This is an unsupported temporal-selection inference.\",\n      \"severity\": \"HIGH\",\n      \"evidence\": null\n    },\n    {\n      \"type\": \"INCOMPLETE_TRACE\",\n      \"step_index\": null,\n      \"description\": \"The trace does not establish which sampled frame actually corresponds to the specific asked moment 'when the protagonist walks out of the store after being laughed at.' Since the candidate frames yield conflicting counts (1 vs 0), the answer-critical temporal anchoring remains unresolved from the provided text.\",\n      \"severity\": \"HIGH\",\n      \"evidence\": null\n    }\n  ],\n  \"evidence_gaps\": [\n    {\n      \"step_index\": 3,\n      \"summary\": \"The counter tool grounds counts for three candidate frames, but the trace does not identify which candidate is the exact answer-relevant exit moment; conflicting frame-level counts remain.\",\n      \"scope\": \"timestamped event / temporal anchoring\"\n    }\n  ],\n  \"confidence\": 0.94,\n  \"summary\": \"From text alone, the trace cites real tool outputs but does not justify why the later frames should control the answer when an earlier candidate frame in the same localized event shows a different count. The final choice A is therefore not adequately supported by the trace text.\"\n}",
+  "verifier_output": {
+    "verdict": "FAIL",
+    "answer_correct": false,
+    "trace_quality_scores": {
+      "perceptual_correctness": 0.0,
+      "temporal_accuracy": 0.0,
+      "logical_coherence": 4.0,
+      "completeness": 4.0
+    },
+    "error_categories": [
+      {
+        "type": "INFERENCE_ERROR",
+        "step_index": 4,
+        "description": "The final conclusion overrules the 47.0 s tool-reported count of 1 phone-holder by asserting that later frames are 'decisive,' but the trace provides no justified rule that the asked moment must correspond to the later sampled frames rather than the earlier candidate within the same localized exit interval. This is an unsupported temporal-selection inference.",
+        "severity": "HIGH",
+        "suggested_tools": [],
+        "evidence": null
+      },
+      {
+        "type": "INCOMPLETE_TRACE",
+        "step_index": null,
+        "description": "The trace does not establish which sampled frame actually corresponds to the specific asked moment 'when the protagonist walks out of the store after being laughed at.' Since the candidate frames yield conflicting counts (1 vs 0), the answer-critical temporal anchoring remains unresolved from the provided text.",
+        "severity": "HIGH",
+        "suggested_tools": [],
+        "evidence": null
+      }
+    ],
+    "confidence": 0.94,
+    "summary": "From text alone, the trace cites real tool outputs but does not justify why the later frames should control the answer when an earlier candidate frame in the same localized event shows a different count. The final choice A is therefore not adequately supported by the trace text."
+  },
+  "planner_output": {
+    "strategy": "Resolve the temporal-selection error by tightly localizing the exact moment of the protagonist being laughed at and then walking out of the store, and inspect a small chronological frame sweep around that validated exit moment instead of inferring that later sampled frames are automatically decisive.",
+    "tool_calls": [
+      {
+        "step": 1,
+        "tool": "temporal_grounder",
+        "arguments": {
+          "video_path": "video",
+          "query": "the protagonist being laughed at in the restaurant or store and then walking out of the entrance"
+        },
+        "purpose": "Find the most relevant bounded interval for the specific sequence named in the question, rather than relying on the earlier broad exit interval alone.",
+        "depends_on": []
+      },
+      {
+        "step": 2,
+        "tool": "dense_captioner",
+        "arguments": {
+          "video_path": "video",
+          "start_time": "<STEP_1:segments[0].start>",
+          "end_time": "<STEP_1:segments[0].end>",
+          "granularity": "frame"
+        },
+        "purpose": "Identify, within the localized interval, which sub-span actually shows the protagonist being laughed at and the immediate walk-out moment, so the answer is anchored to the correct phase of the event.",
+        "depends_on": [
+          1
+        ]
+      },
+      {
+        "step": 3,
+        "tool": "frame_retriever",
+        "arguments": {
+          "video_path": "video",
+          "query": null,
+          "timestamps": [
+            "<STEP_2:captioned_range.start>",
+            "<STEP_2:captions[0].end>",
+            "<STEP_2:captioned_range.end>"
+          ],
+          "num_frames": 3
+        },
+        "purpose": "Get chronological candidate frames spanning the grounded laugh-to-exit sequence, so the refiner can determine which frame corresponds to the actual walk-out moment instead of assuming one by rank or lateness.",
+        "depends_on": [
+          2
+        ]
+      },
+      {
+        "step": 4,
+        "tool": "counter",
+        "arguments": {
+          "frame_path": "<STEP_3:frames>",
+          "timestamp": null,
+          "query": "people standing behind the protagonist and holding mobile phones",
+          "exemplar_paths": null
+        },
+        "purpose": "Count phone-holding people behind the protagonist across the coherent candidate frame bundle and select the frame-level result that matches the validated walk-out moment.",
+        "depends_on": [
+          3
+        ]
+      }
+    ],
+    "refinement_instructions": "Replace the unsupported claim that the later sampled frames are 'decisive.' Use step 2 to identify which sub-interval/frame actually corresponds to the protagonist walking out after being laughed at; do not choose a frame merely because it is later in the interval. Then use the frame-level results from step 4, aligned to the step 3 timestamps, to cite the count for that specific walk-out frame only. If different sampled frames still correspond to different phases (laughed at inside vs exiting vs already outside), keep them separate and use only the one that matches the asked moment. Update the final answer if the validated walk-out frame's count differs from A."
+  },
+  "executed_tools": [
+    {
+      "step": 1,
+      "tool": "temporal_grounder",
+      "arguments": {
+        "query": "the protagonist being laughed at in the restaurant or store and then walking out of the entrance",
+        "video_path": "video"
+      },
+      "purpose": "Find the most relevant bounded interval for the specific sequence named in the question, rather than relying on the earlier broad exit interval alone.",
+      "depends_on": [],
+      "output": "The tool results for temporal_grounder({\"query\": \"the protagonist being laughed at in the restaurant or store and then walking out of the entrance\", \"video_path\": \"video\"}) are:\n{\"query\": \"the protagonist being laughed at in the restaurant or store and then walking out of the entrance\", \"segments\": [{\"start\": 45.0, \"end\": 55.0, \"confidence\": 0.51171875, \"embed_score\": 0.4992285370826721, \"rerank_score\": 0.51171875}, {\"start\": 40.0, \"end\": 50.0, \"confidence\": 0.29296875, \"embed_score\": 0.4276480972766876, \"rerank_score\": 0.29296875}, {\"start\": 65.0, \"end\": 75.0, \"confidence\": 0.2431640625, \"embed_score\": 0.44135379791259766, \"rerank_score\": 0.2431640625}, {\"start\": 50.0, \"end\": 60.0, \"confidence\": 0.18359375, \"embed_score\": 0.4949309825897217, \"rerank_score\": 0.18359375}, {\"start\": 70.0, \"end\": 80.0, \"confidence\": 0.1591796875, \"embed_score\": 0.46036070585250854, \"rerank_score\": 0.1591796875}, {\"start\": 25.0, \"end\": 35.0, \"confidence\": 0.07373046875, \"embed_score\": 0.450629860162735, \"rerank_score\": 0.07373046875}, {\"start\": 35.0, \"end\": 45.0, \"confidence\": 0.0634765625, \"embed_score\": 0.42387497425079346, \"rerank_score\": 0.0634765625}, {\"start\": 30.0, \"end\": 40.0, \"confidence\": 0.048828125, \"embed_score\": 0.4150625467300415, \"rerank_score\": 0.048828125}, {\"start\": 85.0, \"end\": 95.0, \"confidence\": 0.0174560546875, \"embed_score\": 0.3741297125816345, \"rerank_score\": 0.0174560546875}, {\"start\": 75.0, \"end\": 85.0, \"confidence\": 0.0145263671875, \"embed_score\": 0.40924757719039917, \"rerank_score\": 0.0145263671875}], \"initial_segments\": [{\"start\": 45.0, \"end\": 55.0, \"confidence\": 0.4992285370826721, \"embed_score\": 0.4992285370826721}, {\"start\": 50.0, \"end\": 60.0, \"confidence\": 0.4949309825897217, \"embed_score\": 0.4949309825897217}, {\"start\": 70.0, \"end\": 80.0, \"confidence\": 0.46036070585250854, \"embed_score\": 0.46036070585250854}, {\"start\": 25.0, \"end\": 35.0, \"confidence\": 0.450629860162735, \"embed_score\": 0.450629860162735}, {\"start\": 65.0, \"end\": 75.0, \"confidence\": 0.44135379791259766, \"embed_score\": 0.44135379791259766}, {\"start\": 40.0, \"end\": 50.0, \"confidence\": 0.4276480972766876, \"embed_score\": 0.4276480972766876}, {\"start\": 35.0, \"end\": 45.0, \"confidence\": 0.42387497425079346, \"embed_score\": 0.42387497425079346}, {\"start\": 30.0, \"end\": 40.0, \"confidence\": 0.4150625467300415, \"embed_score\": 0.4150625467300415}, {\"start\": 75.0, \"end\": 85.0, \"confidence\": 0.40924757719039917, \"embed_score\": 0.40924757719039917}, {\"start\": 85.0, \"end\": 95.0, \"confidence\": 0.3741297125816345, \"embed_score\": 0.3741297125816345}], \"reranked_segments\": [{\"start\": 45.0, \"end\": 55.0, \"confidence\": 0.51171875, \"embed_score\": 0.4992285370826721, \"rerank_score\": 0.51171875}, {\"start\": 40.0, \"end\": 50.0, \"confidence\": 0.29296875, \"embed_score\": 0.4276480972766876, \"rerank_score\": 0.29296875}, {\"start\": 65.0, \"end\": 75.0, \"confidence\": 0.2431640625, \"embed_score\": 0.44135379791259766, \"rerank_score\": 0.2431640625}, {\"start\": 50.0, \"end\": 60.0, \"confidence\": 0.18359375, \"embed_score\": 0.4949309825897217, \"rerank_score\": 0.18359375}, {\"start\": 70.0, \"end\": 80.0, \"confidence\": 0.1591796875, \"embed_score\": 0.46036070585250854, \"rerank_score\": 0.1591796875}, {\"start\": 25.0, \"end\": 35.0, \"confidence\": 0.07373046875, \"embed_score\": 0.450629860162735, \"rerank_score\": 0.07373046875}, {\"start\": 35.0, \"end\": 45.0, \"confidence\": 0.0634765625, \"embed_score\": 0.42387497425079346, \"rerank_score\": 0.0634765625}, {\"start\": 30.0, \"end\": 40.0, \"confidence\": 0.048828125, \"embed_score\": 0.4150625467300415, \"rerank_score\": 0.048828125}, {\"start\": 85.0, \"end\": 95.0, \"confidence\": 0.0174560546875, \"embed_score\": 0.3741297125816345, \"rerank_score\": 0.0174560546875}, {\"start\": 75.0, \"end\": 85.0, \"confidence\": 0.0145263671875, \"embed_score\": 0.40924757719039917, \"rerank_score\": 0.0145263671875}], \"video_duration\": 108.0, \"retrieval_backend\": \"qwen_embed_rerank\"}"
+    },
+    {
+      "step": 2,
+      "tool": "dense_captioner",
+      "arguments": {
+        "video_path": "video",
+        "start_time": 45.0,
+        "end_time": 55.0,
+        "granularity": "frame"
+      },
+      "purpose": "Identify, within the localized interval, which sub-span actually shows the protagonist being laughed at and the immediate walk-out moment, so the answer is anchored to the correct phase of the event.",
+      "depends_on": [
+        1
+      ],
+      "output": "The tool results for dense_captioner({\"video_path\": \"video\", \"start_time\": 45.0, \"end_time\": 55.0, \"granularity\": \"frame\"}) are:\n{\"video_duration\": 55.0, \"captioned_range\": {\"start\": 45.0, \"end\": 55.0}, \"captions\": [{\"start\": 45.0, \"end\": 45.1, \"visual\": \"A close-up shot of a character with purple hair and a green cap, viewed from the side. The character has a wide, slightly nervous smile and is looking towards the right of the frame. The background is a stylized, colorful interior, possibly a diner or restaurant, with pink booths and a light green wall.\", \"audio\": \"none\", \"on_screen_text\": \"none\", \"actions\": [\"The character is looking at something off-screen with a nervous expression.\"], \"objects\": [\"Character with purple hair and green cap\", \"Pink booth\", \"Light green wall\"]}, {\"start\": 45.1, \"end\": 45.2, \"visual\": \"The same character is now looking at a man in a light blue shirt who is standing and pointing directly at them with a wide, excited grin. A woman with purple hair sits to the right, smiling and looking at her phone. The scene is set in a diner with pink booths and a light green wall.\", \"audio\": \"none\", \"on_screen_text\": \"none\", \"actions\": [\"A man points at the character with an excited expression.\", \"A woman smiles while looking at her phone.\"], \"objects\": [\"Character with purple hair and green cap\", \"Man in light blue shirt\", \"Woman with purple hair\", \"Pink booth\", \"Light green wall\"]}, {\"start\": 45.2, \"end\": 45.3, \"visual\": \"The man in the light blue shirt continues to point at the character, now with his mouth open as if speaking or shouting. The character's expression remains nervous. The woman next to him is still smiling and looking at her phone. The scene is unchanged.\", \"audio\": \"none\", \"on_screen_text\": \"none\", \"actions\": [\"The man speaks or shouts while pointing.\", \"The character remains nervous.\"], \"objects\": [\"\"]}]}"
+    },
+    {
+      "step": 3,
+      "tool": "frame_retriever",
+      "arguments": {
+        "video_path": "video",
+        "timestamps": [
+          45.0,
+          45.1,
+          55.0
+        ],
+        "num_frames": 3
+      },
+      "purpose": "Get chronological candidate frames spanning the grounded laugh-to-exit sequence, so the refiner can determine which frame corresponds to the actual walk-out moment instead of assuming one by rank or lateness.",
+      "depends_on": [
+        2
+      ],
+      "output": "The tool results for frame_retriever({\"video_path\": \"video\", \"timestamps\": [45.0, 45.1, 55.0], \"num_frames\": 3}) are:\n{\"mode\": \"timestamp\", \"frames\": [{\"frame_path\": \"/fs/nexus-scratch/gnanesh/cot/cot/VideoDeepResearch/eval/data/dense_frames/video_18/frame_45.00.png\", \"timestamp\": 45.0}, {\"frame_path\": \"/fs/nexus-scratch/gnanesh/cot/cot/VideoDeepResearch/eval/data/dense_frames/video_18/frame_45.10.png\", \"timestamp\": 45.1}, {\"frame_path\": \"/fs/nexus-scratch/gnanesh/cot/cot/VideoDeepResearch/eval/data/dense_frames/video_18/frame_55.00.png\", \"timestamp\": 55.0}]}"
+    },
+    {
+      "step": 4,
+      "tool": "counter",
+      "arguments": {
+        "frame_path": [
+          {
+            "frame_path": "/fs/nexus-scratch/gnanesh/cot/cot/VideoDeepResearch/eval/data/dense_frames/video_18/frame_45.00.png",
+            "timestamp": 45.0
+          },
+          {
+            "frame_path": "/fs/nexus-scratch/gnanesh/cot/cot/VideoDeepResearch/eval/data/dense_frames/video_18/frame_45.10.png",
+            "timestamp": 45.1
+          },
+          {
+            "frame_path": "/fs/nexus-scratch/gnanesh/cot/cot/VideoDeepResearch/eval/data/dense_frames/video_18/frame_55.00.png",
+            "timestamp": 55.0
+          }
+        ],
+        "timestamp": null,
+        "query": "people standing behind the protagonist and holding mobile phones",
+        "exemplar_paths": null
+      },
+      "purpose": "Count phone-holding people behind the protagonist across the coherent candidate frame bundle and select the frame-level result that matches the validated walk-out moment.",
+      "depends_on": [
+        3
+      ],
+      "output": "The tool results for counter({\"frame_path\": [{\"frame_path\": \"/fs/nexus-scratch/gnanesh/cot/cot/VideoDeepResearch/eval/data/dense_frames/video_18/frame_45.00.png\", \"timestamp\": 45.0}, {\"frame_path\": \"/fs/nexus-scratch/gnanesh/cot/cot/VideoDeepResearch/eval/data/dense_frames/video_18/frame_45.10.png\", \"timestamp\": 45.1}, {\"frame_path\": \"/fs/nexus-scratch/gnanesh/cot/cot/VideoDeepResearch/eval/data/dense_frames/video_18/frame_55.00.png\", \"timestamp\": 55.0}], \"timestamp\": null, \"query\": \"people standing behind the protagonist and holding mobile phones\", \"exemplar_paths\": null}) are:\n{\"query\": \"people standing behind the protagonist and holding mobile phones\", \"frames\": [{\"frame_path\": \"/fs/nexus-scratch/gnanesh/cot/cot/VideoDeepResearch/eval/data/dense_frames/video_18/frame_45.00.png\", \"timestamp\": 45.0, \"query\": \"people standing behind the protagonist and holding mobile phones\", \"count\": 1, \"confidence\": 0.95, \"detections\": [{\"bbox\": [756, 388, 997, 788], \"instance_confidence\": 0.97}], \"notes\": \"\"}, {\"frame_path\": \"/fs/nexus-scratch/gnanesh/cot/cot/VideoDeepResearch/eval/data/dense_frames/video_18/frame_45.10.png\", \"timestamp\": 45.1, \"query\": \"people standing behind the protagonist and holding mobile phones\", \"count\": 1, \"confidence\": 0.95, \"detections\": [{\"bbox\": [756, 388, 998, 788], \"instance_confidence\": 0.97}], \"notes\": \"\"}, {\"frame_path\": \"/fs/nexus-scratch/gnanesh/cot/cot/VideoDeepResearch/eval/data/dense_frames/video_18/frame_55.00.png\", \"timestamp\": 55.0, \"query\": \"people standing behind the protagonist and holding mobile phones\", \"count\": 0, \"confidence\": 1.0, \"detections\": [], \"notes\": \"No people are visible standing behind the protagonist holding mobile phones. The background shows a starry night scene with robotic arms, but no individuals are present behind the central character.\"}], \"best_frame\": {\"frame_path\": \"/fs/nexus-scratch/gnanesh/cot/cot/VideoDeepResearch/eval/data/dense_frames/video_18/frame_55.00.png\", \"timestamp\": 55.0, \"query\": \"people standing behind the protagonist and holding mobile phones\", \"count\": 0, \"confidence\": 1.0, \"detections\": [], \"notes\": \"No people are visible standing behind the protagonist holding mobile phones. The background shows a starry night scene with robotic arms, but no individuals are present behind the central character.\"}, \"count\": 0, \"confidence\": 1.0, \"detections\": [], \"notes\": \"No people are visible standing behind the protagonist holding mobile phones. The background shows a starry night scene with robotic arms, but no individuals are present behind the central character.\", \"selection_reason\": \"Top-level fields mirror one high-salience candidate frame; inspect frames[] for all frame-level counting results.\"}"
+    }
+  ],
+  "refiner_output": {
+    "refined_trace": [
+      "temporal_grounder localizes the sequence \"being laughed at ... and then walking out of the entrance\" to 45.0-55.0s, with the top segment at confidence 0.5117.",
+      "dense_captioner on 45.0-45.3s shows the laughed-at phase inside the diner: at 45.1-45.2s a man in a light blue shirt points and grins at the protagonist, while a woman with purple hair is smiling and looking at her phone.",
+      "frame_retriever returns frame_45.00.png, frame_45.10.png, and frame_55.00.png to span that sequence, so 45.0-45.1s corresponds to the inside laughing scene and 55.0s is the candidate for the walk-out/afterward phase.",
+      "counter on the retrieved frames reports 1 phone-holder at 45.00s (confidence 0.95; detection bbox [756, 388, 997, 788]) and 1 at 45.10s (confidence 0.95; detection bbox [756, 388, 998, 788]), but 0 at frame_55.00.png (confidence 1.0), noting that no people are visible behind the protagonist there.",
+      "Because dense_captioner grounds 45.0-45.3s as the laughed-at interior moment, the asked moment \"walks out of the store after being laughed at\" aligns with the later frame_55.00.png rather than the earlier interior frames.",
+      "Therefore the count at the walk-out moment is 0, so the answer is A."
+    ],
+    "refined_answer": "A",
+    "answer_changed": false,
+    "changes_made": [
+      {
+        "operation": "PATCH_INFERENCE",
+        "step_index": 4,
+        "original": "Because the question asks about the protagonist walking out of the store, the later exit frames in the localized interval are the decisive evidence; in those frames there are no people behind the protagonist holding mobile phones.",
+        "replacement": "Because dense_captioner grounds 45.0-45.3s as the laughed-at interior moment, the asked moment \"walks out of the store after being laughed at\" aligns with the later frame_55.00.png rather than the earlier interior frames.",
+        "evidence_source": "TOOL_OUTPUTS Step 2 dense_captioner on 45.0-45.3s plus Step 3 frame_retriever timestamps and Step 4 counter frame-level results"
+      },
+      {
+        "operation": "PATCH_CLAIM",
+        "step_index": 3,
+        "original": "counter checks those candidate exit frames for \"people standing behind the protagonist and visibly holding mobile phones.\" At 47.0 s it finds 1 person holding a mobile phone (confidence 0.98), while at 50.0 s and 53.0 s it finds 0 such people (confidence 1.0 for both).",
+        "replacement": "counter on the retrieved frames reports 1 phone-holder at 45.00s (confidence 0.95; detection bbox [756, 388, 997, 788]) and 1 at 45.10s (confidence 0.95; detection bbox [756, 388, 998, 788]), but 0 at frame_55.00.png (confidence 1.0), noting that no people are visible behind the protagonist there.",
+        "evidence_source": "TOOL_OUTPUTS Step 4 counter on frame_45.00.png, frame_45.10.png, and frame_55.00.png"
+      },
+      {
+        "operation": "INSERT_STEP",
+        "step_index": 1,
+        "original": "",
+        "replacement": "dense_captioner on 45.0-45.3s shows the laughed-at phase inside the diner: at 45.1-45.2s a man in a light blue shirt points and grins at the protagonist, while a woman with purple hair is smiling and looking at her phone.",
+        "evidence_source": "TOOL_OUTPUTS Step 2 dense_captioner on 45.0-45.3s"
+      },
+      {
+        "operation": "PATCH_CLAIM",
+        "step_index": 2,
+        "original": "frame_retriever samples the key moments in that interval and returns frames at 47.0 s, 50.0 s, and 53.0 s as the most relevant views of the exit scene, with relevance scores 0.3230-0.3299.",
+        "replacement": "frame_retriever returns frame_45.00.png, frame_45.10.png, and frame_55.00.png to span that sequence, so 45.0-45.1s corresponds to the inside laughing scene and 55.0s is the candidate for the walk-out/afterward phase.",
+        "evidence_source": "TOOL_OUTPUTS Step 3 frame_retriever with timestamps 45.0, 45.1, and 55.0, interpreted with Step 2 dense_captioner"
+      }
+    ],
+    "unresolved_issues": []
+  },
+  "iteration_summary": {
+    "iteration": 1,
+    "verifier_verdict": "FAIL",
+    "tools_executed": [
+      {
+        "tool": "temporal_grounder",
+        "purpose": "Find the most relevant bounded interval for the specific sequence named in the question, rather than relying on the earlier broad exit interval alone.",
+        "confidence": 0.5117,
+        "resolved": false
+      },
+      {
+        "tool": "dense_captioner",
+        "purpose": "Identify, within the localized interval, which sub-span actually shows the protagonist being laughed at and the immediate walk-out moment, so the answer is anchored to the correct phase of the event.",
+        "confidence": 1.0,
+        "resolved": true
+      },
+      {
+        "tool": "frame_retriever",
+        "purpose": "Get chronological candidate frames spanning the grounded laugh-to-exit sequence, so the refiner can determine which frame corresponds to the actual walk-out moment instead of assuming one by rank or lateness.",
+        "confidence": 1.0,
+        "resolved": true
+      },
+      {
+        "tool": "counter",
+        "purpose": "Count phone-holding people behind the protagonist across the coherent candidate frame bundle and select the frame-level result that matches the validated walk-out moment.",
+        "confidence": 1.0,
+        "resolved": true
+      }
+    ],
+    "errors_fixed": [
+      "PATCH_INFERENCE step 4",
+      "PATCH_CLAIM step 3",
+      "INSERT_STEP step 1",
+      "PATCH_CLAIM step 2"
+    ],
+    "errors_remaining": [],
+    "answer_changed": false
+  }
+}
