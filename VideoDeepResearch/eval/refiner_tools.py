@@ -3519,6 +3519,17 @@ class RefinerToolsMixin:
         print("ordered_calls: ", ordered_calls)
         print("=" * 70 + "\n")
 
+        def _step_ref_to_num(ref: str):
+            if not isinstance(ref, str):
+                return None
+            match = self._STEP_REF_RE.fullmatch(ref.strip())
+            if not match:
+                return None
+            try:
+                return int(match.group(1))
+            except (TypeError, ValueError):
+                return None
+
         execution_results = []
         step_results: dict = {}  # step_num (int) → parsed JSON output for dep resolution
         fallback_step_results = dict(getattr(self, "_refinement_prev_step_results", {}) or {})
@@ -3547,6 +3558,7 @@ class RefinerToolsMixin:
                 fallback_step_results=fallback_step_results,
                 blocked_steps=current_plan_steps - set(step_results.keys()),
             )
+            args_dict = self._replace_runtime_placeholders(args_dict)
             args_dict = self._align_visual_tool_arguments(
                 tool_name,
                 args_dict,
@@ -3557,6 +3569,64 @@ class RefinerToolsMixin:
                 fallback_step_results=fallback_step_results,
                 fallback_step_tools=fallback_step_tools,
             )
+            args_dict = self._replace_runtime_placeholders(args_dict)
+
+            blocked_dependency_steps = sorted(
+                dep
+                for dep in depends_on
+                if isinstance(step_results.get(dep), dict)
+                and bool(step_results[dep].get("blocked_by_dependency"))
+            )
+            if blocked_dependency_steps:
+                result = self._dependency_blocked_result(
+                    tool_name,
+                    "upstream dependency did not execute successfully",
+                    blocked_steps=blocked_dependency_steps,
+                )
+                output = self._format_refine_tool_result(tool_name, args_dict, result)
+                if step_num:
+                    step_results[step_num] = result
+                execution_results.append(
+                    {
+                        "step": call.get("step"),
+                        "tool": tool_name,
+                        "arguments": args_dict,
+                        "purpose": call.get("purpose", ""),
+                        "depends_on": depends_on,
+                        "output": (output or "").strip(),
+                    }
+                )
+                continue
+
+            unresolved_refs = self._collect_unresolved_step_refs(args_dict)
+            if unresolved_refs:
+                blocked_steps = sorted(
+                    {
+                        step
+                        for step in (_step_ref_to_num(ref) for ref in unresolved_refs)
+                        if step is not None
+                    }
+                )
+                result = self._dependency_blocked_result(
+                    tool_name,
+                    "unresolved dependency outputs remain in arguments",
+                    blocked_steps=blocked_steps or None,
+                    unresolved_refs=unresolved_refs,
+                )
+                output = self._format_refine_tool_result(tool_name, args_dict, result)
+                if step_num:
+                    step_results[step_num] = result
+                execution_results.append(
+                    {
+                        "step": call.get("step"),
+                        "tool": tool_name,
+                        "arguments": args_dict,
+                        "purpose": call.get("purpose", ""),
+                        "depends_on": depends_on,
+                        "output": (output or "").strip(),
+                    }
+                )
+                continue
 
             tool_out_dir = None
             if ibase:
@@ -3570,13 +3640,16 @@ class RefinerToolsMixin:
             try:
                 args_dict = self._validate_tool_arguments(tool_name, args_dict)
             except Exception as e:
+                result = self._tool_validation_error_result(tool_name, e)
                 output = self._format_refine_tool_result(
                     tool_name,
                     args_dict,
-                    self._tool_validation_error_result(tool_name, e),
+                    result,
                 )
                 if tool_out_dir:
                     refiner_debug.write_text(tool_out_dir, "output.txt", (output or "").strip())
+                if step_num:
+                    step_results[step_num] = result
                 execution_results.append(
                     {
                         "step": call.get("step"),
@@ -3593,7 +3666,13 @@ class RefinerToolsMixin:
                 output = self._execute_refine_tool_call(tool_name, args_dict)
             except Exception as tool_exc:
                 print(f"  [Tool {step_num} {tool_name}] ERROR: {tool_exc}")
-                output = f"Error executing {tool_name}: {tool_exc}"
+                result = {
+                    "ok": False,
+                    "error": f"Error executing {tool_name}: {tool_exc}",
+                }
+                output = self._format_refine_tool_result(tool_name, args_dict, result)
+                if step_num:
+                    step_results[step_num] = result
             finally:
                 self._refinement_debug_vlm_outputs_dir = None
                 self._refinement_debug_vlm_input_basename = None

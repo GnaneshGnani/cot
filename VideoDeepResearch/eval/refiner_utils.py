@@ -13,6 +13,16 @@ from video_utils import extract_subtitles, robust_eval, timestamp_to_clip_path
 
 _UNRESOLVED_STEP_REF_RE = re.compile(r"<STEP_?\d+[:\.][^>]+>")
 _UNQUOTED_PLACEHOLDER_RE = re.compile(r'(?<!["\'])<[^<>\n]+>(?!["\'])')
+_VIDEO_PATH_PLACEHOLDERS = {
+    "VIDEO",
+    "<VIDEO>",
+    "VIDEO_PATH",
+    "<VIDEO_PATH>",
+    "$VIDEO",
+    "${VIDEO}",
+    "$VIDEO_PATH",
+    "${VIDEO_PATH}",
+}
 
 
 def _coerce_float_list(value):
@@ -678,6 +688,58 @@ class RefinerUtilsMixin:
                 for item in value
             ]
         return value
+
+    def _replace_runtime_placeholders(self, value):
+        """Replace generic runtime placeholders with concrete sample values."""
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped in _VIDEO_PATH_PLACEHOLDERS:
+                resolved_video_path = str(getattr(self, "video_path", "") or "").strip()
+                return resolved_video_path or value
+            return value
+        if isinstance(value, dict):
+            return {k: self._replace_runtime_placeholders(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._replace_runtime_placeholders(item) for item in value]
+        return value
+
+    def _collect_unresolved_step_refs(self, value, found=None):
+        if found is None:
+            found = []
+        if isinstance(value, str):
+            matches = _UNRESOLVED_STEP_REF_RE.findall(value)
+            for match in matches:
+                if match not in found:
+                    found.append(match)
+            return found
+        if isinstance(value, dict):
+            for item in value.values():
+                self._collect_unresolved_step_refs(item, found)
+            return found
+        if isinstance(value, list):
+            for item in value:
+                self._collect_unresolved_step_refs(item, found)
+            return found
+        return found
+
+    def _dependency_blocked_result(
+        self,
+        tool_name: str,
+        reason: str,
+        *,
+        blocked_steps: Optional[List[int]] = None,
+        unresolved_refs: Optional[List[str]] = None,
+    ) -> dict:
+        result = {
+            "ok": False,
+            "error": f"{tool_name} blocked: {reason}",
+            "blocked_by_dependency": True,
+        }
+        if blocked_steps:
+            result["blocked_steps"] = [int(step) for step in blocked_steps]
+        if unresolved_refs:
+            result["unresolved_references"] = list(unresolved_refs)
+        return result
 
     def _extract_json_payload(self, text):
         return self._extract_json_payload_with_schema(

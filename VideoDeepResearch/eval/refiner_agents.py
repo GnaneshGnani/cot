@@ -1306,10 +1306,30 @@ class RefinerAgentsMixin:
         arguments = tool_call.get("arguments", {})
         if not isinstance(arguments, dict):
             arguments = {}
+        arguments = self._replace_runtime_placeholders(arguments)
 
-        # Inject video_path if the tool expects it and it's not provided
-        if "video_path" in self._get_tool_argument_names(tool_name) and "video_path" not in arguments:
+        # Inject video_path if the tool expects it and it's missing or unresolved.
+        if "video_path" in self._get_tool_argument_names(tool_name) and not str(arguments.get("video_path", "") or "").strip():
             arguments["video_path"] = self.video_path
+
+        unresolved_refs = self._collect_unresolved_step_refs(arguments)
+        if unresolved_refs:
+            blocked_steps = []
+            for ref in unresolved_refs:
+                match = self._STEP_REF_RE.fullmatch(str(ref).strip())
+                if not match:
+                    continue
+                try:
+                    blocked_steps.append(int(match.group(1)))
+                except (TypeError, ValueError):
+                    continue
+            result = self._dependency_blocked_result(
+                tool_name,
+                "unresolved dependency outputs remain in arguments",
+                blocked_steps=sorted(set(blocked_steps)) or None,
+                unresolved_refs=unresolved_refs,
+            )
+            return self._format_refine_tool_result(tool_name, arguments, result)
 
         try:
             arguments = self._validate_tool_arguments(tool_name, arguments)
