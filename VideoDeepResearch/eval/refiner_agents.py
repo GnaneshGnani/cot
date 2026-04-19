@@ -1264,6 +1264,8 @@ class RefinerAgentsMixin:
                 "best possible trace and answer from the evidence collected so far."
             )
 
+        cached_summary = str(getattr(self, "_video_caption_summary", "") or "").strip()
+
         return (
             trace_generator_prompt.strip()
             + "\n\nQUESTION:\n"
@@ -1272,6 +1274,11 @@ class RefinerAgentsMixin:
             + str(self.video_path)
             + "\n\nVIDEO_DURATION:\n"
             + str(self.duration) + " seconds"
+            + (
+                "\n\nVIDEO_CAPTION_SUMMARY:\n" + cached_summary
+                if cached_summary
+                else ""
+            )
             + "\n\nROUND:\n"
             + f"{round_idx + 1}/{max_rounds}"
             + "\n\nPREVIOUS_TOOL_OUTPUTS:\n"
@@ -1306,10 +1313,30 @@ class RefinerAgentsMixin:
         arguments = tool_call.get("arguments", {})
         if not isinstance(arguments, dict):
             arguments = {}
+        arguments = self._replace_runtime_placeholders(arguments)
 
-        # Inject video_path if the tool expects it and it's not provided
-        if "video_path" in self._get_tool_argument_names(tool_name) and "video_path" not in arguments:
+        # Inject video_path if the tool expects it and it's missing or unresolved.
+        if "video_path" in self._get_tool_argument_names(tool_name) and not str(arguments.get("video_path", "") or "").strip():
             arguments["video_path"] = self.video_path
+
+        unresolved_refs = self._collect_unresolved_step_refs(arguments)
+        if unresolved_refs:
+            blocked_steps = []
+            for ref in unresolved_refs:
+                match = self._STEP_REF_RE.fullmatch(str(ref).strip())
+                if not match:
+                    continue
+                try:
+                    blocked_steps.append(int(match.group(1)))
+                except (TypeError, ValueError):
+                    continue
+            result = self._dependency_blocked_result(
+                tool_name,
+                "unresolved dependency outputs remain in arguments",
+                blocked_steps=sorted(set(blocked_steps)) or None,
+                unresolved_refs=unresolved_refs,
+            )
+            return self._format_refine_tool_result(tool_name, arguments, result)
 
         try:
             arguments = self._validate_tool_arguments(tool_name, arguments)
@@ -1338,17 +1365,95 @@ class RefinerAgentsMixin:
         }
         return known.get(tool_name, set())
 
+    def _generator_max_rounds(self) -> int:
+        raw = str(os.environ.get("TRACE_GENERATOR_MAX_ROUNDS", "") or "").strip()
+        try:
+            value = int(raw) if raw else 4
+        except Exception:
+            value = 4
+        return max(1, min(value, 8))
+
+    def _call_trace_generator_one_shot_fallback(self, generation_diagnosis: dict, debug_base: Path | None):
+        generation_record = {
+            "phase": "initial_trace_generation_fallback",
+            "diagnosis": generation_diagnosis,
+        }
+
+        print("[Generation Planner Fallback] Generating initial evidence plan...")
+        planner_raw, planner_output = self._call_planner(
+            [],
+            "",
+            generation_diagnosis,
+            iteration=0,
+            history=[],
+            max_iterations=1,
+        )
+        print(f"\n[Generation Planner Output]\n{planner_raw}\n")
+
+        print("[Generation Executor Fallback] Running planned tool calls...")
+        executed_tools = self._execute_refine_plan(planner_output if planner_output is not None else {})
+        for item in executed_tools:
+            print(f"  Step {item['step']} - {item['tool']}")
+
+        generation_planner_output = self._planner_output_for_initial_generation(planner_output)
+
+        print("[Generation Refiner Fallback] Synthesizing initial trace...")
+        refiner_raw, refiner_output = self._call_refiner(
+            [],
+            "",
+            generation_diagnosis,
+            executed_tools,
+            generation_planner_output,
+        )
+        print(f"\n[Generation Refiner Output]\n{refiner_raw}\n")
+
+        generated_steps = []
+        generated_answer = ""
+        if isinstance(refiner_output, dict):
+            generated_steps = self._normalize_refined_trace(
+                refiner_output.get("refined_trace"),
+                [],
+            )
+            raw_answer = refiner_output.get("refined_answer", "")
+            if raw_answer is not None and str(raw_answer).strip():
+                generated_answer = str(raw_answer).strip()
+            elif generated_steps:
+                generated_answer = (self._extract_trace_answer(generated_steps) or "").strip()
+
+        if not generated_steps:
+            generated_answer = ""
+            generated_steps = []
+            for item in executed_tools:
+                generated_steps.append(
+                    f"{item.get('tool', 'tool')} was called for {item.get('purpose', '')}. "
+                    f"Reported output: {str(item.get('output', '') or '')[:500]}"
+                )
+            generated_steps.append(
+                "Unable to synthesize a complete initial trace from the gathered evidence."
+            )
+
+        generation_record.update(
+            {
+                "planner_raw": planner_raw,
+                "planner_output": planner_output,
+                "executed_tools": executed_tools,
+                "refiner_raw": refiner_raw,
+                "refiner_output": refiner_output,
+            }
+        )
+        if debug_base:
+            refiner_debug.write_json(debug_base, "generation_fallback_summary.json", generation_record)
+        return generated_steps, generated_answer, generation_record
+
     def _call_trace_generator(self):
-        """Planner-backed trace generation from an empty initial trace."""
+        """Iterative trace generation from an empty initial trace, with planner fallback."""
         print("\n" + "=" * 70)
         print("Starting Trace Generation (cold-start, no initial trace)")
         print("=" * 70 + "\n")
 
         generation_diagnosis = self._build_initial_generation_diagnosis()
-        generation_record = {
-            "phase": "initial_trace_generation",
-            "diagnosis": generation_diagnosis,
-        }
+        generation_rounds = []
+        tool_outputs_so_far = []
 
         prev_iter_dir = getattr(self, "_refinement_debug_iter_dir", None)
         debug_base = None
@@ -1360,71 +1465,101 @@ class RefinerAgentsMixin:
                 self._refinement_debug_iter_dir = str(debug_base)
 
         try:
-            print("[Generation Planner] Generating initial evidence plan...")
-            planner_raw, planner_output = self._call_planner(
-                [],
-                "",
-                generation_diagnosis,
-                iteration=0,
-                history=[],
-                max_iterations=1,
-            )
-            print(f"\n[Generation Planner Output]\n{planner_raw}\n")
+            max_rounds = self._generator_max_rounds()
+            messages = None
 
-            print("[Generation Executor] Running planned tool calls...")
-            executed_tools = self._execute_refine_plan(planner_output if planner_output is not None else {})
-            for item in executed_tools:
-                print(f"  Step {item['step']} - {item['tool']}")
-
-            generation_planner_output = self._planner_output_for_initial_generation(planner_output)
-
-            print("[Generation Refiner] Synthesizing initial trace...")
-            refiner_raw, refiner_output = self._call_refiner(
-                [],
-                "",
-                generation_diagnosis,
-                executed_tools,
-                generation_planner_output,
-            )
-            print(f"\n[Generation Refiner Output]\n{refiner_raw}\n")
-
-            generated_steps = []
-            generated_answer = ""
-            if isinstance(refiner_output, dict):
-                generated_steps = self._normalize_refined_trace(
-                    refiner_output.get("refined_trace"),
-                    [],
+            for round_idx in range(max_rounds):
+                prompt = self._build_generator_round_prompt(round_idx, max_rounds, tool_outputs_so_far)
+                messages = [{"role": "user", "content": prompt}]
+                print(f"[Generation Round {round_idx + 1}/{max_rounds}] Requesting next action...")
+                generator_raw = self._text2text(
+                    messages,
+                    self.planner_model_name,
+                    self.planner_api_base,
+                    self.planner_api_keys,
                 )
-                raw_answer = refiner_output.get("refined_answer", "")
-                if raw_answer is not None and str(raw_answer).strip():
-                    generated_answer = str(raw_answer).strip()
-                elif generated_steps:
-                    generated_answer = (self._extract_trace_answer(generated_steps) or "").strip()
+                generator_output = self._extract_generator_output(generator_raw)
 
-            if not generated_steps:
-                generated_answer = ""
-                generated_steps = []
-                for item in executed_tools:
-                    generated_steps.append(
-                        f"{item.get('tool', 'tool')} was called for {item.get('purpose', '')}. "
-                        f"Reported output: {str(item.get('output', '') or '')[:500]}"
+                repaired_raw = ""
+                if generator_output is None and str(generator_raw or "").strip():
+                    repaired_raw = self._retry_malformed_json_response(
+                        generator_raw,
+                        self.planner_model_name,
+                        self.planner_api_base,
+                        self.planner_api_keys,
+                        "trace generator response",
+                        required_keys=["type"],
                     )
-                generated_steps.append(
-                    "Unable to synthesize a complete initial trace from the gathered evidence."
-                )
+                    generator_output = self._extract_generator_output(repaired_raw)
 
-            generation_record.update(
-                {
-                    "planner_raw": planner_raw,
-                    "planner_output": planner_output,
-                    "executed_tools": executed_tools,
-                    "refiner_raw": refiner_raw,
-                    "refiner_output": refiner_output,
+                round_record = {
+                    "round": round_idx + 1,
+                    "prompt": prompt,
+                    "generator_raw": generator_raw,
+                    "generator_repair_raw": repaired_raw,
+                    "generator_output": generator_output,
                 }
-            )
-            if debug_base:
-                refiner_debug.write_json(debug_base, "generation_summary.json", generation_record)
 
-            return generated_steps, generated_answer, [generation_record]
+                if generator_output is None:
+                    generation_rounds.append(round_record)
+                    print("[Generation] Could not parse generator JSON; falling back to planner/refiner path.")
+                    break
+
+                if generator_output.get("type") == "tool_call":
+                    executed_output = self._execute_single_tool_call(generator_output)
+                    executed_record = {
+                        "tool": generator_output.get("tool", ""),
+                        "arguments": dict(generator_output.get("arguments") or {}),
+                        "purpose": generator_output.get("purpose", ""),
+                        "output": executed_output,
+                    }
+                    tool_outputs_so_far.append(executed_record)
+                    round_record["executed_tool"] = executed_record
+                    generation_rounds.append(round_record)
+                    if debug_base:
+                        refiner_debug.write_json(
+                            debug_base,
+                            f"round_{round_idx + 1}.json",
+                            round_record,
+                        )
+                    continue
+
+                trace_steps = self._normalize_refined_trace(generator_output.get("trace_steps"), [])
+                trace_answer = str(generator_output.get("answer", "") or "").strip()
+                if not trace_answer and trace_steps:
+                    trace_answer = (self._extract_trace_answer(trace_steps) or "").strip()
+                round_record["final_trace"] = {"steps": trace_steps, "answer": trace_answer}
+                generation_rounds.append(round_record)
+                if debug_base:
+                    refiner_debug.write_json(
+                        debug_base,
+                        f"round_{round_idx + 1}.json",
+                        round_record,
+                    )
+
+                if trace_steps:
+                    if debug_base:
+                        refiner_debug.write_json(
+                            debug_base,
+                            "generation_summary.json",
+                            {"mode": "iterative", "rounds": generation_rounds},
+                        )
+                    return trace_steps, trace_answer, generation_rounds
+
+                print("[Generation] Trace output was empty; falling back to planner/refiner path.")
+                break
+
+            generated_steps, generated_answer, fallback_record = self._call_trace_generator_one_shot_fallback(
+                generation_diagnosis,
+                debug_base,
+            )
+            generation_rounds.append(fallback_record)
+            if debug_base:
+                refiner_debug.write_json(
+                    debug_base,
+                    "generation_summary.json",
+                    {"mode": "iterative_with_fallback", "rounds": generation_rounds},
+                )
+            return generated_steps, generated_answer, generation_rounds
         finally:
             self._refinement_debug_iter_dir = prev_iter_dir

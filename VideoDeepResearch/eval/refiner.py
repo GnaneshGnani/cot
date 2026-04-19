@@ -1099,6 +1099,11 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
 
         final_verifier_raw = None
         final_verifier_output = None
+        last_verified_trace = {"steps": list(current_trace)}
+        last_verified_answer = current_answer
+        completed_refinement_iterations = 0
+        terminal_stage = "generated" if generated_trace_info is not None else "input"
+        final_unresolved_issues = []
 
         debug_resolved = self._ensure_refinement_debug_session_base()
 
@@ -1114,6 +1119,8 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
                 self._refinement_debug_iter_dir = None
 
             print("[Verifier] Generating diagnosis...")
+            last_verified_trace = {"steps": list(current_trace)}
+            last_verified_answer = current_answer
             verifier_raw, verifier_output = self._call_verifier(
                 current_trace,
                 current_answer,
@@ -1161,6 +1168,13 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
                 current_trace = self._normalize_refined_trace(new_trace, current_trace)
                 if new_answer is not None and str(new_answer).strip():
                     current_answer = str(new_answer).strip()
+                final_unresolved_issues = [
+                    str(item).strip()
+                    for item in (refiner_output.get("unresolved_issues") or [])
+                    if str(item).strip()
+                ]
+            completed_refinement_iterations = iteration + 1
+            terminal_stage = f"refinement_{iteration + 1}"
 
             summary = self._compact_iteration_summary(
                 iteration, verifier_output, refiner_output, executed_tools
@@ -1187,6 +1201,9 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
         # Resolve bare MCQ letters (e.g. "A") to full option text so that
         # downstream comparisons work correctly for MCQ questions.
         resolved_answer = self._resolve_mcq_answer(current_answer)
+        if resolved_answer and self._trace_has_unresolved_conclusion(current_trace, final_unresolved_issues):
+            print("[Final Answer] Trace remains unresolved; clearing unsupported final answer.")
+            resolved_answer = ""
         is_correct = self._answers_match(resolved_answer, self.answer or "") if self.answer else None
 
         return {
@@ -1198,6 +1215,13 @@ class VideoQADemo(RefinerUtilsMixin, RefinerToolsMixin, RefinerAgentsMixin):
             "is_correct": is_correct,
             "verifier_raw": final_verifier_raw,
             "verifier_output": final_verifier_output,
+            "final_verifier_raw": final_verifier_raw,
+            "final_verifier_output": final_verifier_output,
+            "last_verified_trace": last_verified_trace,
+            "last_verified_answer": last_verified_answer,
+            "completed_refinement_iterations": completed_refinement_iterations,
+            "terminal_stage": terminal_stage,
+            "final_unresolved_issues": final_unresolved_issues,
             "max_iterations": max_iterations,
             "refinement_debug_root": debug_resolved,
         }
@@ -1346,6 +1370,15 @@ def main():
                     "final_trace": rr.get("final_trace"),
                     "final_answer": rr.get("final_answer"),
                     "is_correct": rr.get("is_correct"),
+                    "verifier_raw": rr.get("verifier_raw"),
+                    "verifier_output": rr.get("verifier_output"),
+                    "final_verifier_raw": rr.get("final_verifier_raw", rr.get("verifier_raw")),
+                    "final_verifier_output": rr.get("final_verifier_output", rr.get("verifier_output")),
+                    "last_verified_trace": rr.get("last_verified_trace"),
+                    "last_verified_answer": rr.get("last_verified_answer"),
+                    "completed_refinement_iterations": rr.get("completed_refinement_iterations"),
+                    "terminal_stage": rr.get("terminal_stage"),
+                    "final_unresolved_issues": rr.get("final_unresolved_issues"),
                     "max_iterations": rr.get("max_iterations"),
                     "refinement_debug_root": rr.get("refinement_debug_root"),
                 }
@@ -1355,7 +1388,7 @@ def main():
         _write_json(out_dir / "meta.json", meta)
         return out_dir
 
-    for index, item in enumerate(data[20:21], start=1):
+    for index, item in enumerate(data, start=1):
         record = dict(item)
         video_path = str(item.get("video_path", "")).strip()
         question = str(item.get("question", "")).strip()

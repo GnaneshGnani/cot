@@ -12,6 +12,16 @@ from video_utils import extract_subtitles, robust_eval, timestamp_to_clip_path
 
 _UNRESOLVED_STEP_REF_RE = re.compile(r"<STEP_?\d+[:\.][^>]+>")
 _UNQUOTED_PLACEHOLDER_RE = re.compile(r'(?<!["\'])<[^<>\n]+>(?!["\'])')
+_VIDEO_PATH_PLACEHOLDERS = {
+    "VIDEO",
+    "<VIDEO>",
+    "VIDEO_PATH",
+    "<VIDEO_PATH>",
+    "$VIDEO",
+    "${VIDEO}",
+    "$VIDEO_PATH",
+    "${VIDEO_PATH}",
+}
 
 
 def _coerce_float_list(value):
@@ -446,6 +456,23 @@ def openai_chat_temperature_kwargs(model_name: str, temperature: float) -> dict:
 
 
 class RefinerUtilsMixin:
+    _UNRESOLVED_TRACE_PATTERNS = [
+        re.compile(r"\bambiguous\b", flags=re.IGNORECASE),
+        re.compile(r"\bunclear\b", flags=re.IGNORECASE),
+        re.compile(r"\bunsupported\b", flags=re.IGNORECASE),
+        re.compile(r"\bunresolved\b", flags=re.IGNORECASE),
+        re.compile(r"\binsufficient evidence\b", flags=re.IGNORECASE),
+        re.compile(r"\bnot enough evidence\b", flags=re.IGNORECASE),
+        re.compile(r"\bcannot determine\b", flags=re.IGNORECASE),
+        re.compile(r"\bcan't determine\b", flags=re.IGNORECASE),
+        re.compile(r"\bunable to determine\b", flags=re.IGNORECASE),
+        re.compile(r"\bcannot be determined\b", flags=re.IGNORECASE),
+        re.compile(r"\bcannot be verified\b", flags=re.IGNORECASE),
+        re.compile(r"\bnot visible\b", flags=re.IGNORECASE),
+        re.compile(r"\bnot grounded\b", flags=re.IGNORECASE),
+        re.compile(r"\bnot localized\b", flags=re.IGNORECASE),
+    ]
+
     def _safe_float(self, value, default=None):
         try:
             return float(value)
@@ -609,6 +636,58 @@ class RefinerUtilsMixin:
             ]
         return value
 
+    def _replace_runtime_placeholders(self, value):
+        """Replace generic runtime placeholders with concrete sample values."""
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped in _VIDEO_PATH_PLACEHOLDERS:
+                resolved_video_path = str(getattr(self, "video_path", "") or "").strip()
+                return resolved_video_path or value
+            return value
+        if isinstance(value, dict):
+            return {k: self._replace_runtime_placeholders(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._replace_runtime_placeholders(item) for item in value]
+        return value
+
+    def _collect_unresolved_step_refs(self, value, found=None):
+        if found is None:
+            found = []
+        if isinstance(value, str):
+            matches = _UNRESOLVED_STEP_REF_RE.findall(value)
+            for match in matches:
+                if match not in found:
+                    found.append(match)
+            return found
+        if isinstance(value, dict):
+            for item in value.values():
+                self._collect_unresolved_step_refs(item, found)
+            return found
+        if isinstance(value, list):
+            for item in value:
+                self._collect_unresolved_step_refs(item, found)
+            return found
+        return found
+
+    def _dependency_blocked_result(
+        self,
+        tool_name: str,
+        reason: str,
+        *,
+        blocked_steps: Optional[List[int]] = None,
+        unresolved_refs: Optional[List[str]] = None,
+    ) -> dict:
+        result = {
+            "ok": False,
+            "error": f"{tool_name} blocked: {reason}",
+            "blocked_by_dependency": True,
+        }
+        if blocked_steps:
+            result["blocked_steps"] = [int(step) for step in blocked_steps]
+        if unresolved_refs:
+            result["unresolved_references"] = list(unresolved_refs)
+        return result
+
     def _extract_json_payload(self, text):
         return self._extract_json_payload_with_schema(
             text,
@@ -677,6 +756,36 @@ class RefinerUtilsMixin:
 
         repaired += "".join("}" if opener == "{" else "]" for opener in reversed(stack))
         return repaired
+
+    def _extract_top_level_json_values(self, text) -> list:
+        if not isinstance(text, str):
+            return []
+
+        values = []
+        decoder = json.JSONDecoder()
+        length = len(text)
+        idx = 0
+        while idx < length:
+            while idx < length and text[idx].isspace():
+                idx += 1
+            if idx >= length:
+                break
+
+            next_starts = [pos for pos in (text.find("{", idx), text.find("[", idx)) if pos != -1]
+            if not next_starts:
+                break
+            idx = min(next_starts)
+
+            try:
+                value, end = decoder.raw_decode(text[idx:])
+            except Exception:
+                idx += 1
+                continue
+
+            values.append(value)
+            idx += max(end, 1)
+
+        return values
 
     def _validate_json_payload(self, payload, model_cls=None):
         if model_cls is None:
@@ -754,6 +863,11 @@ class RefinerUtilsMixin:
                     validated = self._validate_json_payload(parsed, model_cls)
                     if validated is not None:
                         return validated
+
+        for value in self._extract_top_level_json_values(text):
+            validated = self._validate_json_payload(value, model_cls)
+            if validated is not None:
+                return validated
         return None
 
     def _extract_planner_payload(self, text):
@@ -1253,3 +1367,17 @@ class RefinerUtilsMixin:
             if match:
                 return match.group(1).strip()
         return ""
+
+    def _trace_has_unresolved_conclusion(self, trace_steps: list, unresolved_issues: list | None = None) -> bool:
+        issues = [str(item).strip() for item in (unresolved_issues or []) if str(item).strip()]
+        if issues:
+            return True
+
+        joined = "\n".join(str(step).strip() for step in (trace_steps or []) if str(step).strip())
+        if not joined:
+            return False
+
+        for pattern in self._UNRESOLVED_TRACE_PATTERNS:
+            if pattern.search(joined):
+                return True
+        return False
